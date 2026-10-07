@@ -1,9 +1,9 @@
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts b/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts
 new file mode 100644
-index 00000000..dc83368d
+index 00000000..e80024a8
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,114 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -12,7 +12,8 @@ index 00000000..dc83368d
 +// Agent review wiring. The built-in agent-review extension (which hosts the review engine) talks to
 +// this contribution through internal commands, so no extension-host protocol changes are needed:
 +//   extension -> core: `_agentReview.setBaseline(uri, baselineText, kind)`, `_agentReview.remove(uri)`, `_agentReview.clear()`
-+//   core -> extension: `agentReview.ext.onDidHunkAction({ uri, kind, baseline? })`
++//   core -> extension: `agentReview.ext.onDidHunkAction({ uri, kind, baseline? })`,
++//                      `agentReview.ext.onWillWrite({ uri, userVersion, version })` (see agentReviewSaveParticipant.ts)
 +// A typed proposed API can replace the commands later.
 +
 +import './media/agentReview.css';
@@ -30,6 +31,7 @@ index 00000000..dc83368d
 +import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 +import { IEditorService } from '../../../services/editor/common/editorService.js';
 +import { AgentReviewKind } from './agentReviewEntry.js';
++import { AgentReviewSaveParticipants } from './agentReviewSaveParticipant.js';
 +import { AgentReviewService, IAgentReviewService } from './agentReviewService.js';
 +
 +registerSingleton(IAgentReviewService, AgentReviewService, InstantiationType.Delayed);
@@ -64,6 +66,9 @@ index 00000000..dc83368d
 +	}
 +}
 +registerWorkbenchContribution2(AgentReviewBridge.ID, AgentReviewBridge, WorkbenchPhase.AfterRestored);
++
++// Tells the extension which buffer edits of a save were made by save participants (formatters), not the user.
++registerWorkbenchContribution2(AgentReviewSaveParticipants.ID, AgentReviewSaveParticipants, WorkbenchPhase.BlockRestore);
 +
 +/**
 + * Keeps `agentReview.isActive` in sync with the active editor, and marks code editors that show a
@@ -359,6 +364,94 @@ index 00000000..2e161091
 +	createEditorIntegration(codeEditor: ICodeEditor): ChatEditingCodeEditorIntegration {
 +		// renderDiffImmediately=true: there is no "streaming" phase for agent review.
 +		return this._instantiationService.createInstance(ChatEditingCodeEditorIntegration, this, codeEditor, this.diffInfo, true);
++	}
++}
+diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewSaveParticipant.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewSaveParticipant.ts
+new file mode 100644
+index 00000000..341604e2
+--- /dev/null
++++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewSaveParticipant.ts
+@@ -0,0 +1,82 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++// Agent review: attribution of edits made while a file is being saved. Save participants (format on
++// save, code actions on save, trim whitespace, other extensions' onWillSave edits) run in registration
++// order, and the extension host's participant usually runs after the core ones. So by the time the
++// agent-review extension hears about a save, formatter edits are already in the buffer and look like
++// the user's typing.
++//
++// Two participants bracket all others: the first records the model's version before any participant
++// runs; the last tells the extension `agentReview.ext.onWillWrite({ uri, userVersion, version })`
++// right before the write. Buffer edits after `userVersion` were made by the editor during the save,
++// not by the user: the engine keeps them pending inside agent hunks and folds them in elsewhere.
++
++import { raceTimeout } from '../../../../base/common/async.js';
++import { Disposable } from '../../../../base/common/lifecycle.js';
++import { ResourceMap } from '../../../../base/common/map.js';
++import { URI } from '../../../../base/common/uri.js';
++import { ICommandService } from '../../../../platform/commands/common/commands.js';
++import { ILogService } from '../../../../platform/log/common/log.js';
++import { IWorkbenchContribution } from '../../../common/contributions.js';
++import { ITextFileEditorModel, ITextFileService } from '../../../services/textfile/common/textfiles.js';
++
++/** Payload of `agentReview.ext.onWillWrite`. */
++export interface IAgentReviewWillWriteEvent {
++	readonly uri: URI;
++	/** Model version before save participants ran: edits up to here are the user's. */
++	readonly userVersion: number;
++	/** Model version about to be written. */
++	readonly version: number;
++}
++
++/** Same budget the extension host gets for onWillSaveTextDocument. */
++const WILL_WRITE_TIMEOUT_MS = 1750;
++
++export class AgentReviewSaveParticipants extends Disposable implements IWorkbenchContribution {
++
++	static readonly ID = 'workbench.contrib.agentReviewSaveParticipants';
++	static readonly FIRST = -1_000_000;
++	static readonly LAST = 1_000_000;
++
++	private readonly _userVersions = new ResourceMap<number>();
++
++	constructor(
++		@ITextFileService textFileService: ITextFileService,
++		@ICommandService private readonly _commandService: ICommandService,
++		@ILogService private readonly _logService: ILogService,
++	) {
++		super();
++		this._register(textFileService.files.addSaveParticipant({
++			ordinal: AgentReviewSaveParticipants.FIRST,
++			participate: async model => this._willParticipate(model),
++		}));
++		this._register(textFileService.files.addSaveParticipant({
++			ordinal: AgentReviewSaveParticipants.LAST,
++			participate: model => this._willWrite(model),
++		}));
++	}
++
++	private _willParticipate(model: ITextFileEditorModel): void {
++		if (model.textEditorModel) {
++			this._userVersions.set(model.resource, model.textEditorModel.getVersionId());
++		}
++	}
++
++	private async _willWrite(model: ITextFileEditorModel): Promise<void> {
++		const userVersion = this._userVersions.get(model.resource);
++		this._userVersions.delete(model.resource);
++		if (userVersion === undefined || !model.textEditorModel) {
++			return;
++		}
++		const event: IAgentReviewWillWriteEvent = { uri: model.resource, userVersion, version: model.textEditorModel.getVersionId() };
++		try {
++			// Bounded: a slow or missing extension must never block saving.
++			await raceTimeout(this._commandService.executeCommand('agentReview.ext.onWillWrite', event), WILL_WRITE_TIMEOUT_MS);
++		} catch (err) {
++			this._logService.trace('[agentReview] onWillWrite not delivered', err);
++		}
 +	}
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts
@@ -833,6 +926,135 @@ index 00000000..dd2fe95b
 +		model.applyEdits([EditOperation.replace(new Range(1, 1, 1, 6), 'Opening')]);
 +		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 && entry.originalModel.getValue().startsWith('Opening') ? d : undefined));
 +		assert.ok(entry.originalModel.getValue().startsWith('Opening sentence.'));
++	});
++});
+diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReviewSaveParticipant.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReviewSaveParticipant.test.ts
+new file mode 100644
+index 00000000..5c7bac64
+--- /dev/null
++++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReviewSaveParticipant.test.ts
+@@ -0,0 +1,123 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++// Agent review save attribution with format on save enabled: the real save participants (including
++// FormatOnSaveParticipant and a registered formatter) run between our first and last participants, so
++// the extension learns which buffer versions were the user's and which were made by the formatter.
++
++import assert from 'assert';
++import { DisposableStore } from '../../../../../base/common/lifecycle.js';
++import { URI } from '../../../../../base/common/uri.js';
++import { ensureNoDisposablesAreLeakedInTestSuite, toResource } from '../../../../../base/test/common/utils.js';
++import { EditOperation } from '../../../../../editor/common/core/editOperation.js';
++import { Range } from '../../../../../editor/common/core/range.js';
++import { TextEdit } from '../../../../../editor/common/languages.js';
++import { IEditorWorkerService } from '../../../../../editor/common/services/editorWorker.js';
++import { ILanguageFeaturesService } from '../../../../../editor/common/services/languageFeatures.js';
++import { FormattingConflicts } from '../../../../../editor/contrib/format/browser/format.js';
++import { TestCommandService } from '../../../../../editor/test/browser/editorTestServices.js';
++import { TestEditorWorkerService } from '../../../../../editor/test/common/services/testEditorWorkerService.js';
++import { CommandsRegistry, ICommandService } from '../../../../../platform/commands/common/commands.js';
++import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
++import { SaveReason } from '../../../../common/editor.js';
++import { TextFileEditorModel } from '../../../../services/textfile/common/textFileEditorModel.js';
++import { TextFileEditorModelManager } from '../../../../services/textfile/common/textFileEditorModelManager.js';
++import { IResolvedTextFileEditorModel, ITextFileSaveParticipant } from '../../../../services/textfile/common/textfiles.js';
++import { TestServiceAccessor, workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
++import { SaveParticipantsContribution } from '../../../codeEditor/browser/saveParticipants.js';
++import { AgentReviewSaveParticipants, IAgentReviewWillWriteEvent } from '../../browser/agentReviewSaveParticipant.js';
++
++suite('AgentReview: save attribution with format on save', () => {
++
++	const disposables = new DisposableStore();
++	let instantiationService: TestInstantiationService;
++	let accessor: TestServiceAccessor;
++	let events: { event: IAgentReviewWillWriteEvent; text: string }[];
++	let model: IResolvedTextFileEditorModel;
++
++	setup(async function () {
++		events = [];
++		instantiationService = workbenchInstantiationService(undefined, disposables);
++		accessor = instantiationService.createInstance(TestServiceAccessor);
++		instantiationService.stub(ICommandService, new TestCommandService(instantiationService));
++		instantiationService.stub(IEditorWorkerService, new class extends TestEditorWorkerService {
++			override async computeMoreMinimalEdits(_resource: URI, edits: TextEdit[] | null | undefined) { return edits ?? undefined; }
++		});
++		disposables.add(<TextFileEditorModelManager>accessor.textFileService.files);
++
++		// Format on save: on, whole file, with a formatter that normalizes `a=b` to `a = b`.
++		accessor.testConfigurationService.setUserConfiguration('editor', { formatOnSave: true, formatOnSaveMode: 'file' });
++		disposables.add(instantiationService.invokeFunction(a => a.get(ILanguageFeaturesService)).documentFormattingEditProvider.register('*', {
++			provideDocumentFormattingEdits: m => {
++				const edits = [];
++				for (let line = 1; line <= m.getLineCount(); line++) {
++					const text = m.getLineContent(line);
++					const formatted = text.replace(/\s*=\s*/, ' = ');
++					if (formatted !== text) {
++						edits.push({ range: new Range(line, 1, line, text.length + 1), text: formatted });
++					}
++				}
++				return edits;
++			}
++		}));
++
++		// The workbench installs a selector that picks the default formatter; take the only one.
++		disposables.add(FormattingConflicts.setFormatterSelector(async formatters => formatters[0]));
++
++		// The real core save participants (format on save, trim whitespace, ...), then ours.
++		disposables.add(instantiationService.createInstance(SaveParticipantsContribution));
++		disposables.add(instantiationService.createInstance(AgentReviewSaveParticipants));
++
++		disposables.add(CommandsRegistry.registerCommand('agentReview.ext.onWillWrite', (_accessor, event: IAgentReviewWillWriteEvent) => {
++			events.push({ event, text: model.textEditorModel.getValue() });
++		}));
++
++		model = disposables.add(instantiationService.createInstance(TextFileEditorModel, toResource.call(this, '/path/settings.ini'), 'utf8', undefined) as IResolvedTextFileEditorModel);
++		await model.resolve();
++		model.textEditorModel.setValue('alpha=1\nbeta = 2\n');
++		await model.save({ reason: SaveReason.EXPLICIT });
++		events.length = 0;
++	});
++
++	teardown(() => disposables.clear());
++
++	ensureNoDisposablesAreLeakedInTestSuite();
++
++	test('the formatter runs between the user version and the written version', async () => {
++		// The user edits line 2 by hand (unformatted); format on save then rewrites it.
++		model.textEditorModel.applyEdits([EditOperation.replace(new Range(2, 1, 2, 9), 'gamma=3')]);
++		const userVersion = model.textEditorModel.getVersionId();
++		await model.save({ reason: SaveReason.EXPLICIT });
++
++		assert.strictEqual(events.length, 1);
++		const [{ event, text }] = events;
++		assert.strictEqual(event.uri.toString(), model.resource.toString());
++		assert.strictEqual(event.userVersion, userVersion, 'the version before save participants is the last user edit');
++		assert.ok(event.version > userVersion, 'the formatter edit comes after the user version');
++		assert.strictEqual(event.version, model.textEditorModel.getVersionId(), 'nothing changes after the report');
++		assert.strictEqual(text, 'alpha = 1\ngamma = 3\n', 'reported right before the write, with the formatter edits applied');
++	});
++
++	test('runs after participants added later, so their edits are reported too', async () => {
++		const late: ITextFileSaveParticipant = {
++			participate: async m => { m.textEditorModel?.applyEdits([EditOperation.insert(m.textEditorModel.getFullModelRange().getEndPosition(), '# end\n')]); }
++		};
++		disposables.add(accessor.textFileService.files.addSaveParticipant(late));
++		model.textEditorModel.applyEdits([EditOperation.insert(model.textEditorModel.getFullModelRange().getEndPosition(), 'delta = 4\n')]);
++		const userVersion = model.textEditorModel.getVersionId();
++		await model.save({ reason: SaveReason.EXPLICIT });
++
++		assert.strictEqual(events.length, 1);
++		assert.strictEqual(events[0].event.userVersion, userVersion);
++		assert.strictEqual(events[0].text, 'alpha = 1\nbeta = 2\ndelta = 4\n# end\n');
++	});
++
++	test('saves that skip participants (an Undo in the review UI) are not reported', async () => {
++		model.textEditorModel.setValue('alpha=1\n');
++		await model.save({ reason: SaveReason.EXPLICIT, skipSaveParticipants: true });
++		assert.deepStrictEqual(events, []);
++		assert.strictEqual(model.textEditorModel.getValue(), 'alpha=1\n');
 +	});
 +});
 diff --git a/src/vs/workbench/workbench.common.main.ts b/src/vs/workbench/workbench.common.main.ts

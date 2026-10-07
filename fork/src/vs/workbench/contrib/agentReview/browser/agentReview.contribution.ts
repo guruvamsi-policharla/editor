@@ -6,7 +6,8 @@
 // Agent review wiring. The built-in agent-review extension (which hosts the review engine) talks to
 // this contribution through internal commands, so no extension-host protocol changes are needed:
 //   extension -> core: `_agentReview.setBaseline(uri, baselineText, kind)`, `_agentReview.remove(uri)`, `_agentReview.clear()`
-//   core -> extension: `agentReview.ext.onDidHunkAction({ uri, kind, baseline? })`
+//   core -> extension: `agentReview.ext.onDidHunkAction({ uri, kind, baseline? })`,
+//                      `agentReview.ext.onWillWrite({ uri, userVersion, version })` (see agentReviewSaveParticipant.ts)
 // A typed proposed API can replace the commands later.
 
 import './media/agentReview.css';
@@ -24,6 +25,7 @@ import { ILogService } from '../../../../platform/log/common/log.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { AgentReviewKind } from './agentReviewEntry.js';
+import { AgentReviewSaveParticipants } from './agentReviewSaveParticipant.js';
 import { AgentReviewService, IAgentReviewService } from './agentReviewService.js';
 
 registerSingleton(IAgentReviewService, AgentReviewService, InstantiationType.Delayed);
@@ -58,6 +60,9 @@ class AgentReviewBridge extends Disposable implements IWorkbenchContribution {
 	}
 }
 registerWorkbenchContribution2(AgentReviewBridge.ID, AgentReviewBridge, WorkbenchPhase.AfterRestored);
+
+// Tells the extension which buffer edits of a save were made by save participants (formatters), not the user.
+registerWorkbenchContribution2(AgentReviewSaveParticipants.ID, AgentReviewSaveParticipants, WorkbenchPhase.BlockRestore);
 
 /**
  * Keeps `agentReview.isActive` in sync with the active editor, and marks code editors that show a

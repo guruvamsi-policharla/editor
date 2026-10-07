@@ -144,6 +144,29 @@ describe('foldUserSave', () => {
     expect(J(next)).toBe('c1\nc2\nc3\n');
   });
 
+  it('a formatter rewriting a contiguous run of lines folds each line on its own (whole-file format on save)', () => {
+    // Agent changed b; the user edited a; format on save then normalizes every line, all adjacent.
+    const B = L('a=1\nb=2\nc=3\n');
+    const D = L('a=1\nb=20\nc=3\nd=4\n');
+    let text = J(D);
+    const edits: TrackedEdit[] = [];
+    const apply = (from: string, to: string, origin: EditOrigin) => {
+      const e = edit(text, from, to, origin);
+      edits.push(e);
+      text = applyEdits(text, [e]);
+    };
+    apply('a=1', 'a=10', 'user');
+    for (const [from, to] of [['a=10', 'a = 10'], ['b=20', 'b = 20'], ['c=3', 'c = 3'], ['d=4', 'd = 4']] as const) apply(from, to, 'formatter');
+    expect(text).toBe('a = 10\nb = 20\nc = 3\nd = 4\n');
+    const next = foldUserSave(B, D, trackEdits(J(D), edits)!);
+    // User line (formatted) and the formatted common line fold in; the agent's lines stay pending, formatted.
+    expect(J(next)).toBe('a = 10\nb=2\nc = 3\n');
+    expect(computeHunks(next, L(text)).map((h) => [h.oldLines, h.newLines])).toEqual([
+      [['b=2\n'], ['b = 20\n']],
+      [[], ['d = 4\n']],
+    ]);
+  });
+
   it('a formatter removing common lines inside an agent hunk keeps them in the baseline', () => {
     const B = L('c1\nold\nc2\n');
     const D = L('c1\na1\nold\na2\nc2\n');
@@ -178,6 +201,49 @@ describe('foldUserSave', () => {
         expect(J(next)).toBe(b);
       }),
       { numRuns: 300 },
+    );
+  });
+
+  /**
+   * Property: format on save over adjacent lines (no anchors in between). The user edits some lines, then a
+   * formatter rewrites lines one for one, in any mix with agent lines. Each line folds on its own.
+   */
+  type Line = 'same' | 'fmtOutside' | 'agent' | 'fmtInside' | 'user' | 'userFmt';
+  it('property: line-for-line formatter passes over adjacent agent and common lines fold per line', () => {
+    fc.assert(
+      fc.property(fc.array(fc.constantFrom<Line>('same', 'fmtOutside', 'agent', 'fmtInside', 'user', 'userFmt'), { minLength: 1, maxLength: 12 }), (lines) => {
+        const B: string[] = [];
+        const D: string[] = [];
+        const expected: string[] = [];
+        const userEdits: [string, string][] = [];
+        const fmtEdits: [string, string][] = [];
+        lines.forEach((kind, i) => {
+          const c = `common${i}\n`;
+          if (kind === 'agent' || kind === 'fmtInside') {
+            B.push(`old${i}\n`), D.push(`agent${i}\n`), expected.push(`old${i}\n`);
+            if (kind === 'fmtInside') fmtEdits.push([`agent${i}\n`, `agentfmt${i}\n`]);
+            return;
+          }
+          B.push(c), D.push(c);
+          if (kind === 'same') expected.push(c);
+          if (kind === 'fmtOutside') expected.push(`fmt${i}\n`), fmtEdits.push([c, `fmt${i}\n`]);
+          if (kind === 'user') expected.push(`user${i}\n`), userEdits.push([c, `user${i}\n`]);
+          if (kind === 'userFmt') expected.push(`userfmt${i}\n`), userEdits.push([c, `user${i}\n`]), fmtEdits.push([`user${i}\n`, `userfmt${i}\n`]);
+        });
+        let text = J(D);
+        const tracked: TrackedEdit[] = [];
+        const run = (pairs: [string, string][], origin: EditOrigin) => {
+          for (const [from, to] of pairs) {
+            const e = edit(text, from, to, origin);
+            tracked.push(e);
+            text = applyEdits(text, [e]);
+          }
+        };
+        run(userEdits, 'user'); // typing first, then format on save
+        run(fmtEdits, 'formatter');
+        expect(J(foldUserSave(B, D, trackEdits(J(D), tracked)!))).toBe(J(expected));
+      }),
+      { numRuns: 500 },
     );
   });
 

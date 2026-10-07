@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MultiRootReview, type TrackedEdit } from '@editor/engine';
 import { ReviewController, type CoreBridge, type InlineKind } from '../src/controller';
+import { EditLogs } from '../src/editLog';
 
 class FakeCore implements CoreBridge {
   readonly shown = new Map<string, { baseline: string; kind: InlineKind }>();
@@ -162,6 +163,44 @@ describe('ReviewController', () => {
     expect(conflicts).toEqual([]);
     expect(await ctl.baselineText(abs)).toBe('Intro!\nMethods.\nResults.\n');
     expect(core.shown.get(abs)?.baseline).toBe('Intro!\nMethods.\nResults.\n');
+  });
+
+  it('format on save: formatter edits stay pending inside agent hunks and fold in elsewhere', async () => {
+    fs.writeFileSync(path.join(root, 'conf.ini'), 'a=1\nb=2\nc=3\n');
+    await open();
+    const abs = await agentWrite('conf.ini', 'a=1\nb=20\nc=3\nd=4\n');
+    // The buffer, its edit log, and the document version, as the extension tracks them.
+    const logs = new EditLogs();
+    const key = 'file://' + abs;
+    logs.markClean(key);
+    let text = read(abs);
+    let version = 1;
+    const change = (from: string, to: string) => {
+      const offset = text.indexOf(from);
+      text = text.slice(0, offset) + to + text.slice(offset + from.length);
+      logs.onChange(key, [{ rangeOffset: offset, rangeLength: from.length, text: to }], true, ++version);
+    };
+    change('a=1', 'a=10'); // the user types
+    const userVersion = version; // core: save participants start here
+    for (const [from, to] of [['a=10', 'a = 10'], ['b=20', 'b = 20'], ['c=3', 'c = 3'], ['d=4', 'd = 4']]) change(from!, to!); // format on save
+    dirty.add(abs);
+    await userSave(abs, text, [...logs.get(key, userVersion)!]);
+    expect(read(abs)).toBe('a = 10\nb = 20\nc = 3\nd = 4\n');
+    expect(await ctl.baselineText(abs)).toBe('a = 10\nb=2\nc = 3\n');
+    expect(core.shown.get(abs)?.baseline).toBe('a = 10\nb=2\nc = 3\n');
+    expect(await ctl.lineCounts(ctl.pendingFiles[0]!)).toEqual({ added: 2, removed: 1 }); // b = 20 and d = 4: still the agent's
+  });
+
+  it('without the save-participant version, the same save counts the formatter as the user (stock VS Code)', async () => {
+    fs.writeFileSync(path.join(root, 'conf.ini'), 'a=1\nb=2\n');
+    await open();
+    const abs = await agentWrite('conf.ini', 'a=1\nb=20\n');
+    const logs = new EditLogs();
+    logs.markClean('k');
+    logs.onChange('k', [{ rangeOffset: 4, rangeLength: 4, text: 'b = 20' }], true, 2);
+    dirty.add(abs);
+    await userSave(abs, 'a=1\nb = 20\n', [...logs.get('k')!]);
+    expect(ctl.pendingFiles).toEqual([]); // the agent line was "rewritten by the user": folded
   });
 
   it('created files show with an empty baseline; Undo deletes them', async () => {

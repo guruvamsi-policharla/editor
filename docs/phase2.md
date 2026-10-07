@@ -56,7 +56,7 @@ The engine is authoritative. Core only renders what the extension pushes and rep
 | **Undo** a hunk | Restores the hunk in the buffer, then **saves** if the buffer was clean (save participants skipped, so formatters can't rewrite other agent lines). Emits `rejected` | Nothing to do: the engine sees disk == baseline in that region |
 | Undo a hunk with unsaved edits | Restores in the buffer, no save | Folded with the user's next save through the edit log (attributed as user edits that touch an agent hunk, so the baseline doesn't move) |
 | **Keep** / **Undo** a file (overlay or list) | Keep emits `acceptFile`; Undo restores and saves (modified files) or emits `rejectFile` (created files) | `engine.acceptFile` / `engine.rejectFile` (reject deletes a created file, restores a deleted one) |
-| Typing + save | Typing outside hunks folds into the baseline model immediately (upstream behavior) | `onWillSaveTextDocument` → `reportUserSave(content, edits)`. User lines fold into the baseline; agent lines stay pending |
+| Typing + save | Typing outside hunks folds into the baseline model immediately (upstream behavior). Two save participants bracket all others (format on save, code actions, other extensions): the first records the buffer version, the last calls `agentReview.ext.onWillWrite({ uri, userVersion, version })` right before the write | `reportUserSave(content, edits)`, with edits after `userVersion` tagged `formatter`. User lines fold into the baseline; agent lines stay pending; formatter edits stay pending inside agent hunks and fold in elsewhere (line by line) |
 | Agent writes while the buffer is dirty | The buffer is never overwritten | Pushes for that file are deferred until save or revert. A notification offers **Compare** / **Revert to Disk** |
 | Git commit / checkout / stage | Nothing | The engine's `checkGit` moves baselines (HEAD move = accept). Entries update or disappear |
 | Restart | `_agentReview.clear` at activation | The engine reopens its persisted state, rescans (stat cache), and re-pushes everything pending |
@@ -114,7 +114,6 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 ## Remaining work (not in this PR)
 
 - **Engine (Phase 1 follow-up):** make `isFresh` aware of an in-flight `reportUserSave`, so hosts don't need the workaround.
-- **Formatter-on-save attribution:** the ext-host will-save participant may run after other participants (format on save), so formatter edits are attributed as user edits. Formatting inside an agent hunk stays pending; elsewhere it folds in.
 - **Merge view for dirty-buffer conflicts:** a notification with Compare / Revert to Disk stands in for it today.
 - **Symlinked workspace roots:** the engine normalizes real paths, but editor URIs can use the link path, so an entry might not match the open editor.
 - **Mixed line endings:** the baseline model normalizes EOLs, so a file with mixed CRLF/LF can show a spurious change on Keep.

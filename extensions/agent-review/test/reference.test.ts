@@ -33,4 +33,13 @@ describe('EditLogs', () => {
     logs.onChange('a', [{ rangeOffset: 0, rangeLength: 5, text: 'agent' }], false); // reload from disk
     expect(logs.get('a')).toEqual([]);
   });
+
+  it('attributes edits after the save-participant version to the formatter', () => {
+    const logs = new EditLogs();
+    logs.markClean('a');
+    logs.onChange('a', [{ rangeOffset: 0, rangeLength: 0, text: 'x' }], true, 2);
+    logs.onChange('a', [{ rangeOffset: 3, rangeLength: 1, text: ' ' }, { rangeOffset: 1, rangeLength: 0, text: ' ' }], true, 3);
+    expect(logs.get('a', 2)!.map((e) => e.origin)).toEqual(['user', 'formatter', 'formatter']);
+    expect(logs.get('a')!.map((e) => e.origin)).toEqual(['user', 'user', 'user']);
+  });
 });
