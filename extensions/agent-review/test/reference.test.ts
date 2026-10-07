@@ -42,4 +42,20 @@ describe('EditLogs', () => {
     expect(logs.get('a', 2)!.map((e) => e.origin)).toEqual(['user', 'formatter', 'formatter']);
     expect(logs.get('a')!.map((e) => e.origin)).toEqual(['user', 'user', 'user']);
   });
+
+  it('remembers the last clean text, and a hold ignores everything until the next save', () => {
+    const logs = new EditLogs();
+    logs.markClean('a', 'v1\n');
+    expect(logs.cleanText('a')).toBe('v1\n');
+    logs.onChange('a', [{ rangeOffset: 0, rangeLength: 0, text: 'x' }], true, 2);
+    expect(logs.cleanText('a')).toBe('v1\n'); // still the text the edits started from
+    logs.hold('a');
+    expect(logs.get('a')).toBeUndefined();
+    logs.onChange('a', [{ rangeOffset: 0, rangeLength: 3, text: 'v2\n' }], false, 3, 'v2\n'); // reload from disk
+    logs.onChange('a', [{ rangeOffset: 0, rangeLength: 3, text: 'merged\n' }], true, 4); // the merge result
+    expect(logs.get('a')).toBeUndefined();
+    expect(logs.cleanText('a')).toBe('v2\n');
+    logs.markClean('a', 'merged\n'); // saved
+    expect(logs.get('a')).toEqual([]);
+  });
 });

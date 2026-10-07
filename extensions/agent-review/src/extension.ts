@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { MultiRootReview } from '@editor/engine';
 import { AgentTerminal } from './agentTerminal';
+import { ConflictMerger } from './conflicts';
 import { ReviewController, type CoreBridge, type ReviewAction } from './controller';
 import { EditLogs } from './editLog';
 import { BASELINE_SCHEME, BaselineContentProvider, baselineUri, ReviewTree, type FileItem } from './reviewTree';
@@ -73,29 +74,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     isDirty: (abs: string) => vscode.workspace.textDocuments.some((d) => d.uri.scheme === 'file' && samePath(d.uri.fsPath, abs) && d.isDirty),
   };
 
-  const conflictsShown = new Set<string>();
+  let conflicts: ConflictMerger | undefined;
   controller = new ReviewController(review, bridge, docs, {
     info: (m) => log.info(m),
     warn: (m) => log.warn(m),
     error: (m, e) => log.error(m, e instanceof Error ? e : String(e ?? '')),
-  }, (abs) => {
-    if (conflictsShown.has(abs)) return;
-    conflictsShown.add(abs);
-    const name = path.basename(abs);
-    void vscode.window
-      .showWarningMessage(`${name} changed on disk while you have unsaved edits. Nothing was overwritten.`, 'Compare', 'Revert to Disk')
-      .then(async (choice) => {
-        conflictsShown.delete(abs);
-        const uri = vscode.Uri.file(abs);
-        if (choice === 'Compare') {
-          await vscode.window.showTextDocument(uri);
-          await vscode.commands.executeCommand('workbench.files.action.compareWithSaved', uri);
-        } else if (choice === 'Revert to Disk') {
-          await vscode.window.showTextDocument(uri);
-          await vscode.commands.executeCommand('workbench.action.files.revert', uri);
-        }
-      });
-  });
+  }, (abs) => void conflicts?.onConflict(abs));
   const ctl = controller;
   context.subscriptions.push({ dispose: () => ctl.dispose() });
 
@@ -116,10 +100,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // Edit logs for user-save attribution.
   const logs = new EditLogs();
-  for (const d of vscode.workspace.textDocuments) if (d.uri.scheme === 'file' && !d.isDirty) logs.markClean(d.uri.toString());
+  for (const d of vscode.workspace.textDocuments) if (d.uri.scheme === 'file' && !d.isDirty) logs.markClean(d.uri.toString(), d.getText());
+  // Agent writes under unsaved edits: 3-way merge.
+  conflicts = new ConflictMerger(ctl, logs, path.join((context.storageUri ?? context.globalStorageUri).fsPath, 'conflicts'), hasCore, log);
+  const merger = conflicts;
   context.subscriptions.push(
+    merger,
+    vscode.commands.registerCommand('agentReview.mergeWithDisk', (uri?: vscode.Uri) => {
+      const target = uri ?? vscode.window.activeTextEditor?.document.uri;
+      if (target?.scheme === 'file') return merger.merge(target.fsPath);
+    }),
     vscode.workspace.onDidOpenTextDocument((d) => {
-      if (d.uri.scheme === 'file' && !d.isDirty) logs.markClean(d.uri.toString());
+      if (d.uri.scheme === 'file' && !d.isDirty) logs.markClean(d.uri.toString(), d.getText());
     }),
     vscode.workspace.onDidCloseTextDocument((d) => {
       logs.forget(d.uri.toString());
@@ -127,12 +119,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.workspace.onDidChangeTextDocument((e) => {
       if (e.document.uri.scheme !== 'file' || e.contentChanges.length === 0) return;
-      logs.onChange(e.document.uri.toString(), e.contentChanges, e.document.isDirty, e.document.version);
+      logs.onChange(e.document.uri.toString(), e.contentChanges, e.document.isDirty, e.document.version, e.document.isDirty ? undefined : e.document.getText());
       if (!e.document.isDirty) void ctl.onBufferSettled(e.document.uri.fsPath); // reverted or reloaded
     }),
     vscode.workspace.onDidSaveTextDocument((d) => {
       if (d.uri.scheme !== 'file') return;
-      logs.markClean(d.uri.toString());
+      logs.markClean(d.uri.toString(), d.getText());
       void ctl.onBufferSettled(d.uri.fsPath);
     }),
     vscode.workspace.onDidDeleteFiles((e) => {

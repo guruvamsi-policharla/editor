@@ -146,6 +146,31 @@ describe('ReviewController', () => {
     expect(core.shown.get(abs)?.baseline).toBe('Intro.\nMethods.\nResults.\n');
   });
 
+  it('agent write under unsaved edits: the stale save is not attributed; the merged result keeps agent lines pending', async () => {
+    await open();
+    const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\n');
+    dirty.add(abs); // the user types "Intro!" in the buffer...
+    const theirs = 'Intro.\nNew methods.\nResults.\nAgent conclusion.\n';
+    await agentWrite('paper.tex', theirs); // ...and the agent writes again
+    expect(conflicts).toEqual([abs]);
+    expect(ctl.hasConflict(abs)).toBe(true);
+
+    // Saving the stale buffer: the editor refuses ("file is newer"); nothing reaches the engine.
+    await ctl.onWillSave(abs, 'Intro!\nNew methods.\nResults.\n', [{ offset: 5, length: 1, text: '!', origin: 'user' }]);
+    expect(await ctl.baselineText(abs)).toBe('Intro.\nMethods.\nResults.\n');
+    expect(read(abs)).toBe(theirs);
+
+    // Merge: core reloads the buffer from disk (clean), then the merge editor writes the auto-merge into it.
+    dirty.delete(abs);
+    await ctl.onBufferSettled(abs);
+    expect(ctl.hasConflict(abs)).toBe(false);
+    dirty.add(abs);
+    // Completing the merge saves the result; the edit log is held, so attribution diffs against the disk.
+    await userSave(abs, 'Intro!\nNew methods.\nResults.\nAgent conclusion.\n', undefined);
+    expect(await ctl.baselineText(abs)).toBe('Intro!\nMethods.\nResults.\n'); // only the user's line folded in
+    expect(await ctl.lineCounts(ctl.pendingFiles[0]!)).toEqual({ added: 2, removed: 1 }); // the agent's work is still pending
+  });
+
   it('a save in flight is not an external change, even if the list asks for line counts before the write', async () => {
     await open();
     const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\n');

@@ -1,9 +1,9 @@
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts b/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts
 new file mode 100644
-index 00000000..e80024a8
+index 00000000..e5626a30
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,119 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -11,7 +11,8 @@ index 00000000..e80024a8
 +
 +// Agent review wiring. The built-in agent-review extension (which hosts the review engine) talks to
 +// this contribution through internal commands, so no extension-host protocol changes are needed:
-+//   extension -> core: `_agentReview.setBaseline(uri, baselineText, kind)`, `_agentReview.remove(uri)`, `_agentReview.clear()`
++//   extension -> core: `_agentReview.setBaseline(uri, baselineText, kind)`, `_agentReview.remove(uri)`, `_agentReview.clear()`,
++//                      `_agentReview.openMerge(uri, baseText)` (agent write vs. unsaved edits, see agentReviewMerge.ts)
 +//   core -> extension: `agentReview.ext.onDidHunkAction({ uri, kind, baseline? })`,
 +//                      `agentReview.ext.onWillWrite({ uri, userVersion, version })` (see agentReviewSaveParticipant.ts)
 +// A typed proposed API can replace the commands later.
@@ -49,6 +50,10 @@ index 00000000..e80024a8
 +
 +CommandsRegistry.registerCommand('_agentReview.clear', (accessor: ServicesAccessor) => {
 +	accessor.get(IAgentReviewService).clear();
++});
++
++CommandsRegistry.registerCommand('_agentReview.openMerge', (accessor: ServicesAccessor, uri: UriComponents, base: string): Promise<boolean> => {
++	return accessor.get(IAgentReviewService).openMerge(URI.revive(uri), base);
 +});
 +
 +class AgentReviewBridge extends Disposable implements IWorkbenchContribution {
@@ -366,6 +371,129 @@ index 00000000..2e161091
 +		return this._instantiationService.createInstance(ChatEditingCodeEditorIntegration, this, codeEditor, this.diffInfo, true);
 +	}
 +}
+diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewMerge.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewMerge.ts
+new file mode 100644
+index 00000000..c82f759f
+--- /dev/null
++++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewMerge.ts
+@@ -0,0 +1,117 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++// Agent review: an agent wrote a file while the user has unsaved edits in it. Resolve the conflict in
++// VS Code's 3-way merge editor:
++//   base   = the text both sides started from (the extension passes it: the last text the buffer and the
++//            disk agreed on, or the accepted baseline)
++//   input1 = the agent's version (the file on disk)
++//   input2 = the user's unsaved buffer
++//   result = the file itself
++// Neither side is lost: both are snapshotted into read-only models before anything changes. The merge
++// editor saves its result file before it starts, so the file model is first reloaded from disk (the
++// user's text lives on in input2); nothing is written until the user completes the merge. The result
++// then starts as the merge editor's own auto-merge (non-conflicting changes from both sides applied,
++// conflicts left to the user).
++
++import { DisposableStore } from '../../../../base/common/lifecycle.js';
++import { waitForState } from '../../../../base/common/observable.js';
++import { URI } from '../../../../base/common/uri.js';
++import { ILanguageService } from '../../../../editor/common/languages/language.js';
++import { IModelService } from '../../../../editor/common/services/model.js';
++import { createTextBufferFactory } from '../../../../editor/common/model/textModel.js';
++import { ITextModelService } from '../../../../editor/common/services/resolverService.js';
++import { localize } from '../../../../nls.js';
++import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
++import { IEditorService } from '../../../services/editor/common/editorService.js';
++import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
++import { MergeEditorInput, MergeEditorInputData } from '../../mergeEditor/browser/mergeEditorInput.js';
++
++export const AGENT_REVIEW_MERGE_SCHEME = 'agent-review-merge';
++
++export interface IAgentReviewMergeOptions {
++	/** The common ancestor of the disk and buffer versions. */
++	readonly base: string;
++	/** Do not open the editor, only prepare the merge (tests). */
++	readonly noOpen?: boolean;
++}
++
++export interface IAgentReviewMerge {
++	readonly input: MergeEditorInput;
++	/** The agent's version, as it was on disk. */
++	readonly theirs: string;
++	/** The user's unsaved buffer, as it was. */
++	readonly yours: string;
++}
++
++let mergeIds = 0;
++
++/**
++ * Open the 3-way merge editor for a file with unsaved edits that changed on disk. Returns undefined
++ * if there is nothing to merge (the file has no unsaved edits, or isn't a text file model).
++ */
++export async function openAgentReviewMerge(accessor: ServicesAccessor, uri: URI, options: IAgentReviewMergeOptions): Promise<IAgentReviewMerge | undefined> {
++	const textFileService = accessor.get(ITextFileService);
++	const modelService = accessor.get(IModelService);
++	const languageService = accessor.get(ILanguageService);
++	const editorService = accessor.get(IEditorService);
++	const instantiationService = accessor.get(IInstantiationService);
++	const textModelService = accessor.get(ITextModelService);
++
++	const fileModel = textFileService.files.get(uri);
++	if (!fileModel?.textEditorModel || !fileModel.isDirty()) {
++		return undefined;
++	}
++	const textModel = fileModel.textEditorModel;
++	const store = new DisposableStore();
++	// The merge editor resolves its inputs through the text model service.
++	store.add(textModelService.registerTextModelContentProvider(AGENT_REVIEW_MERGE_SCHEME, {
++		provideTextContent: async resource => modelService.getModel(resource),
++	}));
++	const id = ++mergeIds;
++	const snapshot = (side: string, text: string) => {
++		const resource = URI.from({ scheme: AGENT_REVIEW_MERGE_SCHEME, path: uri.path, query: `${side}-${id}` });
++		return store.add(modelService.createModel(createTextBufferFactory(text), languageService.createById(textModel.getLanguageId()), resource, false)).uri;
++	};
++
++	const yours = textModel.getValue();
++	let reverted = false;
++	try {
++		const yoursUri = snapshot('yours', yours);
++		// Reload from disk. The merge editor saves its result before it starts: it must not save the buffer.
++		await fileModel.revert();
++		reverted = true;
++		if (fileModel.isDirty()) {
++			throw new Error(`could not reload ${uri.toString()} from disk`);
++		}
++		const theirs = textModel.getValue();
++		const theirsUri = snapshot('theirs', theirs);
++		const baseUri = snapshot('base', options.base);
++
++		const input = instantiationService.createInstance(
++			MergeEditorInput,
++			baseUri,
++			new MergeEditorInputData(theirsUri, localize('agentReview.merge.theirs', "Agent"), undefined, localize('agentReview.merge.theirsDescription', "on disk")),
++			new MergeEditorInputData(yoursUri, localize('agentReview.merge.yours', "Yours"), undefined, localize('agentReview.merge.yoursDescription', "unsaved edits")),
++			uri,
++		);
++		// After the merge model lets go of them (the input disposes it right after this event, synchronously).
++		store.add(input.onWillDispose(() => queueMicrotask(() => store.dispose())));
++		const inputModel = await input.resolve();
++		await inputModel.model.reset(); // start from the auto-merge, not from the agent's version
++		await waitForState(inputModel.model.isUpToDate, upToDate => upToDate); // open with the result diffed: no flicker
++		if (!options.noOpen) {
++			await editorService.openEditor(input, { pinned: true });
++		}
++		return { input, theirs, yours };
++	} catch (err) {
++		if (reverted) {
++			// Put the user's text back (undoable) rather than losing it with the snapshot.
++			textModel.pushEditOperations(null, [{ range: textModel.getFullModelRange(), text: yours }], () => null);
++		}
++		store.dispose();
++		throw err;
++	}
++}
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewSaveParticipant.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewSaveParticipant.ts
 new file mode 100644
 index 00000000..341604e2
@@ -456,10 +584,10 @@ index 00000000..341604e2
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts
 new file mode 100644
-index 00000000..b06dd674
+index 00000000..ac216fba
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,190 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -483,6 +611,7 @@ index 00000000..b06dd674
 +import { createDecorator, IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 +import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntry } from '../../chat/common/editing/chatEditingService.js';
 +import { AGENT_REVIEW_BASELINE_SCHEME, AgentReviewEntry, AgentReviewKind, IAgentReviewHunkEvent } from './agentReviewEntry.js';
++import { openAgentReviewMerge } from './agentReviewMerge.js';
 +
 +export const IAgentReviewService = createDecorator<IAgentReviewService>('agentReviewService');
 +
@@ -498,6 +627,11 @@ index 00000000..b06dd674
 +	remove(uri: URI): void;
 +	/** Remove every entry (the extension re-pushes everything it knows when it starts). */
 +	clear(): void;
++	/**
++	 * Resolve an agent write that hit unsaved edits in the 3-way merge editor (base, agent's version on disk,
++	 * the user's buffer). False if there is nothing to merge (no unsaved edits).
++	 */
++	openMerge(uri: URI, base: string): Promise<boolean>;
 +	getEntry(uri: URI): AgentReviewEntry | undefined;
 +}
 +
@@ -575,6 +709,11 @@ index 00000000..b06dd674
 +				return modelService.getModel(resource);
 +			}
 +		}));
++	}
++
++	async openMerge(uri: URI, base: string): Promise<boolean> {
++		const merge = await this._instantiationService.invokeFunction(openAgentReviewMerge, uri, { base });
++		return !!merge;
 +	}
 +
 +	getEntry(uri: URI): AgentReviewEntry | undefined {
@@ -926,6 +1065,116 @@ index 00000000..dd2fe95b
 +		model.applyEdits([EditOperation.replace(new Range(1, 1, 1, 6), 'Opening')]);
 +		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 && entry.originalModel.getValue().startsWith('Opening') ? d : undefined));
 +		assert.ok(entry.originalModel.getValue().startsWith('Opening sentence.'));
++	});
++});
+diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReviewMerge.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReviewMerge.test.ts
+new file mode 100644
+index 00000000..589f6950
+--- /dev/null
++++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReviewMerge.test.ts
+@@ -0,0 +1,104 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++// Agent write vs. unsaved edits: the 3-way merge (base, agent's version on disk, the user's buffer)
++// runs in VS Code's merge editor. Neither side is lost or written, and the result starts as the
++// auto-merge with only the true conflict left to resolve.
++
++import assert from 'assert';
++import { DisposableStore } from '../../../../../base/common/lifecycle.js';
++import { URI } from '../../../../../base/common/uri.js';
++import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
++import { IEditorWorkerService } from '../../../../../editor/common/services/editorWorker.js';
++import { IModelService } from '../../../../../editor/common/services/model.js';
++import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
++import { SyncDescriptor } from '../../../../../platform/instantiation/common/descriptors.js';
++import { ServiceCollection } from '../../../../../platform/instantiation/common/serviceCollection.js';
++import { TextFileEditorModelManager } from '../../../../services/textfile/common/textFileEditorModelManager.js';
++import { ITextFileEditorModel } from '../../../../services/textfile/common/textfiles.js';
++import { TestServiceAccessor, workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
++import { TestWorkerService } from '../../../inlineChat/test/browser/testWorkerService.js';
++import { MergeEditorInput } from '../../../mergeEditor/browser/mergeEditorInput.js';
++import { AGENT_REVIEW_MERGE_SCHEME, openAgentReviewMerge } from '../../browser/agentReviewMerge.js';
++
++suite('AgentReview: 3-way merge for agent writes under unsaved edits', () => {
++
++	const disposables = new DisposableStore();
++	const uri = URI.file('/ws/paper.tex');
++	const BASE = 'Title.\n\nIntro.\n\nMethods.\n\nResults.\n';
++	// The agent rewrote Intro and Results; the user, with unsaved edits, rewrote Title and Results.
++	const AGENT = 'Title.\n\nA better intro.\n\nMethods.\n\nAgent results.\n';
++	const YOURS = 'My title.\n\nIntro.\n\nMethods.\n\nMy results.\n';
++
++	let insta: IInstantiationService;
++	let accessor: TestServiceAccessor;
++	let model: ITextFileEditorModel;
++
++	setup(async () => {
++		const base = workbenchInstantiationService(undefined, disposables);
++		insta = disposables.add(base.createChild(new ServiceCollection([IEditorWorkerService, new SyncDescriptor(TestWorkerService)])));
++		disposables.add(insta.invokeFunction(a => a.get(IEditorWorkerService)) as TestWorkerService);
++		accessor = insta.createInstance(TestServiceAccessor);
++		disposables.add(<TextFileEditorModelManager>accessor.textFileService.files);
++
++		accessor.fileService.setContent(BASE);
++		model = await accessor.textFileService.files.resolve(uri);
++		model.textEditorModel!.setValue(YOURS); // unsaved edits
++		accessor.fileService.setContent(AGENT); // the agent writes the file; the dirty buffer is not reloaded
++	});
++
++	teardown(() => disposables.clear());
++
++	ensureNoDisposablesAreLeakedInTestSuite();
++
++	const models = () => insta.invokeFunction(a => a.get(IModelService));
++
++	/** Closing the merge editor disposes its input; the snapshots go right after. */
++	async function close(input: MergeEditorInput) {
++		input.dispose();
++		await Promise.resolve();
++	}
++
++	function open(base = BASE) {
++		return insta.invokeFunction(openAgentReviewMerge, uri, { base, noOpen: true });
++	}
++
++	test('both sides are snapshotted, nothing is written, and the result is the auto-merge with one conflict', async () => {
++		const writesBefore = accessor.fileService.writeOperations.length;
++		const merge = (await open())!;
++
++		assert.strictEqual(merge.yours, YOURS, 'the user\'s buffer is kept as input 2');
++		assert.strictEqual(merge.theirs, AGENT, 'the agent\'s version is input 1');
++		assert.strictEqual(merge.input.input1.uri.scheme, AGENT_REVIEW_MERGE_SCHEME);
++		assert.strictEqual(models().getModel(merge.input.input2.uri)?.getValue(), YOURS);
++		assert.strictEqual(models().getModel(merge.input.base)?.getValue(), BASE);
++		assert.strictEqual(merge.input.result.toString(), uri.toString(), 'the result is the file itself');
++		assert.strictEqual(accessor.fileService.writeOperations.length, writesBefore, 'nothing is written before the merge is completed');
++
++		// Auto-merge: the user's title and the agent's intro are both in; Results (changed by both) is a conflict at base.
++		const inputModel = await merge.input.resolve();
++		assert.strictEqual(model.textEditorModel!.getValue(), 'My title.\n\nA better intro.\n\nMethods.\n\nResults.\n');
++		assert.strictEqual(inputModel.model.unhandledConflictsCount.get(), 1);
++		assert.ok(model.isDirty(), 'the merge result is unsaved until the user completes the merge');
++		await close(merge.input);
++		await model.revert(); // "Don't Save"
++	});
++
++	test('nothing to merge without unsaved edits', async () => {
++		await model.revert();
++		assert.strictEqual(await open(), undefined);
++		assert.strictEqual(model.textEditorModel!.getValue(), AGENT);
++	});
++
++	test('the merge models go away with the merge editor', async () => {
++		const merge = (await open())!;
++		const resources = [merge.input.base, merge.input.input1.uri, merge.input.input2.uri];
++		await close(merge.input);
++		await model.revert();
++		for (const r of resources) {
++			assert.strictEqual(models().getModel(r), null);
++		}
 +	});
 +});
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReviewSaveParticipant.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReviewSaveParticipant.test.ts

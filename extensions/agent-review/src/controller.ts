@@ -67,6 +67,8 @@ export class ReviewController {
    */
   private readonly saving = new Set<string>();
   private readonly countsCache = new Map<string, { added: number; removed: number }>();
+  /** Files with unsaved edits that changed on disk underneath them, until the buffer is clean again. */
+  private readonly conflicted = new Set<string>();
   private readonly listeners = new Set<() => void>();
   private readonly subscriptions: { dispose(): void }[] = [];
   private files: PendingFile[] = [];
@@ -142,7 +144,10 @@ export class ReviewController {
       return;
     }
     const dirty = this.docs.isDirty(f.absPath);
-    if (dirty && reason === 'external' && !this.saving.has(f.absPath)) this.onConflict?.(f.absPath);
+    if (dirty && reason === 'external' && !this.saving.has(f.absPath)) {
+      this.conflicted.add(f.absPath);
+      this.onConflict?.(f.absPath);
+    }
     if (dirty && this.pushed.has(f.absPath)) {
       // The UI shows baseline vs. buffer; moving the baseline under unsaved typing would mislabel it.
       this.deferred.add(f.absPath);
@@ -172,6 +177,11 @@ export class ReviewController {
   }
 
   // ------------------------------------------------------------------ UI -> engine
+
+  /** True while `absPath` has unsaved edits and changed on disk underneath them. */
+  hasConflict(absPath: string): boolean {
+    return this.conflicted.has(normalizePath(absPath));
+  }
 
   /** A Keep/Undo action from the core review UI. */
   async onReviewAction(action: ReviewAction): Promise<void> {
@@ -214,6 +224,12 @@ export class ReviewController {
     const abs = normalizePath(absPath);
     const engine = await this.review.engineFor(abs);
     if (!engine) return;
+    if (this.conflicted.has(abs)) {
+      // The buffer is based on an older disk version. The editor refuses this save ("file is newer") unless the
+      // user overwrites; then the write is an external change, reviewed against the baseline like any other.
+      this.log.warn(`${abs} changed on disk since it was loaded; not attributing this save (merge it instead)`);
+      return;
+    }
     this.saving.add(abs);
     try {
       await engine.reportUserSave(abs, content, edits ? { edits } : {});
@@ -226,6 +242,7 @@ export class ReviewController {
   onBufferSettled(absPath: string): Promise<void> {
     const abs = normalizePath(absPath);
     this.saving.delete(abs);
+    this.conflicted.delete(abs);
     if (!this.deferred.has(abs)) return Promise.resolve();
     return this.enqueue(async () => {
       this.deferred.delete(abs);

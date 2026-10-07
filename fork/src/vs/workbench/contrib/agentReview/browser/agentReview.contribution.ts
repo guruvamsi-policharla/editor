@@ -5,7 +5,8 @@
 
 // Agent review wiring. The built-in agent-review extension (which hosts the review engine) talks to
 // this contribution through internal commands, so no extension-host protocol changes are needed:
-//   extension -> core: `_agentReview.setBaseline(uri, baselineText, kind)`, `_agentReview.remove(uri)`, `_agentReview.clear()`
+//   extension -> core: `_agentReview.setBaseline(uri, baselineText, kind)`, `_agentReview.remove(uri)`, `_agentReview.clear()`,
+//                      `_agentReview.openMerge(uri, baseText)` (agent write vs. unsaved edits, see agentReviewMerge.ts)
 //   core -> extension: `agentReview.ext.onDidHunkAction({ uri, kind, baseline? })`,
 //                      `agentReview.ext.onWillWrite({ uri, userVersion, version })` (see agentReviewSaveParticipant.ts)
 // A typed proposed API can replace the commands later.
@@ -43,6 +44,10 @@ CommandsRegistry.registerCommand('_agentReview.remove', (accessor: ServicesAcces
 
 CommandsRegistry.registerCommand('_agentReview.clear', (accessor: ServicesAccessor) => {
 	accessor.get(IAgentReviewService).clear();
+});
+
+CommandsRegistry.registerCommand('_agentReview.openMerge', (accessor: ServicesAccessor, uri: UriComponents, base: string): Promise<boolean> => {
+	return accessor.get(IAgentReviewService).openMerge(URI.revive(uri), base);
 });
 
 class AgentReviewBridge extends Disposable implements IWorkbenchContribution {

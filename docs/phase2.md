@@ -57,7 +57,7 @@ The engine is authoritative. Core only renders what the extension pushes and rep
 | Undo a hunk with unsaved edits | Restores in the buffer, no save | Folded with the user's next save through the edit log (attributed as user edits that touch an agent hunk, so the baseline doesn't move) |
 | **Keep** / **Undo** a file (overlay or list) | Keep emits `acceptFile`; Undo restores and saves (modified files) or emits `rejectFile` (created files) | `engine.acceptFile` / `engine.rejectFile` (reject deletes a created file, restores a deleted one) |
 | Typing + save | Typing outside hunks folds into the baseline model immediately (upstream behavior). Two save participants bracket all others (format on save, code actions, other extensions): the first records the buffer version, the last calls `agentReview.ext.onWillWrite({ uri, userVersion, version })` right before the write | `reportUserSave(content, edits)`, with edits after `userVersion` tagged `formatter`. User lines fold into the baseline; agent lines stay pending; formatter edits stay pending inside agent hunks and fold in elsewhere (line by line) |
-| Agent writes while the buffer is dirty | The buffer is never overwritten | Pushes for that file are deferred until save or revert. A notification offers **Compare** / **Revert to Disk** |
+| Agent writes while the buffer is dirty | The buffer is never overwritten. **Merge…** (notification, or *Agent Review: Merge Agent's Version with Unsaved Edits*) runs `_agentReview.openMerge`: both versions are snapshotted, the buffer reloads from disk, and VS Code's 3-way merge editor opens on its own auto-merge (base = the text both sides started from, Agent = disk, Yours = the buffer, result = the file). Nothing is written until **Complete Merge** | Pushes for that file are deferred until save or revert. A save of the stale buffer isn't attributed. The merge result is attributed by diffing against the disk (agent lines stay pending, the user's fold in). Both versions are also copied to `conflicts/` in workspace storage (kept 7 days), and closing the merge without saving points to the user's copy |
 | Git commit / checkout / stage | Nothing | The engine's `checkGit` moves baselines (HEAD move = accept). Entries update or disappear |
 | Restart | `_agentReview.clear` at activation | The engine reopens its persisted state, rescans (stat cache), and re-pushes everything pending |
 
@@ -78,7 +78,7 @@ Created files are reviewed inline (baseline `''`). Deleted and renamed files, an
 | Agent terminal | Done. **Agent: Open Agent Terminal** starts `agentReview.agent.command` (default `tact`) in a terminal docked right (editor area, beside), or in the panel (`agentReview.agent.location`) |
 | Ctrl/Cmd+L | Done. Sends `@relative/path:L42-58` (format: `agentReview.agent.referenceFormat`) to the agent terminal; optionally also the selected text as a bracketed paste (`agentReview.agent.includeSelectedText`) |
 | Hide built-in AI chat | Done. `chat.disableAIFeatures` is already true in VSCodium (we also set it as a configuration default), and patch 93 hides the empty secondary side bar by default |
-| Dirty-buffer merge view | Not done. A notification with Compare (buffer vs. disk diff) / Revert to Disk replaces it for now |
+| Dirty-buffer merge view | Done. VS Code's 3-way merge editor (see the table above); no side is ever written over without the user completing the merge |
 
 ## Core patches (`patches/`)
 
@@ -114,7 +114,6 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 ## Remaining work (not in this PR)
 
 - **Engine (Phase 1 follow-up):** make `isFresh` aware of an in-flight `reportUserSave`, so hosts don't need the workaround.
-- **Merge view for dirty-buffer conflicts:** a notification with Compare / Revert to Disk stands in for it today.
 - **Symlinked workspace roots:** the engine normalizes real paths, but editor URIs can use the link path, so an entry might not match the open editor.
 - **Mixed line endings:** the baseline model normalizes EOLs, so a file with mixed CRLF/LF can show a spurious change on Keep.
 - **The macOS packaged build hasn't been run.** The workflow exists but wasn't triggered, because macOS minutes bill at 10x on private repos (see CI).
