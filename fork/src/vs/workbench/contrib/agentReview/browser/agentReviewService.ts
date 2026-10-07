@@ -3,11 +3,11 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-// Phase 0 spike: holds one AgentReviewEntry per file with pending agent changes and exposes them to
+// Agent review: holds one AgentReviewEntry per file with pending agent changes and exposes them to
 // the existing chat-editing review UI by registering an IChatEditReviewSession. Registering the
 // session is all it takes for the core UI to pick the entries up: the editor overlay (file i of n,
-// change j of m), per-hunk Accept/Reject widgets, deleted lines as real rows (view zones),
-// keybindings, and explorer badges.
+// change j of m), per-hunk Keep/Undo widgets, deleted lines as real rows (view zones),
+// keybindings, and explorer decorations.
 
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable, IDisposable } from '../../../../base/common/lifecycle.js';
@@ -20,7 +20,7 @@ import { IModelService } from '../../../../editor/common/services/model.js';
 import { ITextModelContentProvider, ITextModelService } from '../../../../editor/common/services/resolverService.js';
 import { createDecorator, IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntry } from '../../chat/common/editing/chatEditingService.js';
-import { AGENT_REVIEW_BASELINE_SCHEME, AgentReviewEntry, IAgentReviewHunkEvent } from './agentReviewEntry.js';
+import { AGENT_REVIEW_BASELINE_SCHEME, AgentReviewEntry, AgentReviewKind, IAgentReviewHunkEvent } from './agentReviewEntry.js';
 
 export const IAgentReviewService = createDecorator<IAgentReviewService>('agentReviewService');
 
@@ -28,10 +28,14 @@ export interface IAgentReviewService {
 	readonly _serviceBrand: undefined;
 	readonly session: IChatEditReviewSession;
 	readonly onDidHunkAction: Event<IAgentReviewHunkEvent>;
+	/** All entries; changes whenever a file starts or stops having pending changes. */
+	readonly entries: IObservable<readonly AgentReviewEntry[]>;
 	/** Show `uri` as pending against `baseline`. Creates or updates the entry. */
-	setBaseline(uri: URI, baseline: string): Promise<AgentReviewEntry | undefined>;
+	setBaseline(uri: URI, baseline: string, kind?: AgentReviewKind): Promise<AgentReviewEntry | undefined>;
 	/** Stop reviewing `uri` (nothing pending any more). */
 	remove(uri: URI): void;
+	/** Remove every entry (the extension re-pushes everything it knows when it starts). */
+	clear(): void;
 	getEntry(uri: URI): AgentReviewEntry | undefined;
 }
 
@@ -83,6 +87,12 @@ export class AgentReviewService extends Disposable implements IAgentReviewServic
 
 	private readonly _entries = new ResourceMap<{ entry: AgentReviewEntry; listener: IDisposable }>();
 	private readonly _pending = new ResourceMap<Promise<AgentReviewEntry | undefined>>();
+	/** Latest request per resource while the entry is being created (requests can arrive back to back). */
+	private readonly _latest = new ResourceMap<{ baseline: string; kind: AgentReviewKind } | null>();
+
+	get entries(): IObservable<readonly AgentReviewEntry[]> {
+		return this._session.entriesObs;
+	}
 
 	private readonly _onDidHunkAction = this._register(new Emitter<IAgentReviewHunkEvent>());
 	readonly onDidHunkAction = this._onDidHunkAction.event;
@@ -109,27 +119,33 @@ export class AgentReviewService extends Disposable implements IAgentReviewServic
 		return this._entries.get(uri)?.entry;
 	}
 
-	async setBaseline(uri: URI, baseline: string): Promise<AgentReviewEntry | undefined> {
+	async setBaseline(uri: URI, baseline: string, kind: AgentReviewKind = 'modified'): Promise<AgentReviewEntry | undefined> {
 		const existing = this._entries.get(uri);
 		if (existing) {
-			await existing.entry.setBaseline(baseline);
+			await existing.entry.setBaseline(baseline, kind);
 			return existing.entry;
 		}
+		this._latest.set(uri, { baseline, kind });
 		let pending = this._pending.get(uri);
 		if (!pending) {
-			pending = this._createEntry(uri, baseline).finally(() => this._pending.delete(uri));
+			pending = this._createEntry(uri).finally(() => {
+				this._pending.delete(uri);
+				this._latest.delete(uri);
+			});
 			this._pending.set(uri, pending);
 		}
 		return pending;
 	}
 
-	private async _createEntry(uri: URI, baseline: string): Promise<AgentReviewEntry | undefined> {
+	private async _createEntry(uri: URI): Promise<AgentReviewEntry | undefined> {
 		const ref = await this._textModelService.createModelReference(uri);
-		if (this._store.isDisposed) {
+		const latest = this._latest.get(uri);
+		if (this._store.isDisposed || !latest) {
+			// disposed, or removed while the model was resolving
 			ref.dispose();
 			return undefined;
 		}
-		const entry = this._instantiationService.createInstance(AgentReviewEntry, ref, baseline);
+		const entry = this._instantiationService.createInstance(AgentReviewEntry, ref, latest.baseline, latest.kind);
 		const listener = entry.onDidHunkAction(e => this._onDidHunkAction.fire(e));
 		this._entries.set(uri, { entry, listener });
 		this._session.entriesObs.set([...this._session.entriesObs.get(), entry], undefined);
@@ -137,6 +153,9 @@ export class AgentReviewService extends Disposable implements IAgentReviewServic
 	}
 
 	remove(uri: URI): void {
+		if (this._pending.has(uri)) {
+			this._latest.set(uri, null);
+		}
 		const item = this._entries.get(uri);
 		if (!item) {
 			return;
@@ -147,10 +166,14 @@ export class AgentReviewService extends Disposable implements IAgentReviewServic
 		item.entry.dispose();
 	}
 
-	override dispose(): void {
-		for (const uri of [...this._entries.keys()]) {
+	clear(): void {
+		for (const uri of [...this._entries.keys(), ...this._pending.keys()]) {
 			this.remove(uri);
 		}
+	}
+
+	override dispose(): void {
+		this.clear();
 		super.dispose();
 	}
 }

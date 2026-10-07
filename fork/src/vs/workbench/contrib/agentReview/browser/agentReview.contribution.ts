@@ -3,33 +3,44 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-// Phase 0 spike: wiring. The built-in extension (which hosts the review engine) talks to this
-// contribution through internal commands, so the spike needs no extension-host protocol changes:
-//   extension -> core: `_agentReview.setBaseline(uri, baselineText)`, `_agentReview.remove(uri)`
-//   core -> extension: `agentReview.ext.onDidHunkAction({ uri, kind, baseline, current })`
-// A typed `agentReview` proposed API can replace the commands later (see docs/phase0-rendering.md).
+// Agent review wiring. The built-in agent-review extension (which hosts the review engine) talks to
+// this contribution through internal commands, so no extension-host protocol changes are needed:
+//   extension -> core: `_agentReview.setBaseline(uri, baselineText, kind)`, `_agentReview.remove(uri)`, `_agentReview.clear()`
+//   core -> extension: `agentReview.ext.onDidHunkAction({ uri, kind, baseline? })`
+// A typed proposed API can replace the commands later.
 
-import { Disposable } from '../../../../base/common/lifecycle.js';
+import './media/agentReview.css';
+import { Disposable, DisposableMap, DisposableStore } from '../../../../base/common/lifecycle.js';
+import { autorun } from '../../../../base/common/observable.js';
 import { URI, UriComponents } from '../../../../base/common/uri.js';
-import { localize2 } from '../../../../nls.js';
-import { Action2, registerAction2 } from '../../../../platform/actions/common/actions.js';
+import { ICodeEditor } from '../../../../editor/browser/editorBrowser.js';
+import { ICodeEditorService } from '../../../../editor/browser/services/codeEditorService.js';
+import { localize } from '../../../../nls.js';
 import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
+import { IContextKeyService, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
-import { getCodeEditor } from '../../../../editor/browser/editorBrowser.js';
+import { AgentReviewKind } from './agentReviewEntry.js';
 import { AgentReviewService, IAgentReviewService } from './agentReviewService.js';
 
 registerSingleton(IAgentReviewService, AgentReviewService, InstantiationType.Delayed);
 
-CommandsRegistry.registerCommand('_agentReview.setBaseline', async (accessor: ServicesAccessor, uri: UriComponents, baseline: string) => {
-	await accessor.get(IAgentReviewService).setBaseline(URI.revive(uri), baseline);
+/** True when the active editor shows a file with pending agent changes. */
+export const ctxAgentReviewIsActive = new RawContextKey<boolean>('agentReview.isActive', false, localize('agentReview.isActive', "Whether the active editor has pending agent changes"));
+
+CommandsRegistry.registerCommand('_agentReview.setBaseline', async (accessor: ServicesAccessor, uri: UriComponents, baseline: string, kind?: AgentReviewKind) => {
+	await accessor.get(IAgentReviewService).setBaseline(URI.revive(uri), baseline, kind === 'created' ? 'created' : 'modified');
 });
 
 CommandsRegistry.registerCommand('_agentReview.remove', (accessor: ServicesAccessor, uri: UriComponents) => {
 	accessor.get(IAgentReviewService).remove(URI.revive(uri));
+});
+
+CommandsRegistry.registerCommand('_agentReview.clear', (accessor: ServicesAccessor) => {
+	accessor.get(IAgentReviewService).clear();
 });
 
 class AgentReviewBridge extends Disposable implements IWorkbenchContribution {
@@ -41,33 +52,58 @@ class AgentReviewBridge extends Disposable implements IWorkbenchContribution {
 	) {
 		super();
 		this._register(agentReviewService.onDidHunkAction(e => {
-			commandService.executeCommand('agentReview.ext.onDidHunkAction', { uri: e.uri, kind: e.kind, baseline: e.baseline, current: e.current })
-				.catch(err => logService.trace('[agentReview] no extension handler for hunk action', err));
+			commandService.executeCommand('agentReview.ext.onDidHunkAction', { uri: e.uri, kind: e.kind, baseline: e.baseline })
+				.catch(err => logService.warn('[agentReview] hunk action not delivered to the agent-review extension', err));
 		}));
 	}
 }
 registerWorkbenchContribution2(AgentReviewBridge.ID, AgentReviewBridge, WorkbenchPhase.AfterRestored);
 
-// Spike/demo: fake a pending agent change in the active editor. The baseline is the current text
-// plus a hardcoded block that the "agent" deleted, and with the first line rewritten, so the editor
-// shows real red rows for the deleted block, a word-level modified line, and Accept/Reject per hunk.
-registerAction2(class extends Action2 {
-	constructor() {
-		super({ id: 'agentReview.debug.showSample', title: localize2('agentReview.showSample', 'Agent Review: Show Sample Pending Change (spike)'), f1: true });
+/**
+ * Keeps `agentReview.isActive` in sync with the active editor, and marks code editors that show a
+ * file under review with the `agent-review-editor` class (always-visible hunk buttons, see CSS).
+ */
+class AgentReviewEditorState extends Disposable implements IWorkbenchContribution {
+	static readonly ID = 'workbench.contrib.agentReviewEditorState';
+
+	private readonly _editors = this._register(new DisposableMap<ICodeEditor, DisposableStore>());
+
+	constructor(
+		@IAgentReviewService private readonly _agentReviewService: IAgentReviewService,
+		@IEditorService private readonly _editorService: IEditorService,
+		@ICodeEditorService codeEditorService: ICodeEditorService,
+		@IContextKeyService contextKeyService: IContextKeyService,
+	) {
+		super();
+		const isActive = ctxAgentReviewIsActive.bindTo(contextKeyService);
+		const updateActive = () => {
+			const uri = this._editorService.activeEditor?.resource;
+			isActive.set(!!uri && !!this._agentReviewService.getEntry(uri));
+		};
+		this._register(this._editorService.onDidActiveEditorChange(updateActive));
+
+		const track = (editor: ICodeEditor) => {
+			const store = new DisposableStore();
+			store.add(editor.onDidChangeModel(() => this._updateEditor(editor)));
+			this._editors.set(editor, store);
+			this._updateEditor(editor);
+		};
+		codeEditorService.listCodeEditors().forEach(track);
+		this._register(codeEditorService.onCodeEditorAdd(track));
+		this._register(codeEditorService.onCodeEditorRemove(editor => this._editors.deleteAndDispose(editor)));
+
+		this._register(autorun(r => {
+			this._agentReviewService.entries.read(r);
+			updateActive();
+			for (const editor of this._editors.keys()) {
+				this._updateEditor(editor);
+			}
+		}));
 	}
-	async run(accessor: ServicesAccessor): Promise<void> {
-		const editor = getCodeEditor(accessor.get(IEditorService).activeTextEditorControl);
-		const model = editor?.getModel();
-		if (!model) {
-			return;
-		}
-		const lines = model.getLinesContent();
-		const baseline = [
-			`${lines[0] ?? ''} (before the agent edit)`,
-			'This sentence was deleted by the agent.',
-			'So was this one, which is why it renders as a red row.',
-			...lines.slice(1),
-		].join(model.getEOL());
-		await accessor.get(IAgentReviewService).setBaseline(model.uri, baseline);
+
+	private _updateEditor(editor: ICodeEditor): void {
+		const uri = editor.getModel()?.uri;
+		editor.getContainerDomNode().classList.toggle('agent-review-editor', !!uri && !!this._agentReviewService.getEntry(uri));
 	}
-});
+}
+registerWorkbenchContribution2(AgentReviewEditorState.ID, AgentReviewEditorState, WorkbenchPhase.AfterRestored);

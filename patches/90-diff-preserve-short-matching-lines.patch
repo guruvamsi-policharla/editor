@@ -1,0 +1,81 @@
+diff --git a/src/vs/editor/common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.ts b/src/vs/editor/common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.ts
+index 0da7983f..e743dc75 100644
+--- a/src/vs/editor/common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.ts
++++ b/src/vs/editor/common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.ts
+@@ -89,7 +89,9 @@ export class DefaultLinesDiffComputer implements ILinesDiffComputer {
+ 		let lineAlignments = lineAlignmentResult.diffs;
+ 		let hitTimeout = lineAlignmentResult.hitTimeout;
+ 		lineAlignments = optimizeSequenceDiffs(sequence1, sequence2, lineAlignments);
+-		lineAlignments = removeVeryShortMatchingLinesBetweenDiffs(sequence1, sequence2, lineAlignments);
++		if (!options.preserveShortMatchingLines) {
++			lineAlignments = removeVeryShortMatchingLinesBetweenDiffs(sequence1, sequence2, lineAlignments);
++		}
+ 
+ 		const alignments: RangeMapping[] = [];
+ 
+diff --git a/src/vs/editor/common/diff/documentDiffProvider.ts b/src/vs/editor/common/diff/documentDiffProvider.ts
+index 3e9c82fd..d40967fb 100644
+--- a/src/vs/editor/common/diff/documentDiffProvider.ts
++++ b/src/vs/editor/common/diff/documentDiffProvider.ts
+@@ -47,6 +47,11 @@ export interface IDocumentDiffProviderOptions {
+ 	computeMoves: boolean;
+ 
+ 	extendToSubwords?: boolean;
++
++	/**
++	 * Keep changes that are separated by a few short unchanged lines as separate changes.
++	 */
++	preserveShortMatchingLines?: boolean;
+ }
+ 
+ /**
+diff --git a/src/vs/editor/common/diff/linesDiffComputer.ts b/src/vs/editor/common/diff/linesDiffComputer.ts
+index 6a384b6d..af64dc03 100644
+--- a/src/vs/editor/common/diff/linesDiffComputer.ts
++++ b/src/vs/editor/common/diff/linesDiffComputer.ts
+@@ -14,6 +14,11 @@ export interface ILinesDiffComputerOptions {
+ 	readonly maxComputationTimeMs: number;
+ 	readonly computeMoves: boolean;
+ 	readonly extendToSubwords?: boolean;
++	/**
++	 * Keep changes that are separated by a few short unchanged lines as separate changes
++	 * (by default they are joined into one larger change for readability).
++	 */
++	readonly preserveShortMatchingLines?: boolean;
+ }
+ 
+ export class LinesDiff {
+diff --git a/src/vs/editor/test/node/diffing/defaultLinesDiffComputer.test.ts b/src/vs/editor/test/node/diffing/defaultLinesDiffComputer.test.ts
+index 6bddad6b..1624a904 100644
+--- a/src/vs/editor/test/node/diffing/defaultLinesDiffComputer.test.ts
++++ b/src/vs/editor/test/node/diffing/defaultLinesDiffComputer.test.ts
+@@ -12,6 +12,7 @@ import { MyersDiffAlgorithm } from '../../../common/diff/defaultLinesDiffCompute
+ import { DynamicProgrammingDiffing } from '../../../common/diff/defaultLinesDiffComputer/algorithms/dynamicProgrammingDiffing.js';
+ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
+ import { ArrayText } from '../../../common/core/text/abstractText.js';
++import { DefaultLinesDiffComputer } from '../../../common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.js';
+ 
+ suite('myers', () => {
+ 	ensureNoDisposablesAreLeakedInTestSuite();
+@@ -116,3 +117,21 @@ suite('LinesSliceCharSequence', () => {
+ 		);
+ 	});
+ });
++
++suite('preserveShortMatchingLines', () => {
++	ensureNoDisposablesAreLeakedInTestSuite();
++
++	const original = ['one', 'two', 'three', '}', 'four'];
++	const modified = ['ONE', 'TWO', 'THREE', '}', 'FOUR'];
++	const options = { ignoreTrimWhitespace: false, maxComputationTimeMs: 0, computeMoves: false };
++
++	test('joins changes around a short unchanged line by default', () => {
++		const diff = new DefaultLinesDiffComputer().computeDiff(original, modified, options);
++		assert.deepStrictEqual(diff.changes.map(c => c.original.toString()), ['[1,6)']);
++	});
++
++	test('keeps them separate when set', () => {
++		const diff = new DefaultLinesDiffComputer().computeDiff(original, modified, { ...options, preserveShortMatchingLines: true });
++		assert.deepStrictEqual(diff.changes.map(c => c.original.toString()), ['[1,4)', '[5,6)']);
++	});
++});

@@ -1,0 +1,849 @@
+diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts b/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts
+new file mode 100644
+index 00000000..dc83368d
+--- /dev/null
++++ b/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts
+@@ -0,0 +1,109 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++// Agent review wiring. The built-in agent-review extension (which hosts the review engine) talks to
++// this contribution through internal commands, so no extension-host protocol changes are needed:
++//   extension -> core: `_agentReview.setBaseline(uri, baselineText, kind)`, `_agentReview.remove(uri)`, `_agentReview.clear()`
++//   core -> extension: `agentReview.ext.onDidHunkAction({ uri, kind, baseline? })`
++// A typed proposed API can replace the commands later.
++
++import './media/agentReview.css';
++import { Disposable, DisposableMap, DisposableStore } from '../../../../base/common/lifecycle.js';
++import { autorun } from '../../../../base/common/observable.js';
++import { URI, UriComponents } from '../../../../base/common/uri.js';
++import { ICodeEditor } from '../../../../editor/browser/editorBrowser.js';
++import { ICodeEditorService } from '../../../../editor/browser/services/codeEditorService.js';
++import { localize } from '../../../../nls.js';
++import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
++import { IContextKeyService, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
++import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
++import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
++import { ILogService } from '../../../../platform/log/common/log.js';
++import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
++import { IEditorService } from '../../../services/editor/common/editorService.js';
++import { AgentReviewKind } from './agentReviewEntry.js';
++import { AgentReviewService, IAgentReviewService } from './agentReviewService.js';
++
++registerSingleton(IAgentReviewService, AgentReviewService, InstantiationType.Delayed);
++
++/** True when the active editor shows a file with pending agent changes. */
++export const ctxAgentReviewIsActive = new RawContextKey<boolean>('agentReview.isActive', false, localize('agentReview.isActive', "Whether the active editor has pending agent changes"));
++
++CommandsRegistry.registerCommand('_agentReview.setBaseline', async (accessor: ServicesAccessor, uri: UriComponents, baseline: string, kind?: AgentReviewKind) => {
++	await accessor.get(IAgentReviewService).setBaseline(URI.revive(uri), baseline, kind === 'created' ? 'created' : 'modified');
++});
++
++CommandsRegistry.registerCommand('_agentReview.remove', (accessor: ServicesAccessor, uri: UriComponents) => {
++	accessor.get(IAgentReviewService).remove(URI.revive(uri));
++});
++
++CommandsRegistry.registerCommand('_agentReview.clear', (accessor: ServicesAccessor) => {
++	accessor.get(IAgentReviewService).clear();
++});
++
++class AgentReviewBridge extends Disposable implements IWorkbenchContribution {
++	static readonly ID = 'workbench.contrib.agentReviewBridge';
++	constructor(
++		@IAgentReviewService agentReviewService: IAgentReviewService,
++		@ICommandService commandService: ICommandService,
++		@ILogService logService: ILogService,
++	) {
++		super();
++		this._register(agentReviewService.onDidHunkAction(e => {
++			commandService.executeCommand('agentReview.ext.onDidHunkAction', { uri: e.uri, kind: e.kind, baseline: e.baseline })
++				.catch(err => logService.warn('[agentReview] hunk action not delivered to the agent-review extension', err));
++		}));
++	}
++}
++registerWorkbenchContribution2(AgentReviewBridge.ID, AgentReviewBridge, WorkbenchPhase.AfterRestored);
++
++/**
++ * Keeps `agentReview.isActive` in sync with the active editor, and marks code editors that show a
++ * file under review with the `agent-review-editor` class (always-visible hunk buttons, see CSS).
++ */
++class AgentReviewEditorState extends Disposable implements IWorkbenchContribution {
++	static readonly ID = 'workbench.contrib.agentReviewEditorState';
++
++	private readonly _editors = this._register(new DisposableMap<ICodeEditor, DisposableStore>());
++
++	constructor(
++		@IAgentReviewService private readonly _agentReviewService: IAgentReviewService,
++		@IEditorService private readonly _editorService: IEditorService,
++		@ICodeEditorService codeEditorService: ICodeEditorService,
++		@IContextKeyService contextKeyService: IContextKeyService,
++	) {
++		super();
++		const isActive = ctxAgentReviewIsActive.bindTo(contextKeyService);
++		const updateActive = () => {
++			const uri = this._editorService.activeEditor?.resource;
++			isActive.set(!!uri && !!this._agentReviewService.getEntry(uri));
++		};
++		this._register(this._editorService.onDidActiveEditorChange(updateActive));
++
++		const track = (editor: ICodeEditor) => {
++			const store = new DisposableStore();
++			store.add(editor.onDidChangeModel(() => this._updateEditor(editor)));
++			this._editors.set(editor, store);
++			this._updateEditor(editor);
++		};
++		codeEditorService.listCodeEditors().forEach(track);
++		this._register(codeEditorService.onCodeEditorAdd(track));
++		this._register(codeEditorService.onCodeEditorRemove(editor => this._editors.deleteAndDispose(editor)));
++
++		this._register(autorun(r => {
++			this._agentReviewService.entries.read(r);
++			updateActive();
++			for (const editor of this._editors.keys()) {
++				this._updateEditor(editor);
++			}
++		}));
++	}
++
++	private _updateEditor(editor: ICodeEditor): void {
++		const uri = editor.getModel()?.uri;
++		editor.getContainerDomNode().classList.toggle('agent-review-editor', !!uri && !!this._agentReviewService.getEntry(uri));
++	}
++}
++registerWorkbenchContribution2(AgentReviewEditorState.ID, AgentReviewEditorState, WorkbenchPhase.AfterRestored);
+diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
+new file mode 100644
+index 00000000..2e161091
+--- /dev/null
++++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
+@@ -0,0 +1,242 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++// Agent review: one entry per file with pending agent changes. The "original" side is the review
++// engine's accepted baseline (pushed in from the built-in agent-review extension, which owns the
++// engine) and the "modified" side is the live text model of the file. Rendering, per-hunk Keep/Undo
++// widgets, navigation and the editor overlay are the chat-editing UI (ChatEditingCodeEditorIntegration).
++//
++// Who decides what: the engine is authoritative (pending = disk - baseline). This entry only
++// reports what the user did in the UI so the engine can follow:
++//   Keep hunk  -> original model edited here -> 'accepted' with the full new baseline
++//   Undo hunk  -> buffer edited here -> saved (when it was clean) -> the engine sees disk == baseline there
++//   Keep file  -> 'acceptFile';  Undo file -> buffer restored + saved, or 'rejectFile' for a created file
++
++import { Emitter } from '../../../../base/common/event.js';
++import { Disposable, DisposableMap, IReference } from '../../../../base/common/lifecycle.js';
++import { constObservable, derived, IObservable, observableValue } from '../../../../base/common/observable.js';
++import { URI } from '../../../../base/common/uri.js';
++import { getCodeEditor, ICodeEditor } from '../../../../editor/browser/editorBrowser.js';
++import { IDocumentDiff } from '../../../../editor/common/diff/documentDiffProvider.js';
++import { DetailedLineRangeMapping } from '../../../../editor/common/diff/rangeMapping.js';
++import { ILanguageService } from '../../../../editor/common/languages/language.js';
++import { ITextModel } from '../../../../editor/common/model.js';
++import { createTextBufferFactory } from '../../../../editor/common/model/textModel.js';
++import { IModelService } from '../../../../editor/common/services/model.js';
++import { IResolvedTextEditorModel } from '../../../../editor/common/services/resolverService.js';
++import { IModelContentChangedEvent } from '../../../../editor/common/textModelEvents.js';
++import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
++import { ILogService } from '../../../../platform/log/common/log.js';
++import { IEditorPane, SaveReason } from '../../../common/editor.js';
++import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
++import { ChatEditingCodeEditorIntegration, IDocumentDiff2 } from '../../chat/browser/chatEditing/chatEditingCodeEditorIntegration.js';
++import { ChatEditingTextModelChangeService } from '../../chat/browser/chatEditing/chatEditingTextModelChangeService.js';
++import { IModifiedFileEntry, IModifiedFileEntryEditorIntegration, ModifiedFileEntryState } from '../../chat/common/editing/chatEditingService.js';
++import { IChatResponseModel } from '../../chat/common/model/chatModel.js';
++
++export const AGENT_REVIEW_BASELINE_SCHEME = 'agent-review-baseline';
++
++/** How the file differs from the baseline: `created` files have an empty baseline and no file there before. */
++export type AgentReviewKind = 'modified' | 'created';
++
++export interface IAgentReviewHunkEvent {
++	readonly uri: URI;
++	/**
++	 * - `accepted`: one hunk kept; `baseline` is the full new baseline text.
++	 * - `rejected`: one hunk undone in the buffer (the engine follows from the save).
++	 * - `acceptFile`: everything in the file kept (accept the file as it is on disk).
++	 * - `rejectFile`: undo a created file, i.e. delete it.
++	 */
++	readonly kind: 'accepted' | 'rejected' | 'acceptFile' | 'rejectFile';
++	readonly baseline?: string;
++}
++
++/** Content changes caused by reloading the file from disk are agent (external) edits. */
++export function isDiskReload(e: IModelContentChangedEvent): boolean {
++	return e.detailedReasons.some(r => r.metadata.source === 'reloadFromDisk');
++}
++
++export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
++
++	private static _idPool = 0;
++
++	readonly entryId = `agent-review-${AgentReviewEntry._idPool++}`;
++	readonly originalURI: URI;
++	readonly modifiedURI: URI;
++	readonly lastModifyingRequestId = 'agent-review';
++
++	readonly originalModel: ITextModel;
++	readonly modifiedModel: ITextModel;
++
++	private readonly _stateObs = observableValue<ModifiedFileEntryState>(this, ModifiedFileEntryState.Modified);
++	readonly state: IObservable<ModifiedFileEntryState> = this._stateObs;
++
++	// The chat-specific parts of IModifiedFileEntry are constant for agent review:
++	// there is no streaming request, no auto-accept timer, and review mode is always on.
++	readonly isCurrentlyBeingModifiedBy = constObservable<{ responseModel: IChatResponseModel; undoStopId: string | undefined } | undefined>(undefined);
++	readonly lastModifyingResponse = constObservable<IChatResponseModel | undefined>(undefined);
++	readonly rewriteRatio = constObservable(1);
++	readonly waitsForLastEdits = constObservable(false);
++	readonly reviewMode = constObservable(true);
++	readonly autoAcceptController = constObservable<{ total: number; remaining: number; cancel(): void } | undefined>(undefined);
++
++	private readonly _changeService: ChatEditingTextModelChangeService;
++	private readonly _integrations = this._register(new DisposableMap<IEditorPane, IModifiedFileEntryEditorIntegration>());
++
++	private readonly _onDidHunkAction = this._register(new Emitter<IAgentReviewHunkEvent>());
++	readonly onDidHunkAction = this._onDidHunkAction.event;
++
++	readonly diffInfo: IObservable<IDocumentDiff2>;
++
++	private _kind: AgentReviewKind;
++	get kind(): AgentReviewKind { return this._kind; }
++
++	constructor(
++		modifiedRef: IReference<IResolvedTextEditorModel>,
++		baseline: string,
++		kind: AgentReviewKind,
++		@IModelService modelService: IModelService,
++		@ILanguageService languageService: ILanguageService,
++		@IInstantiationService private readonly _instantiationService: IInstantiationService,
++		@ITextFileService private readonly _textFileService: ITextFileService,
++		@ILogService private readonly _logService: ILogService,
++	) {
++		super();
++		this._kind = kind;
++		this.modifiedModel = this._register(modifiedRef).object.textEditorModel;
++		this.modifiedURI = this.modifiedModel.uri;
++		this.originalURI = URI.from({ scheme: AGENT_REVIEW_BASELINE_SCHEME, path: this.modifiedURI.path, query: this.entryId });
++		this.originalModel = this._register(modelService.createModel(
++			createTextBufferFactory(baseline),
++			languageService.createById(this.modifiedModel.getLanguageId()),
++			this.originalURI,
++			false
++		));
++
++		this._changeService = this._register(this._instantiationService.createInstance(
++			ChatEditingTextModelChangeService,
++			this.originalModel,
++			this.modifiedModel,
++			this._stateObs,
++			// Disk reloads are agent edits: keep them pending instead of folding them into the baseline.
++			// Typing in the editor is a user edit: folded into the baseline where it does not touch a pending change.
++			isDiskReload,
++		));
++		this._changeService.extendToSubwords = true;
++		this._changeService.preserveShortMatchingLines = true;
++
++		this._register(this._changeService.onDidAcceptOrRejectAllHunks(state => {
++			this._stateObs.set(state, undefined);
++		}));
++
++		// Hunk actions from the widgets, keybindings and commands all go through diffInfo.keep/undo.
++		this.diffInfo = this._changeService.diffInfo.map(diff => ({
++			...diff,
++			keep: (change: DetailedLineRangeMapping) => this._keepHunk(diff, change),
++			undo: (change: DetailedLineRangeMapping) => this._undoHunk(diff, change),
++		} satisfies IDocumentDiff2));
++	}
++
++	private async _keepHunk(diff: IDocumentDiff2, change: DetailedLineRangeMapping): Promise<boolean> {
++		const done = await diff.keep(change);
++		if (done) {
++			this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'accepted', baseline: this.originalModel.getValue() });
++		}
++		return done;
++	}
++
++	private async _undoHunk(diff: IDocumentDiff2, change: DetailedLineRangeMapping): Promise<boolean> {
++		const wasDirty = this._textFileService.isDirty(this.modifiedURI);
++		const done = await diff.undo(change);
++		if (!done) {
++			return false;
++		}
++		if (this._kind === 'created' && this.modifiedModel.getValueLength() === 0) {
++			// Undoing everything the agent wrote in a new file: the file should not exist.
++			this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'rejectFile' });
++			return true;
++		}
++		this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'rejected' });
++		if (!wasDirty) {
++			await this._saveUndo();
++		}
++		return true;
++	}
++
++	/**
++	 * Write the undone text to disk so that the file matches what the reviewer sees. Skips save
++	 * participants: formatters must not rewrite the agent's other pending lines as a side effect.
++	 * Unsaved user edits are never saved for them; in that case the undo is saved with their next save.
++	 */
++	private async _saveUndo(): Promise<void> {
++		try {
++			await this._textFileService.save(this.modifiedURI, { reason: SaveReason.EXPLICIT, skipSaveParticipants: true });
++		} catch (err) {
++			this._logService.error('[agentReview] could not save after undo', err);
++		}
++	}
++
++	readonly changesCount: IObservable<number> = derived(r => this._changeService.diffInfo.read(r).changes.length);
++	readonly linesAdded: IObservable<number> = derived(r => this._changeService.diffInfo.read(r).changes.reduce((n, c) => n + c.modified.length, 0));
++	readonly linesRemoved: IObservable<number> = derived(r => this._changeService.diffInfo.read(r).changes.reduce((n, c) => n + c.original.length, 0));
++
++	getDiffInfo(): Promise<IDocumentDiff> {
++		return this._changeService.getDiffInfo();
++	}
++
++	/** The engine moved the baseline (user save folded in, git op, keep from the list, external write). */
++	async setBaseline(baseline: string, kind: AgentReviewKind): Promise<void> {
++		this._kind = kind;
++		const stateChanged = this._stateObs.get() !== ModifiedFileEntryState.Modified;
++		this._stateObs.set(ModifiedFileEntryState.Modified, undefined);
++		if (!stateChanged && this.originalModel.getValue() === baseline) {
++			return; // e.g. the echo of a Keep that this entry reported itself
++		}
++		await this._changeService.resetDocumentValues(baseline, undefined);
++	}
++
++	async accept(): Promise<void> {
++		this._changeService.keep();
++		this._stateObs.set(ModifiedFileEntryState.Accepted, undefined);
++		this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'acceptFile' });
++	}
++
++	async reject(): Promise<void> {
++		if (this._kind === 'created') {
++			this._stateObs.set(ModifiedFileEntryState.Rejected, undefined);
++			this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'rejectFile' });
++			return;
++		}
++		const wasDirty = this._textFileService.isDirty(this.modifiedURI);
++		this._changeService.undo();
++		this._stateObs.set(ModifiedFileEntryState.Rejected, undefined);
++		this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'rejected' });
++		if (!wasDirty) {
++			await this._saveUndo();
++		}
++	}
++
++	enableReviewModeUntilSettled(): void {
++		// review mode is always on
++	}
++
++	getEditorIntegration(pane: IEditorPane): IModifiedFileEntryEditorIntegration {
++		let value = this._integrations.get(pane);
++		if (!value) {
++			const codeEditor = getCodeEditor(pane.getControl());
++			if (!codeEditor) {
++				throw new Error('agent review needs a code editor');
++			}
++			value = this.createEditorIntegration(codeEditor);
++			this._integrations.set(pane, value);
++		}
++		return value;
++	}
++
++	createEditorIntegration(codeEditor: ICodeEditor): ChatEditingCodeEditorIntegration {
++		// renderDiffImmediately=true: there is no "streaming" phase for agent review.
++		return this._instantiationService.createInstance(ChatEditingCodeEditorIntegration, this, codeEditor, this.diffInfo, true);
++	}
++}
+diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts
+new file mode 100644
+index 00000000..b06dd674
+--- /dev/null
++++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts
+@@ -0,0 +1,179 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++// Agent review: holds one AgentReviewEntry per file with pending agent changes and exposes them to
++// the existing chat-editing review UI by registering an IChatEditReviewSession. Registering the
++// session is all it takes for the core UI to pick the entries up: the editor overlay (file i of n,
++// change j of m), per-hunk Keep/Undo widgets, deleted lines as real rows (view zones),
++// keybindings, and explorer decorations.
++
++import { Emitter, Event } from '../../../../base/common/event.js';
++import { Disposable, IDisposable } from '../../../../base/common/lifecycle.js';
++import { ResourceMap } from '../../../../base/common/map.js';
++import { IObservable, IReader, observableValue } from '../../../../base/common/observable.js';
++import { isEqual } from '../../../../base/common/resources.js';
++import { URI } from '../../../../base/common/uri.js';
++import { ITextModel } from '../../../../editor/common/model.js';
++import { IModelService } from '../../../../editor/common/services/model.js';
++import { ITextModelContentProvider, ITextModelService } from '../../../../editor/common/services/resolverService.js';
++import { createDecorator, IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
++import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntry } from '../../chat/common/editing/chatEditingService.js';
++import { AGENT_REVIEW_BASELINE_SCHEME, AgentReviewEntry, AgentReviewKind, IAgentReviewHunkEvent } from './agentReviewEntry.js';
++
++export const IAgentReviewService = createDecorator<IAgentReviewService>('agentReviewService');
++
++export interface IAgentReviewService {
++	readonly _serviceBrand: undefined;
++	readonly session: IChatEditReviewSession;
++	readonly onDidHunkAction: Event<IAgentReviewHunkEvent>;
++	/** All entries; changes whenever a file starts or stops having pending changes. */
++	readonly entries: IObservable<readonly AgentReviewEntry[]>;
++	/** Show `uri` as pending against `baseline`. Creates or updates the entry. */
++	setBaseline(uri: URI, baseline: string, kind?: AgentReviewKind): Promise<AgentReviewEntry | undefined>;
++	/** Stop reviewing `uri` (nothing pending any more). */
++	remove(uri: URI): void;
++	/** Remove every entry (the extension re-pushes everything it knows when it starts). */
++	clear(): void;
++	getEntry(uri: URI): AgentReviewEntry | undefined;
++}
++
++class AgentReviewSession extends Disposable implements IChatEditReviewSession {
++
++	// `true` so that the editor overlay (ChatEditingOverlayController) shows for our entries.
++	readonly isGlobalEditingSession = true;
++	readonly chatSessionResource = URI.from({ scheme: 'agent-review', path: '/session' });
++
++	private readonly _onDidDispose = this._register(new Emitter<void>());
++	readonly onDidDispose = this._onDidDispose.event;
++
++	readonly entriesObs = observableValue<readonly AgentReviewEntry[]>(this, []);
++	readonly entries: IObservable<readonly IModifiedFileEntry[]> = this.entriesObs;
++
++	getEntry(uri: URI): IModifiedFileEntry | undefined {
++		return this.entriesObs.get().find(e => isEqual(e.modifiedURI, uri));
++	}
++
++	readEntry(uri: URI, reader: IReader): IModifiedFileEntry | undefined {
++		return this.entriesObs.read(reader).find(e => isEqual(e.modifiedURI, uri));
++	}
++
++	async accept(...uris: URI[]): Promise<void> {
++		await Promise.all(this._select(uris).map(e => e.accept()));
++	}
++
++	async reject(...uris: URI[]): Promise<void> {
++		await Promise.all(this._select(uris).map(e => e.reject()));
++	}
++
++	private _select(uris: URI[]): AgentReviewEntry[] {
++		const all = this.entriesObs.get();
++		return uris.length === 0 ? [...all] : all.filter(e => uris.some(u => isEqual(u, e.modifiedURI)));
++	}
++
++	override dispose(): void {
++		this._onDidDispose.fire();
++		super.dispose();
++	}
++}
++
++export class AgentReviewService extends Disposable implements IAgentReviewService {
++
++	declare readonly _serviceBrand: undefined;
++
++	private readonly _session = this._register(new AgentReviewSession());
++	readonly session: IChatEditReviewSession = this._session;
++
++	private readonly _entries = new ResourceMap<{ entry: AgentReviewEntry; listener: IDisposable }>();
++	private readonly _pending = new ResourceMap<Promise<AgentReviewEntry | undefined>>();
++	/** Latest request per resource while the entry is being created (requests can arrive back to back). */
++	private readonly _latest = new ResourceMap<{ baseline: string; kind: AgentReviewKind } | null>();
++
++	get entries(): IObservable<readonly AgentReviewEntry[]> {
++		return this._session.entriesObs;
++	}
++
++	private readonly _onDidHunkAction = this._register(new Emitter<IAgentReviewHunkEvent>());
++	readonly onDidHunkAction = this._onDidHunkAction.event;
++
++	constructor(
++		@IChatEditingService chatEditingService: IChatEditingService,
++		@ITextModelService private readonly _textModelService: ITextModelService,
++		@IModelService private readonly _modelService: IModelService,
++		@IInstantiationService private readonly _instantiationService: IInstantiationService,
++	) {
++		super();
++		this._register(chatEditingService.registerEditReviewSession(this._session));
++
++		// Lets "open side-by-side diff" (toggleDiff) resolve the in-memory baseline model.
++		const modelService = this._modelService;
++		this._register(_textModelService.registerTextModelContentProvider(AGENT_REVIEW_BASELINE_SCHEME, new class implements ITextModelContentProvider {
++			async provideTextContent(resource: URI): Promise<ITextModel | null> {
++				return modelService.getModel(resource);
++			}
++		}));
++	}
++
++	getEntry(uri: URI): AgentReviewEntry | undefined {
++		return this._entries.get(uri)?.entry;
++	}
++
++	async setBaseline(uri: URI, baseline: string, kind: AgentReviewKind = 'modified'): Promise<AgentReviewEntry | undefined> {
++		const existing = this._entries.get(uri);
++		if (existing) {
++			await existing.entry.setBaseline(baseline, kind);
++			return existing.entry;
++		}
++		this._latest.set(uri, { baseline, kind });
++		let pending = this._pending.get(uri);
++		if (!pending) {
++			pending = this._createEntry(uri).finally(() => {
++				this._pending.delete(uri);
++				this._latest.delete(uri);
++			});
++			this._pending.set(uri, pending);
++		}
++		return pending;
++	}
++
++	private async _createEntry(uri: URI): Promise<AgentReviewEntry | undefined> {
++		const ref = await this._textModelService.createModelReference(uri);
++		const latest = this._latest.get(uri);
++		if (this._store.isDisposed || !latest) {
++			// disposed, or removed while the model was resolving
++			ref.dispose();
++			return undefined;
++		}
++		const entry = this._instantiationService.createInstance(AgentReviewEntry, ref, latest.baseline, latest.kind);
++		const listener = entry.onDidHunkAction(e => this._onDidHunkAction.fire(e));
++		this._entries.set(uri, { entry, listener });
++		this._session.entriesObs.set([...this._session.entriesObs.get(), entry], undefined);
++		return entry;
++	}
++
++	remove(uri: URI): void {
++		if (this._pending.has(uri)) {
++			this._latest.set(uri, null);
++		}
++		const item = this._entries.get(uri);
++		if (!item) {
++			return;
++		}
++		this._entries.delete(uri);
++		this._session.entriesObs.set(this._session.entriesObs.get().filter(e => e !== item.entry), undefined);
++		item.listener.dispose();
++		item.entry.dispose();
++	}
++
++	clear(): void {
++		for (const uri of [...this._entries.keys(), ...this._pending.keys()]) {
++			this.remove(uri);
++		}
++	}
++
++	override dispose(): void {
++		this.clear();
++		super.dispose();
++	}
++}
+diff --git a/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css b/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css
+new file mode 100644
+index 00000000..8d72ddc8
+--- /dev/null
++++ b/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css
+@@ -0,0 +1,17 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++/*
++ * Agent review: the per-hunk Keep/Undo buttons are always visible (the chat UI only shows them on
++ * hover). They are slightly dimmed until the pointer or the cursor is in the change.
++ */
++.agent-review-editor .chat-diff-change-content-widget {
++	opacity: 0.8;
++}
++
++.agent-review-editor .chat-diff-change-content-widget.hover,
++.agent-review-editor .chat-diff-change-content-widget:hover {
++	opacity: 1;
++}
+diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
+new file mode 100644
+index 00000000..dd2fe95b
+--- /dev/null
++++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
+@@ -0,0 +1,260 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++// Agent review in core: an engine baseline pushed in from the extension renders through the reused
++// chat-editing UI as (1) a view zone holding the deleted baseline lines as real editor rows and (2) a
++// per-hunk Keep/Undo widget. Keep moves the baseline and reports it; Undo rewrites the buffer and
++// saves it (only when the buffer had no unsaved edits). A reload from disk (an agent write) stays
++// pending, a keystroke outside the hunks folds into the baseline, created files are deleted on Undo,
++// and hunks stay as granular as the line diff, with word-level inner changes.
++
++import assert from 'assert';
++import { Event } from '../../../../../base/common/event.js';
++import { Disposable, DisposableStore, IDisposable, IReference } from '../../../../../base/common/lifecycle.js';
++import { ResourceMap } from '../../../../../base/common/map.js';
++import { constObservable, waitForState } from '../../../../../base/common/observable.js';
++import { URI } from '../../../../../base/common/uri.js';
++import { mock } from '../../../../../base/test/common/mock.js';
++import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
++import { IOverlayWidget, IViewZone, IViewZoneChangeAccessor } from '../../../../../editor/browser/editorBrowser.js';
++import { EditOperation } from '../../../../../editor/common/core/editOperation.js';
++import { Range } from '../../../../../editor/common/core/range.js';
++import { ITextModel } from '../../../../../editor/common/model.js';
++import { IEditorWorkerService } from '../../../../../editor/common/services/editorWorker.js';
++import { IModelService } from '../../../../../editor/common/services/model.js';
++import { IResolvedTextEditorModel, ITextModelContentProvider, ITextModelService } from '../../../../../editor/common/services/resolverService.js';
++import { EditSources } from '../../../../../editor/common/textModelEditSource.js';
++import { instantiateTestCodeEditor, ITestCodeEditor } from '../../../../../editor/test/browser/testCodeEditor.js';
++import { SyncDescriptor } from '../../../../../platform/instantiation/common/descriptors.js';
++import { ServiceCollection } from '../../../../../platform/instantiation/common/serviceCollection.js';
++import { IViewsService } from '../../../../services/views/common/viewsService.js';
++import { ITextFileSaveOptions, ITextFileService } from '../../../../services/textfile/common/textfiles.js';
++import { workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
++import { IChatWidgetService } from '../../../chat/browser/chat.js';
++import { IChatEditingExplanationModelManager } from '../../../chat/browser/chatEditing/chatEditingExplanationModelManager.js';
++import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntryChangeHunk } from '../../../chat/common/editing/chatEditingService.js';
++import { TestWorkerService } from '../../../inlineChat/test/browser/testWorkerService.js';
++import { AgentReviewKind, IAgentReviewHunkEvent } from '../../browser/agentReviewEntry.js';
++import { AgentReviewService } from '../../browser/agentReviewService.js';
++
++suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
++
++	const store = new DisposableStore();
++	const uri = URI.parse('test:/paper.tex');
++	const BASELINE = 'Intro sentence.\nThis sentence was deleted by the agent.\nClosing sentence.\n';
++	const DISK = 'Intro sentence.\nClosing sentence.\n';
++
++	let service: AgentReviewService;
++	let model: ITextModel;
++	let modelService: IModelService;
++	let editor: ITestCodeEditor;
++	let zones: Map<string, IViewZone>;
++	let overlays: Set<IOverlayWidget>;
++	let registeredSessions: IChatEditReviewSession[];
++	let hunkEvents: IAgentReviewHunkEvent[];
++	let dirty: boolean;
++	let saves: (ITextFileSaveOptions | undefined)[];
++
++	setup(() => {
++		zones = new Map();
++		overlays = new Set();
++		registeredSessions = [];
++		hunkEvents = [];
++		dirty = false;
++		saves = [];
++
++		const collection = new ServiceCollection();
++		collection.set(IEditorWorkerService, new SyncDescriptor(TestWorkerService));
++		collection.set(ITextModelService, new class extends mock<ITextModelService>() {
++			override async createModelReference(resource: URI): Promise<IReference<IResolvedTextEditorModel>> {
++				return { dispose: () => { }, object: { textEditorModel: model, getLanguageId: () => 'latex' } as IResolvedTextEditorModel };
++			}
++			override registerTextModelContentProvider(_scheme: string, _provider: ITextModelContentProvider): IDisposable {
++				return Disposable.None;
++			}
++		}());
++		collection.set(IChatEditingService, new class extends mock<IChatEditingService>() {
++			override registerEditReviewSession(session: IChatEditReviewSession): IDisposable {
++				registeredSessions.push(session);
++				return Disposable.None;
++			}
++		}());
++		collection.set(IChatEditingExplanationModelManager, new class extends mock<IChatEditingExplanationModelManager>() {
++			override readonly state = constObservable(new ResourceMap<never>());
++		}());
++		collection.set(ITextFileService, new class extends mock<ITextFileService>() {
++			override isDirty(): boolean {
++				return dirty;
++			}
++			override async save(resource: URI, options?: ITextFileSaveOptions): Promise<URI | undefined> {
++				saves.push(options);
++				return resource;
++			}
++		}());
++		collection.set(IChatWidgetService, new class extends mock<IChatWidgetService>() { }());
++		collection.set(IViewsService, new class extends mock<IViewsService>() {
++			override readonly onDidChangeViewVisibility = Event.None;
++		}());
++
++		const insta = store.add(store.add(workbenchInstantiationService(undefined, store)).createChild(collection));
++		store.add(insta.get(IEditorWorkerService) as TestWorkerService);
++		modelService = insta.get(IModelService);
++		model = store.add(modelService.createModel(DISK, null, uri, false));
++		service = store.add(insta.createInstance(AgentReviewService));
++
++		// A code editor without a DOM view: record view zones and overlay widgets instead.
++		editor = store.add(instantiateTestCodeEditor(insta, model));
++		let zoneIds = 0;
++		const accessor: IViewZoneChangeAccessor = {
++			addZone: zone => { const id = String(++zoneIds); zones.set(id, zone); return id; },
++			removeZone: id => { zones.delete(id); },
++			layoutZone: () => { },
++		};
++		editor.changeViewZones = callback => { callback(accessor); };
++		editor.addOverlayWidget = w => { overlays.add(w); };
++		editor.removeOverlayWidget = w => { overlays.delete(w); };
++		editor.layoutOverlayWidget = () => { };
++		editor.getTopForLineNumber = line => (line - 1) * 20;
++		editor.getScrollTop = () => 0;
++
++		store.add(service.onDidHunkAction(e => hunkEvents.push(e)));
++	});
++
++	teardown(() => store.clear());
++
++	ensureNoDisposablesAreLeakedInTestSuite();
++
++	async function showPending(baseline = BASELINE, kind: AgentReviewKind = 'modified') {
++		const entry = (await service.setBaseline(uri, baseline, kind))!;
++		await waitForState(entry.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
++		const integration = store.add(entry.createEditorIntegration(editor));
++		return { entry, integration };
++	}
++
++	function hunkWidgets(): (IOverlayWidget & IModifiedFileEntryChangeHunk)[] {
++		return [...overlays].filter(w => w.getDomNode().classList.contains('chat-diff-change-content-widget')) as (IOverlayWidget & IModifiedFileEntryChangeHunk)[];
++	}
++
++	test('registers a review session that the chat-editing UI picks up', async () => {
++		await showPending();
++		assert.strictEqual(registeredSessions.length, 1);
++		assert.strictEqual(registeredSessions[0].isGlobalEditingSession, true);
++		assert.ok(registeredSessions[0].getEntry(uri));
++	});
++
++	test('deleted baseline lines render as real rows in a view zone, with one Keep/Undo widget', async () => {
++		await showPending();
++
++		assert.strictEqual(zones.size, 1, 'one view zone for the deleted block');
++		const zone = [...zones.values()][0];
++		assert.strictEqual(zone.afterLineNumber, 1, 'deleted block sits after line 1');
++		assert.strictEqual(zone.heightInLines, 1, 'one deleted row');
++		assert.ok(zone.domNode.classList.contains('line-delete'));
++		assert.ok(zone.domNode.classList.contains('view-lines'), 'rendered with editor line markup (renderLines)');
++		// the line renderer emits non-breaking spaces, exactly like real editor rows
++		assert.ok(zone.domNode.textContent?.replace(/\u00a0/g, ' ').includes('This sentence was deleted by the agent.'));
++
++		assert.strictEqual(hunkWidgets().length, 1, 'one per-hunk toolbar');
++	});
++
++	test('Keep folds the hunk into the baseline, reports the full baseline, and leaves the buffer alone', async () => {
++		const { entry, integration } = await showPending();
++		await integration.acceptNearestChange(hunkWidgets()[0]);
++
++		assert.strictEqual(entry.originalModel.getValue(), DISK);
++		assert.strictEqual(model.getValue(), DISK);
++		assert.strictEqual(entry.changesCount.get(), 0);
++		assert.strictEqual(zones.size, 0);
++		assert.deepStrictEqual(hunkEvents.map(e => [e.kind, e.baseline]), [['accepted', DISK]]);
++		assert.deepStrictEqual(saves, []);
++	});
++
++	test('Undo writes the baseline text back into the buffer and saves it (without save participants)', async () => {
++		const { entry, integration } = await showPending();
++		await integration.rejectNearestChange(hunkWidgets()[0]);
++
++		assert.strictEqual(model.getValue(), BASELINE);
++		assert.strictEqual(entry.originalModel.getValue(), BASELINE);
++		assert.strictEqual(entry.changesCount.get(), 0);
++		assert.deepStrictEqual(hunkEvents.map(e => e.kind), ['rejected']);
++		assert.strictEqual(saves.length, 1);
++		assert.strictEqual(saves[0]?.skipSaveParticipants, true);
++	});
++
++	test('Undo never saves a buffer that has unsaved user edits', async () => {
++		const { integration } = await showPending();
++		dirty = true;
++		await integration.rejectNearestChange(hunkWidgets()[0]);
++		assert.strictEqual(model.getValue(), BASELINE);
++		assert.deepStrictEqual(saves, []);
++	});
++
++	test('file Keep reports acceptFile; file Undo restores and saves', async () => {
++		const { entry } = await showPending();
++		await entry.accept();
++		assert.deepStrictEqual(hunkEvents.map(e => e.kind), ['acceptFile']);
++		assert.strictEqual(entry.originalModel.getValue(), DISK);
++
++		await service.setBaseline(uri, BASELINE);
++		await waitForState(entry.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
++		await entry.reject();
++		assert.strictEqual(model.getValue(), BASELINE);
++		assert.deepStrictEqual(hunkEvents.map(e => e.kind), ['acceptFile', 'rejected']);
++		assert.strictEqual(saves.length, 1);
++	});
++
++	test('a created file (empty baseline): undoing everything asks for the file to be deleted', async () => {
++		const { entry, integration } = await showPending('', 'created');
++		assert.strictEqual(entry.kind, 'created');
++		await integration.rejectNearestChange(hunkWidgets()[0]);
++		assert.strictEqual(model.getValue(), '');
++		assert.deepStrictEqual(hunkEvents.map(e => e.kind), ['rejectFile']);
++		assert.deepStrictEqual(saves, [], 'no empty file is written');
++
++		hunkEvents.length = 0;
++		model.setValue(DISK);
++		await service.setBaseline(uri, '', 'created');
++		await entry.reject();
++		assert.deepStrictEqual(hunkEvents.map(e => e.kind), ['rejectFile']);
++		assert.strictEqual(model.getValue(), DISK, 'file-level Undo of a created file leaves deletion to the engine');
++	});
++
++	test('setBaseline with an unchanged baseline is a no-op; remove and clear drop entries', async () => {
++		const { entry } = await showPending();
++		const version = entry.originalModel.getVersionId();
++		await service.setBaseline(uri, BASELINE);
++		assert.strictEqual(entry.originalModel.getVersionId(), version);
++		service.remove(uri);
++		assert.strictEqual(service.getEntry(uri), undefined);
++		assert.strictEqual(registeredSessions[0].entries.get().length, 0);
++		const again = await service.setBaseline(uri, BASELINE);
++		await again!.getDiffInfo();
++		service.clear();
++		assert.strictEqual(registeredSessions[0].entries.get().length, 0);
++	});
++
++	test('hunks separated by a short unchanged line stay separate, with word-level inner changes', async () => {
++		model.setValue('ONE\nTWO\nTHREE\n}\nThe quick red fox\n');
++		const { entry } = await showPending('one\ntwo\nthree\n}\nThe quick brown fox\n');
++		const changes = entry.diffInfo.get().changes;
++		assert.strictEqual(changes.length, 2, 'not joined across the "}" line');
++		const inner = changes[1].innerChanges!;
++		assert.deepStrictEqual(inner.map(c => model.getValueInRange(c.modifiedRange)), ['red']);
++	});
++
++	test('a reload from disk (agent write) stays pending; a user keystroke outside hunks folds in', async () => {
++		const { entry } = await showPending();
++
++		// agent appends a line on disk -> TextFileEditorModel reloads via IModelService.updateModel(..., EditSources.reloadFromDisk())
++		modelService.updateModel(model, DISK + 'Agent line.\n', EditSources.reloadFromDisk());
++		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 ? d : undefined));
++		assert.ok(!entry.originalModel.getValue().includes('Agent line.'), 'agent write is not in the baseline');
++
++		// user types on line 1 (outside any hunk) -> rebased into the baseline, not shown as pending
++		model.applyEdits([EditOperation.replace(new Range(1, 1, 1, 6), 'Opening')]);
++		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 && entry.originalModel.getValue().startsWith('Opening') ? d : undefined));
++		assert.ok(entry.originalModel.getValue().startsWith('Opening sentence.'));
++	});
++});
+diff --git a/src/vs/workbench/workbench.common.main.ts b/src/vs/workbench/workbench.common.main.ts
+index 07ae813e..8815d77a 100644
+--- a/src/vs/workbench/workbench.common.main.ts
++++ b/src/vs/workbench/workbench.common.main.ts
+@@ -231,6 +231,7 @@ import './contrib/chat/browser/chat.contribution.js';
+ import './contrib/chat/browser/agentSessions/agentHost/agentHost.contribution.js';
+ import './contrib/chat/browser/chat.view.contribution.js';
+ import './contrib/inlineChat/browser/inlineChat.contribution.js';
++import './contrib/agentReview/browser/agentReview.contribution.js';
+ 
+ // Copilot Voice
+ import './contrib/agentsVoice/browser/agentsVoice.contribution.js';
