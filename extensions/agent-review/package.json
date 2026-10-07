@@ -1,0 +1,229 @@
+{
+  "name": "agent-review",
+  "displayName": "Agent Review",
+  "description": "Inline review (Keep/Undo per hunk) of file changes made by any coding agent, against an accepted baseline.",
+  "version": "0.1.0",
+  "publisher": "editor",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.134.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    },
+    "virtualWorkspaces": false
+  },
+  "contributes": {
+    "configuration": {
+      "title": "Agent Review",
+      "properties": {
+        "agentReview.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Track changes made outside the editor (by agents or tools) and show them inline for review."
+        },
+        "agentReview.ignore": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra gitignore-style patterns to exclude from review (on top of .gitignore and the built-in defaults: node_modules, build dirs, LaTeX artifacts)."
+        },
+        "agentReview.agent.command": {
+          "type": "string",
+          "default": "tact",
+          "description": "Command started in the agent terminal (Open Agent Terminal)."
+        },
+        "agentReview.agent.location": {
+          "type": "string",
+          "enum": [
+            "right",
+            "panel"
+          ],
+          "enumDescriptions": [
+            "In the editor area, docked to the right of the current editor.",
+            "In the terminal panel."
+          ],
+          "default": "right",
+          "description": "Where the agent terminal opens."
+        },
+        "agentReview.agent.referenceFormat": {
+          "type": "string",
+          "default": "@${relativePath}:${range}",
+          "markdownDescription": "Text sent to the agent terminal by **Send Selection to Agent** (`Ctrl/Cmd+L`). Placeholders: `${relativePath}`, `${absolutePath}`, `${range}` (`L42-58`, or `L42` for one line), `${startLine}`, `${endLine}`."
+        },
+        "agentReview.agent.includeSelectedText": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also send the selected text (as a bracketed paste after the reference)."
+        }
+      }
+    },
+    "configurationDefaults": {
+      "chat.disableAIFeatures": true
+    },
+    "commands": [
+      {
+        "command": "agentReview.acceptAll",
+        "title": "Keep All Changes",
+        "category": "Agent Review",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "agentReview.rejectAll",
+        "title": "Undo All Changes",
+        "category": "Agent Review",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "agentReview.acceptFile",
+        "title": "Keep",
+        "category": "Agent Review",
+        "icon": "$(check)"
+      },
+      {
+        "command": "agentReview.rejectFile",
+        "title": "Undo",
+        "category": "Agent Review",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "agentReview.openChanges",
+        "title": "Open All Changes",
+        "category": "Agent Review",
+        "icon": "$(diff-multiple)"
+      },
+      {
+        "command": "agentReview.openFileDiff",
+        "title": "Open Side-by-Side Diff",
+        "category": "Agent Review",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "agentReview.refresh",
+        "title": "Rescan Workspace",
+        "category": "Agent Review",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "agentReview.openAgentTerminal",
+        "title": "Open Agent Terminal",
+        "category": "Agent Review",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "agentReview.sendSelectionToAgent",
+        "title": "Send Selection to Agent",
+        "category": "Agent Review"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "agentReview.changes",
+          "name": "Agent Changes",
+          "icon": "$(diff-multiple)"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "agentReview.changes",
+        "contents": "No pending changes. Edits made outside the editor (by an agent, a script, anything) show up here and inline for review.\n[Open Agent Terminal](command:agentReview.openAgentTerminal)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "agentReview.openChanges",
+          "when": "view == agentReview.changes && agentReview.hasPendingChanges",
+          "group": "navigation@1"
+        },
+        {
+          "command": "agentReview.acceptAll",
+          "when": "view == agentReview.changes && agentReview.hasPendingChanges",
+          "group": "navigation@2"
+        },
+        {
+          "command": "agentReview.rejectAll",
+          "when": "view == agentReview.changes && agentReview.hasPendingChanges",
+          "group": "navigation@3"
+        },
+        {
+          "command": "agentReview.openAgentTerminal",
+          "when": "view == agentReview.changes",
+          "group": "navigation@4"
+        },
+        {
+          "command": "agentReview.refresh",
+          "when": "view == agentReview.changes",
+          "group": "1_more"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "agentReview.openFileDiff",
+          "when": "view == agentReview.changes && viewItem =~ /^agentReview\\.file/",
+          "group": "inline@1"
+        },
+        {
+          "command": "agentReview.acceptFile",
+          "when": "view == agentReview.changes && viewItem =~ /^agentReview\\.file/",
+          "group": "inline@2"
+        },
+        {
+          "command": "agentReview.rejectFile",
+          "when": "view == agentReview.changes && viewItem =~ /^agentReview\\.file/",
+          "group": "inline@3"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "agentReview.acceptFile",
+          "when": "false"
+        },
+        {
+          "command": "agentReview.rejectFile",
+          "when": "false"
+        },
+        {
+          "command": "agentReview.openFileDiff",
+          "when": "false"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "agentReview.sendSelectionToAgent",
+        "key": "ctrl+l",
+        "mac": "cmd+l",
+        "when": "editorTextFocus"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@editor/engine": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "@types/vscode": "1.134.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.3"
+  }
+}
