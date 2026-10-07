@@ -493,6 +493,33 @@ export class ReviewEngine {
     });
   }
 
+  /**
+   * Replace a file's accepted baseline with `content`, leaving the disk alone (E1). For hosts that compute
+   * a partial accept themselves, against their own hunking (e.g. VS Code's review UI keeping one hunk of its
+   * diff): the host sends the full new baseline text instead of an engine hunk id. `null` drops the file from
+   * the baseline (it then shows as created if it exists on disk). If `expectedBaseline` is given and the
+   * current baseline differs, throws `StaleChangeError` so the host re-reads and retries.
+   */
+  setBaselineContent(file: string, content: string | Uint8Array | null, options: { expectedBaseline?: string | Uint8Array | null } = {}): Promise<void> {
+    return this.run(async () => {
+      const rel = await this.relOrThrow(file);
+      if (await this.rules.isIgnored(rel)) throw new Error(`${rel} is ignored; it has no baseline`);
+      if (options.expectedBaseline !== undefined) {
+        const current = this.baseline.get(rel)?.oid ?? null;
+        const expected = options.expectedBaseline === null ? null : gitBlobId(toBytes(options.expectedBaseline));
+        if (current !== expected) throw new StaleChangeError(`The baseline of ${rel} changed; re-read it`);
+      }
+      if (content === null) {
+        if (this.baseline.delete(rel)) this.dirty = true;
+      } else {
+        await this.setBaseline(rel, toBytes(content));
+      }
+      this.updatePending(rel);
+      this.emit('accept', [rel]);
+      await this.persist();
+    });
+  }
+
   /** Accept a whole file (for renames, either path accepts the rename). */
   acceptFile(file: string): Promise<void> {
     return this.run(async () => {

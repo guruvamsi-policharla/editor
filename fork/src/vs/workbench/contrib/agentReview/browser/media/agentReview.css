@@ -1,0 +1,17 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/*
+ * Agent review: the per-hunk Keep/Undo buttons are always visible (the chat UI only shows them on
+ * hover). They are slightly dimmed until the pointer or the cursor is in the change.
+ */
+.agent-review-editor .chat-diff-change-content-widget {
+	opacity: 0.8;
+}
+
+.agent-review-editor .chat-diff-change-content-widget.hover,
+.agent-review-editor .chat-diff-change-content-widget:hover {
+	opacity: 1;
+}

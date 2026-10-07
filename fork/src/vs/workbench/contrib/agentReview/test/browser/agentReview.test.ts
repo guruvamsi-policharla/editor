@@ -3,10 +3,12 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-// Phase 0 spike test: proves that an engine-style baseline pushed into core renders through the
-// reused chat-editing UI as (1) a view zone holding the deleted baseline lines as real editor rows
-// and (2) a per-hunk Accept/Reject widget, and that Accept moves the baseline while Reject rewrites
-// the buffer. Also checks that a reload from disk (an agent write) stays pending.
+// Agent review in core: an engine baseline pushed in from the extension renders through the reused
+// chat-editing UI as (1) a view zone holding the deleted baseline lines as real editor rows and (2) a
+// per-hunk Keep/Undo widget. Keep moves the baseline and reports it; Undo rewrites the buffer and
+// saves it (only when the buffer had no unsaved edits). A reload from disk (an agent write) stays
+// pending, a keystroke outside the hunks folds into the baseline, created files are deleted on Undo,
+// and hunks stay as granular as the line diff, with word-level inner changes.
 
 import assert from 'assert';
 import { Event } from '../../../../../base/common/event.js';
@@ -28,15 +30,16 @@ import { instantiateTestCodeEditor, ITestCodeEditor } from '../../../../../edito
 import { SyncDescriptor } from '../../../../../platform/instantiation/common/descriptors.js';
 import { ServiceCollection } from '../../../../../platform/instantiation/common/serviceCollection.js';
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
+import { ITextFileSaveOptions, ITextFileService } from '../../../../services/textfile/common/textfiles.js';
 import { workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
 import { IChatWidgetService } from '../../../chat/browser/chat.js';
 import { IChatEditingExplanationModelManager } from '../../../chat/browser/chatEditing/chatEditingExplanationModelManager.js';
 import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntryChangeHunk } from '../../../chat/common/editing/chatEditingService.js';
 import { TestWorkerService } from '../../../inlineChat/test/browser/testWorkerService.js';
-import { IAgentReviewHunkEvent } from '../../browser/agentReviewEntry.js';
+import { AgentReviewKind, IAgentReviewHunkEvent } from '../../browser/agentReviewEntry.js';
 import { AgentReviewService } from '../../browser/agentReviewService.js';
 
-suite('AgentReview spike: engine baseline rendered by chat-editing UI', () => {
+suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 
 	const store = new DisposableStore();
 	const uri = URI.parse('test:/paper.tex');
@@ -51,12 +54,16 @@ suite('AgentReview spike: engine baseline rendered by chat-editing UI', () => {
 	let overlays: Set<IOverlayWidget>;
 	let registeredSessions: IChatEditReviewSession[];
 	let hunkEvents: IAgentReviewHunkEvent[];
+	let dirty: boolean;
+	let saves: (ITextFileSaveOptions | undefined)[];
 
 	setup(() => {
 		zones = new Map();
 		overlays = new Set();
 		registeredSessions = [];
 		hunkEvents = [];
+		dirty = false;
+		saves = [];
 
 		const collection = new ServiceCollection();
 		collection.set(IEditorWorkerService, new SyncDescriptor(TestWorkerService));
@@ -76,6 +83,15 @@ suite('AgentReview spike: engine baseline rendered by chat-editing UI', () => {
 		}());
 		collection.set(IChatEditingExplanationModelManager, new class extends mock<IChatEditingExplanationModelManager>() {
 			override readonly state = constObservable(new ResourceMap<never>());
+		}());
+		collection.set(ITextFileService, new class extends mock<ITextFileService>() {
+			override isDirty(): boolean {
+				return dirty;
+			}
+			override async save(resource: URI, options?: ITextFileSaveOptions): Promise<URI | undefined> {
+				saves.push(options);
+				return resource;
+			}
 		}());
 		collection.set(IChatWidgetService, new class extends mock<IChatWidgetService>() { }());
 		collection.set(IViewsService, new class extends mock<IViewsService>() {
@@ -110,8 +126,8 @@ suite('AgentReview spike: engine baseline rendered by chat-editing UI', () => {
 
 	ensureNoDisposablesAreLeakedInTestSuite();
 
-	async function showPending() {
-		const entry = (await service.setBaseline(uri, BASELINE))!;
+	async function showPending(baseline = BASELINE, kind: AgentReviewKind = 'modified') {
+		const entry = (await service.setBaseline(uri, baseline, kind))!;
 		await waitForState(entry.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
 		const integration = store.add(entry.createEditorIntegration(editor));
 		return { entry, integration };
@@ -128,7 +144,7 @@ suite('AgentReview spike: engine baseline rendered by chat-editing UI', () => {
 		assert.ok(registeredSessions[0].getEntry(uri));
 	});
 
-	test('deleted baseline lines render as real rows in a view zone, with one Accept/Reject widget', async () => {
+	test('deleted baseline lines render as real rows in a view zone, with one Keep/Undo widget', async () => {
 		await showPending();
 
 		assert.strictEqual(zones.size, 1, 'one view zone for the deleted block');
@@ -143,7 +159,7 @@ suite('AgentReview spike: engine baseline rendered by chat-editing UI', () => {
 		assert.strictEqual(hunkWidgets().length, 1, 'one per-hunk toolbar');
 	});
 
-	test('Accept folds the hunk into the baseline and leaves the buffer alone', async () => {
+	test('Keep folds the hunk into the baseline, reports the full baseline, and leaves the buffer alone', async () => {
 		const { entry, integration } = await showPending();
 		await integration.acceptNearestChange(hunkWidgets()[0]);
 
@@ -152,16 +168,80 @@ suite('AgentReview spike: engine baseline rendered by chat-editing UI', () => {
 		assert.strictEqual(entry.changesCount.get(), 0);
 		assert.strictEqual(zones.size, 0);
 		assert.deepStrictEqual(hunkEvents.map(e => [e.kind, e.baseline]), [['accepted', DISK]]);
+		assert.deepStrictEqual(saves, []);
 	});
 
-	test('Reject writes the baseline text back into the buffer', async () => {
+	test('Undo writes the baseline text back into the buffer and saves it (without save participants)', async () => {
 		const { entry, integration } = await showPending();
 		await integration.rejectNearestChange(hunkWidgets()[0]);
 
 		assert.strictEqual(model.getValue(), BASELINE);
 		assert.strictEqual(entry.originalModel.getValue(), BASELINE);
 		assert.strictEqual(entry.changesCount.get(), 0);
-		assert.strictEqual(hunkEvents.at(-1)?.kind, 'rejected');
+		assert.deepStrictEqual(hunkEvents.map(e => e.kind), ['rejected']);
+		assert.strictEqual(saves.length, 1);
+		assert.strictEqual(saves[0]?.skipSaveParticipants, true);
+	});
+
+	test('Undo never saves a buffer that has unsaved user edits', async () => {
+		const { integration } = await showPending();
+		dirty = true;
+		await integration.rejectNearestChange(hunkWidgets()[0]);
+		assert.strictEqual(model.getValue(), BASELINE);
+		assert.deepStrictEqual(saves, []);
+	});
+
+	test('file Keep reports acceptFile; file Undo restores and saves', async () => {
+		const { entry } = await showPending();
+		await entry.accept();
+		assert.deepStrictEqual(hunkEvents.map(e => e.kind), ['acceptFile']);
+		assert.strictEqual(entry.originalModel.getValue(), DISK);
+
+		await service.setBaseline(uri, BASELINE);
+		await waitForState(entry.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
+		await entry.reject();
+		assert.strictEqual(model.getValue(), BASELINE);
+		assert.deepStrictEqual(hunkEvents.map(e => e.kind), ['acceptFile', 'rejected']);
+		assert.strictEqual(saves.length, 1);
+	});
+
+	test('a created file (empty baseline): undoing everything asks for the file to be deleted', async () => {
+		const { entry, integration } = await showPending('', 'created');
+		assert.strictEqual(entry.kind, 'created');
+		await integration.rejectNearestChange(hunkWidgets()[0]);
+		assert.strictEqual(model.getValue(), '');
+		assert.deepStrictEqual(hunkEvents.map(e => e.kind), ['rejectFile']);
+		assert.deepStrictEqual(saves, [], 'no empty file is written');
+
+		hunkEvents.length = 0;
+		model.setValue(DISK);
+		await service.setBaseline(uri, '', 'created');
+		await entry.reject();
+		assert.deepStrictEqual(hunkEvents.map(e => e.kind), ['rejectFile']);
+		assert.strictEqual(model.getValue(), DISK, 'file-level Undo of a created file leaves deletion to the engine');
+	});
+
+	test('setBaseline with an unchanged baseline is a no-op; remove and clear drop entries', async () => {
+		const { entry } = await showPending();
+		const version = entry.originalModel.getVersionId();
+		await service.setBaseline(uri, BASELINE);
+		assert.strictEqual(entry.originalModel.getVersionId(), version);
+		service.remove(uri);
+		assert.strictEqual(service.getEntry(uri), undefined);
+		assert.strictEqual(registeredSessions[0].entries.get().length, 0);
+		const again = await service.setBaseline(uri, BASELINE);
+		await again!.getDiffInfo();
+		service.clear();
+		assert.strictEqual(registeredSessions[0].entries.get().length, 0);
+	});
+
+	test('hunks separated by a short unchanged line stay separate, with word-level inner changes', async () => {
+		model.setValue('ONE\nTWO\nTHREE\n}\nThe quick red fox\n');
+		const { entry } = await showPending('one\ntwo\nthree\n}\nThe quick brown fox\n');
+		const changes = entry.diffInfo.get().changes;
+		assert.strictEqual(changes.length, 2, 'not joined across the "}" line');
+		const inner = changes[1].innerChanges!;
+		assert.deepStrictEqual(inner.map(c => model.getValueInRange(c.modifiedRange)), ['red']);
 	});
 
 	test('a reload from disk (agent write) stays pending; a user keystroke outside hunks folds in', async () => {

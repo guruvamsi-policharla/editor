@@ -1,5 +1,7 @@
 # Fork build setup (Phase 0)
 
+> **Phase 2 update:** the scripts are now `fork/scripts/prepare-vscodium.sh`, `build.sh`, `test-core.sh` and `install-extension.sh`; branding is in `fork/branding.env`. CI is implemented (`.github/workflows/ci.yml`, `build-linux.yml`, `build-macos.yml`, `upstream-bump.yml`). A full Linux build was measured on the free private-repo runner (it fits with disk cleanup + 10 GB swap, ~30 min). See [phase2.md](phase2.md#ci) and [`../fork/README.md`](../fork/README.md). The sections below are the Phase 0 analysis.
+
 **TL;DR:** Build the fork **the VSCodium way: patches, not a source fork**. Our repo keeps only our patches (`patches/*.patch`), readable copies of new core files and scripts (`fork/`), product overrides, and the built-in extension. CI clones VSCodium at a pinned ref and drops our patches into its official downstream hook, `patches/user/`. VSCodium's `prepare_vscode.sh` applies them last, after its own ~60 patches. I ran a real Linux x64 build of VS Code 1.135.0 + VSCodium patches + the Phase 0 spike on an 8-vCPU / 16 GB box:
 
 - **~14 min** from a clean checkout to a packaged `codium` (~8 min once dependencies are installed).

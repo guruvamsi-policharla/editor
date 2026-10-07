@@ -1,0 +1,63 @@
+diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts
+index 01fe8016..824ae88d 100644
+--- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts
++++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts
+@@ -90,7 +90,7 @@ abstract class NavigateAction extends ChatEditingEditorAction {
+ 				? localize2('next', 'Go to Next Chat Edit')
+ 				: localize2('prev', 'Go to Previous Chat Edit'),
+ 			icon: next ? Codicon.arrowDown : Codicon.arrowUp,
+-			precondition: ContextKeyExpr.and(ChatContextKeys.enabled, ctxHasEditorModification),
++			precondition: ContextKeyExpr.and(ContextKeyExpr.or(ChatContextKeys.enabled, ContextKeyExpr.has('agentReview.isActive')), ctxHasEditorModification),
+ 			keybinding: {
+ 				primary: next
+ 					? KeyMod.Alt | KeyCode.F5
+diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
+index 309562ec..582489c7 100644
+--- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
++++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
+@@ -80,7 +80,14 @@ export class ChatEditingTextModelChangeService extends Disposable {
+ 	public get allEditsAreFromUs() {
+ 		return this._allEditsAreFromUs;
+ 	}
+-	private _isExternalEditInProgress: (() => boolean) | undefined;
++	private _isExternalEditInProgress: ((e: IModelContentChangedEvent) => boolean) | undefined;
++
++	/**
++	 * Extra diff options. Agent review turns on word-level (subword) inner changes and keeps
++	 * hunks as granular as the line diff so that each one can be kept or undone on its own.
++	 */
++	public extendToSubwords = false;
++	public preserveShortMatchingLines = false;
+ 	private _diffOperation: Promise<IDocumentDiff | undefined> | undefined;
+ 	private _diffOperationIds: number = 0;
+ 
+@@ -126,7 +133,8 @@ export class ChatEditingTextModelChangeService extends Disposable {
+ 		private readonly originalModel: ITextModel,
+ 		private readonly modifiedModel: ITextModel,
+ 		private readonly state: IObservable<ModifiedFileEntryState>,
+-		isExternalEditInProgress: (() => boolean) | undefined,
++		/** Edits for which this returns true are kept as pending changes instead of being folded into the original (called with the content change event). */
++		isExternalEditInProgress: ((e: IModelContentChangedEvent) => boolean) | undefined,
+ 		@IEditorWorkerService private readonly _editorWorkerService: IEditorWorkerService,
+ 		@IAccessibilitySignalService private readonly _accessibilitySignalService: IAccessibilitySignalService,
+ 	) {
+@@ -357,7 +365,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
+ 
+ 	private _mirrorEdits(event: IModelContentChangedEvent) {
+ 		const edit = offsetEditFromContentChanges(event.changes);
+-		const isExternalEdit = this._isExternalEditInProgress?.();
++		const isExternalEdit = this._isExternalEditInProgress?.(event);
+ 
+ 		if (this._isEditFromUs || isExternalEdit) {
+ 			const e_sum = this._originalToModifiedEdit;
+@@ -501,7 +509,9 @@ export class ChatEditingTextModelChangeService extends Disposable {
+ 			{
+ 				ignoreTrimWhitespace: false, // NEVER ignore whitespace so that undo/accept edits are correct and so that all changes (1 of 2) are spelled out
+ 				computeMoves: false,
+-				maxComputationTimeMs: 3000
++				maxComputationTimeMs: 3000,
++				extendToSubwords: this.extendToSubwords,
++				preserveShortMatchingLines: this.preserveShortMatchingLines,
+ 			},
+ 			'advanced'
+ 		);
