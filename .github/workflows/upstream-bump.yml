@@ -1,0 +1,89 @@
+name: Upstream bump
+
+# Monthly: move fork/upstream.env to VSCodium's latest stable release, check that our patches still apply,
+# and open a PR with the result. A failing patch check still opens the PR (marked as such) so a human can
+# fix the patch on that branch.
+# Note: PRs opened with GITHUB_TOKEN don't trigger other workflows; re-run CI on the PR by pushing to it,
+# or set a BUMP_TOKEN secret (fine-grained PAT: contents + pull requests) to open it under a user.
+
+on:
+  schedule:
+    - cron: "0 15 2 * *" # 2nd of each month, 15:00 UTC
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: VSCodium commit or tag to move to (default: latest release)
+        type: string
+        default: ""
+
+permissions: {}
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve the target VSCodium commit
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          . fork/upstream.env
+          if [[ -n "${INPUT_REF}" ]]; then
+            tag="${INPUT_REF}"
+          else
+            tag=$(gh release view -R VSCodium/vscodium --json tagName --jq .tagName)
+          fi
+          sha=$(git ls-remote "${VSCODIUM_REPO}" "refs/tags/${tag}^{}" "refs/tags/${tag}" "${tag}" | head -1 | cut -f1)
+          [[ -n "${sha}" ]] || sha="${tag}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          if [[ "${sha}" == "${VSCODIUM_REF}" ]]; then echo "same=yes" >> "$GITHUB_OUTPUT"; else echo "same=no" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: steps.target.outputs.same == 'no'
+        with:
+          node-version: 24
+
+      - name: Check our patches against the new base
+        id: check
+        if: steps.target.outputs.same == 'no'
+        env:
+          VSCODIUM_REF_OVERRIDE: ${{ steps.target.outputs.sha }}
+        run: |
+          if fork/scripts/prepare-vscodium.sh --patches-only "$RUNNER_TEMP/fork" > "$RUNNER_TEMP/check.log" 2>&1; then
+            echo "result=pass" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=fail" >> "$GITHUB_OUTPUT"
+          fi
+          tail -40 "$RUNNER_TEMP/check.log"
+
+      - name: Open the bump PR
+        if: steps.target.outputs.same == 'no'
+        env:
+          GH_TOKEN: ${{ secrets.BUMP_TOKEN || github.token }}
+          TAG: ${{ steps.target.outputs.tag }}
+          SHA: ${{ steps.target.outputs.sha }}
+          RESULT: ${{ steps.check.outputs.result }}
+        run: |
+          branch="upstream-bump/${TAG}"
+          sed -i -E "s|^VSCODIUM_REF=.*|VSCODIUM_REF=\"${SHA}\"|" fork/upstream.env
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${branch}"
+          git commit -am "Bump VSCodium to ${TAG}"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "${branch}" --force
+          status="Our patches apply cleanly."
+          [[ "${RESULT}" == "pass" ]] || status="**Our patches do not apply.** Fix them on this branch (see the workflow log for the failing hunk)."
+          gh pr create -R "${GITHUB_REPOSITORY}" --head "${branch}" --base main \
+            --title "Bump VSCodium to ${TAG}" \
+            --body "Moves fork/upstream.env to VSCodium ${TAG} (${SHA}). ${status}"$'\n\n'"Run log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            || echo "PR already exists"

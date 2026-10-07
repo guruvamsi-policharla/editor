@@ -119,7 +119,10 @@ jobs:
           fork/scripts/build.sh "$WORKDIR"
           echo "BUILD_S=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
 
-      - name: Core unit tests (contrib/agentReview)
+      - name: Allow Electron's sandbox (Ubuntu 24.04 restricts unprivileged user namespaces)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Core unit tests (contrib/agentReview + upstream regressions)
         run: fork/scripts/test-core.sh "$WORKDIR"
 
       - name: Smoke test

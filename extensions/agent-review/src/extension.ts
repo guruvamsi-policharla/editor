@@ -50,9 +50,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   log.info(`Engine ready for ${folders.length} folder(s) in ${Date.now() - t0} ms (storage: ${storageBase}).`);
 
   // Core supports the commands only in the fork; in stock VS Code there's no inline rendering.
-  const coreCommands = new Set(await vscode.commands.getCommands(true));
-  const hasCore = coreCommands.has(CORE_SET_BASELINE);
-  if (!hasCore) log.warn('Core review UI not found (not running in the fork): review list only.');
+  // Probe with `_agentReview.clear`, which also starts core clean (an extension-host restart leaves old
+  // entries). getCommands(true) can't be used for detection: it filters out `_`-prefixed commands.
+  let hasCore = true;
+  try {
+    await vscode.commands.executeCommand(CORE_CLEAR);
+  } catch {
+    hasCore = false;
+    log.warn('Core review UI not found (not running in the fork): review list only.');
+  }
 
   const bridge: CoreBridge = {
     setBaseline: async (abs, baseline, kind) => {
@@ -253,8 +259,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
-  // Start clean in core (an extension-host restart leaves old entries), then push everything pending.
-  if (hasCore) await vscode.commands.executeCommand(CORE_CLEAR);
+  // Push everything pending (core was cleared by the probe above).
   await ctl.syncAll();
   updateBadge();
   // Changes made while the editor was closed were picked up by the engine's open (stat-cache rescan).

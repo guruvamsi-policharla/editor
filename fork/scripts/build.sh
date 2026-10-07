@@ -27,8 +27,16 @@ fi
 export NODE_OPTIONS="--max-old-space-size=${MAX_OLD_SPACE_SIZE:-7168}"
 cd "${WORKDIR}/vscodium/vscode"
 
-echo "== compile + minify (gulp vscode-min-prepack)"
-npm run gulp vscode-min-prepack
+# Same steps as `gulp vscode-min-prepack` (what VSCodium runs), but one gulp process per step: the
+# TypeScript compile's heap is released before esbuild bundles everything, which lowers the peak enough
+# for a 16 GB box without swap (and the 8 GB CI runner with swap). A single prepack process got
+# OOM-killed in bundle-vscode on the 16 GB box.
+gulp_step() { echo "== gulp $1"; npm run gulp "$1"; }
+gulp_step compile-build-without-mangling
+rm -rf .build/extensions
+gulp_step compile-non-native-extensions-build
+gulp_step compile-extension-media-build
+gulp_step minify-vscode            # bundle-vscode + minify
 
 # As VSCodium's build.sh: drop js-debug's win32-only native module. (Skipped vs. VSCodium: policy
 # definitions, the Rust CLI and the remote server; not needed for the desktop MVP.)

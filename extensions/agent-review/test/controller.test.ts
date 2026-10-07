@@ -145,6 +145,25 @@ describe('ReviewController', () => {
     expect(core.shown.get(abs)?.baseline).toBe('Intro.\nMethods.\nResults.\n');
   });
 
+  it('a save in flight is not an external change, even if the list asks for line counts before the write', async () => {
+    await open();
+    const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\n');
+    dirty.add(abs);
+    const content = 'Intro!\nNew methods.\nResults.\n';
+    await ctl.onWillSave(abs, content, [{ offset: 5, length: 1, text: '!', origin: 'user' }]);
+    await ctl.lineCounts(ctl.pendingFiles[0]!); // the tree refreshes on the user-save event, before the write
+    await ctl.idle();
+    fs.writeFileSync(abs, content);
+    await ctl.handleFsEvents([abs]);
+    await ctl.idle();
+    dirty.delete(abs);
+    await ctl.onBufferSettled(abs);
+    await ctl.idle();
+    expect(conflicts).toEqual([]);
+    expect(await ctl.baselineText(abs)).toBe('Intro!\nMethods.\nResults.\n');
+    expect(core.shown.get(abs)?.baseline).toBe('Intro!\nMethods.\nResults.\n');
+  });
+
   it('created files show with an empty baseline; Undo deletes them', async () => {
     await open();
     const abs = await agentWrite('notes/todo.md', '# TODO\n- write\n');

@@ -61,6 +61,12 @@ export class ReviewController {
   private readonly pushed = new Map<string, string>();
   /** Files whose push waits for the buffer to be saved or reverted (dirty buffer). */
   private readonly deferred = new Set<string>();
+  /**
+   * Saves reported to the engine but not yet on disk. Between the two, the engine's freshness checks would
+   * read the old disk and call it an external change, so nothing asks the engine about these files.
+   */
+  private readonly saving = new Set<string>();
+  private readonly countsCache = new Map<string, { added: number; removed: number }>();
   private readonly listeners = new Set<() => void>();
   private readonly subscriptions: { dispose(): void }[] = [];
   private files: PendingFile[] = [];
@@ -119,6 +125,7 @@ export class ReviewController {
   }
 
   private async onEngineChange(engine: ReviewEngine, e: ChangeEvent): Promise<void> {
+    if (e.reason === 'self') for (const rel of e.paths) this.saving.delete(toAbs(engine.root, rel));
     this.refreshList();
     this.fire();
     for (const rel of e.paths) {
@@ -135,7 +142,7 @@ export class ReviewController {
       return;
     }
     const dirty = this.docs.isDirty(f.absPath);
-    if (dirty && reason === 'external') this.onConflict?.(f.absPath);
+    if (dirty && reason === 'external' && !this.saving.has(f.absPath)) this.onConflict?.(f.absPath);
     if (dirty && this.pushed.has(f.absPath)) {
       // The UI shows baseline vs. buffer; moving the baseline under unsaved typing would mislabel it.
       this.deferred.add(f.absPath);
@@ -207,6 +214,7 @@ export class ReviewController {
     const abs = normalizePath(absPath);
     const engine = await this.review.engineFor(abs);
     if (!engine) return;
+    this.saving.add(abs);
     try {
       await engine.reportUserSave(abs, content, edits ? { edits } : {});
     } catch (err) {
@@ -217,6 +225,7 @@ export class ReviewController {
   /** The buffer is clean again (saved, reverted, or closed): run any deferred push. */
   onBufferSettled(absPath: string): Promise<void> {
     const abs = normalizePath(absPath);
+    this.saving.delete(abs);
     if (!this.deferred.has(abs)) return Promise.resolve();
     return this.enqueue(async () => {
       this.deferred.delete(abs);
@@ -279,6 +288,7 @@ export class ReviewController {
   /** Added/removed line counts for the review list (text files only). */
   async lineCounts(f: PendingFile): Promise<{ added: number; removed: number } | undefined> {
     if (f.binary || f.large || f.kind === 'renamed') return undefined;
+    if (this.saving.has(f.absPath)) return this.countsCache.get(f.absPath);
     const change = await this.engineForRoot(f.root).getFileChange(f.rel).catch(() => undefined);
     if (!change) return undefined;
     let added = 0;
@@ -287,6 +297,7 @@ export class ReviewController {
       added += h.newLines.length;
       removed += h.oldLines.length;
     }
+    this.countsCache.set(f.absPath, { added, removed });
     return { added, removed };
   }
 
