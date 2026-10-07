@@ -155,7 +155,18 @@ First real run (ubuntu-latest, run 37686371458; job summary numbers):
 | Disk at end | 39 GB used, 33 GB free |
 | Total wall time | ~30 min |
 
-That run built the app, then failed in the core unit-test step: Electron aborts on Ubuntu 24.04 because AppArmor restricts unprivileged user namespaces (`setuid_sandbox_host.cc: The SUID sandbox helper binary was found, but is not configured correctly`). Fix: `sysctl kernel.apparmor_restrict_unprivileged_userns=0` before the tests. The re-run with that fix and with the split gulp steps is reported in PR #3.
+That run built the app, then failed in the core unit-test step: Electron aborts on Ubuntu 24.04 because AppArmor restricts unprivileged user namespaces (`setuid_sandbox_host.cc: The SUID sandbox helper binary was found, but is not configured correctly`). Fix: `sysctl kernel.apparmor_restrict_unprivileged_userns=0` before the tests. The re-run with that fix and with the split gulp steps **passed end to end** (run 37690533548, label `full-build-linux`):
+
+| Step | Time |
+|---|---|
+| Free disk | 1 min 44 s |
+| Prepare | 8 min 11 s |
+| Build (split gulp steps) | 15 min 15 s |
+| Core unit tests (Electron, sandbox fix) | 30 s ✅ |
+| Smoke test + package + upload | 38 s |
+| **Total job** | **27 min 17 s** |
+
+Peak RAM 7.67 GB of 7.9 GB, minimum available 271 MB, peak swap 4.6 GB of 10 GB, disk peak 39 GB used. The artifact `linux-x64` is a 229 MB tarball. So the free 2-vCPU runner is enough, but memory is the tight part: keep the swap file and the heap cap.
 
 Locally (8 vCPU / 16 GB, no swap): prepare 258 s, build 468 s. A single `gulp vscode-min-prepack` process was OOM-killed twice in `bundle-vscode` on that box, so `build.sh` now runs the same steps as separate gulp processes (compile, extensions, media, minify, package). That build succeeded.
 
