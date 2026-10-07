@@ -125,10 +125,10 @@ index 00000000..e5626a30
 +registerWorkbenchContribution2(AgentReviewEditorState.ID, AgentReviewEditorState, WorkbenchPhase.AfterRestored);
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
 new file mode 100644
-index 00000000..2e161091
+index 00000000..77436ac5
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
-@@ -0,0 +1,242 @@
+@@ -0,0 +1,243 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -153,7 +153,7 @@ index 00000000..2e161091
 +import { IDocumentDiff } from '../../../../editor/common/diff/documentDiffProvider.js';
 +import { DetailedLineRangeMapping } from '../../../../editor/common/diff/rangeMapping.js';
 +import { ILanguageService } from '../../../../editor/common/languages/language.js';
-+import { ITextModel } from '../../../../editor/common/model.js';
++import { EndOfLinePreference, ITextModel } from '../../../../editor/common/model.js';
 +import { createTextBufferFactory } from '../../../../editor/common/model/textModel.js';
 +import { IModelService } from '../../../../editor/common/services/model.js';
 +import { IResolvedTextEditorModel } from '../../../../editor/common/services/resolverService.js';
@@ -322,7 +322,8 @@ index 00000000..2e161091
 +		this._kind = kind;
 +		const stateChanged = this._stateObs.get() !== ModifiedFileEntryState.Modified;
 +		this._stateObs.set(ModifiedFileEntryState.Modified, undefined);
-+		if (!stateChanged && this.originalModel.getValue() === baseline) {
++		// Models keep one EOL, so a baseline that differs only in line endings (mixed CRLF/LF files) is the same here.
++		if (!stateChanged && this.originalModel.getValue(EndOfLinePreference.LF) === baseline.replace(/\r\n/g, '\n')) {
 +			return; // e.g. the echo of a Keep that this entry reported itself
 +		}
 +		await this._changeService.resetDocumentValues(baseline, undefined);
@@ -803,10 +804,10 @@ index 00000000..8d72ddc8
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
 new file mode 100644
-index 00000000..dd2fe95b
+index 00000000..bf2fcbc0
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
-@@ -0,0 +1,260 @@
+@@ -0,0 +1,262 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -1030,11 +1031,13 @@ index 00000000..dd2fe95b
 +		assert.strictEqual(model.getValue(), DISK, 'file-level Undo of a created file leaves deletion to the engine');
 +	});
 +
-+	test('setBaseline with an unchanged baseline is a no-op; remove and clear drop entries', async () => {
++	test('setBaseline with an unchanged baseline (line endings aside) is a no-op; remove and clear drop entries', async () => {
 +		const { entry } = await showPending();
 +		const version = entry.originalModel.getVersionId();
 +		await service.setBaseline(uri, BASELINE);
 +		assert.strictEqual(entry.originalModel.getVersionId(), version);
++		await service.setBaseline(uri, BASELINE.replace(/\n/g, '\r\n'), 'modified');
++		assert.strictEqual(entry.originalModel.getVersionId(), version, 'a baseline that differs only in line endings is the same');
 +		service.remove(uri);
 +		assert.strictEqual(service.getEntry(uri), undefined);
 +		assert.strictEqual(registeredSessions[0].entries.get().length, 0);

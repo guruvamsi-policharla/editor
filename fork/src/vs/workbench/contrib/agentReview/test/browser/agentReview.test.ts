@@ -221,11 +221,13 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.strictEqual(model.getValue(), DISK, 'file-level Undo of a created file leaves deletion to the engine');
 	});
 
-	test('setBaseline with an unchanged baseline is a no-op; remove and clear drop entries', async () => {
+	test('setBaseline with an unchanged baseline (line endings aside) is a no-op; remove and clear drop entries', async () => {
 		const { entry } = await showPending();
 		const version = entry.originalModel.getVersionId();
 		await service.setBaseline(uri, BASELINE);
 		assert.strictEqual(entry.originalModel.getVersionId(), version);
+		await service.setBaseline(uri, BASELINE.replace(/\n/g, '\r\n'), 'modified');
+		assert.strictEqual(entry.originalModel.getVersionId(), version, 'a baseline that differs only in line endings is the same');
 		service.remove(uri);
 		assert.strictEqual(service.getEntry(uri), undefined);
 		assert.strictEqual(registeredSessions[0].entries.get().length, 0);

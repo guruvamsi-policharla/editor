@@ -7,7 +7,7 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { NotPendingError, StaleChangeError, type ChangeEvent, type ChangeKind, type MultiRootReview, type ReviewEngine, type TrackedEdit } from '@editor/engine';
+import { equalIgnoringEol, NotPendingError, StaleChangeError, type ChangeEvent, type ChangeKind, type MultiRootReview, type ReviewEngine, type TrackedEdit } from '@editor/engine';
 
 export type InlineKind = 'modified' | 'created';
 
@@ -155,7 +155,9 @@ export class ReviewController {
     }
     const engine = this.engineForRoot(f.root);
     const baseline = f.kind === 'created' ? '' : decode(await engine.getBaselineContent(f.rel));
-    if (this.pushed.get(f.absPath) === baseline) return;
+    // Core's models keep one EOL per file, so a baseline that differs only in line endings looks the same there.
+    const pushed = this.pushed.get(f.absPath);
+    if (pushed !== undefined && equalIgnoringEol(pushed, baseline)) return;
     this.pushed.set(f.absPath, baseline);
     this.deferred.delete(f.absPath);
     try {
@@ -193,7 +195,8 @@ export class ReviewController {
         case 'accepted':
           // Record first so the engine's 'accept' event doesn't bounce the same text back to the UI.
           this.pushed.set(abs, action.baseline);
-          await engine.setBaselineContent(abs, action.baseline);
+          // The UI's text models normalize line endings; give each line back its own (mixed CRLF/LF files).
+          await engine.setBaselineContent(abs, action.baseline, { restoreLineEndings: true });
           break;
         case 'rejected':
           // The core UI already restored the hunk in the buffer and saved it (if it was clean, without save

@@ -22,7 +22,7 @@ import { getCodeEditor, ICodeEditor } from '../../../../editor/browser/editorBro
 import { IDocumentDiff } from '../../../../editor/common/diff/documentDiffProvider.js';
 import { DetailedLineRangeMapping } from '../../../../editor/common/diff/rangeMapping.js';
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
-import { ITextModel } from '../../../../editor/common/model.js';
+import { EndOfLinePreference, ITextModel } from '../../../../editor/common/model.js';
 import { createTextBufferFactory } from '../../../../editor/common/model/textModel.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
 import { IResolvedTextEditorModel } from '../../../../editor/common/services/resolverService.js';
@@ -191,7 +191,8 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 		this._kind = kind;
 		const stateChanged = this._stateObs.get() !== ModifiedFileEntryState.Modified;
 		this._stateObs.set(ModifiedFileEntryState.Modified, undefined);
-		if (!stateChanged && this.originalModel.getValue() === baseline) {
+		// Models keep one EOL, so a baseline that differs only in line endings (mixed CRLF/LF files) is the same here.
+		if (!stateChanged && this.originalModel.getValue(EndOfLinePreference.LF) === baseline.replace(/\r\n/g, '\n')) {
 			return; // e.g. the echo of a Keep that this entry reported itself
 		}
 		await this._changeService.resetDocumentValues(baseline, undefined);

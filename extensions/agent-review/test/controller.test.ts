@@ -107,6 +107,25 @@ describe('ReviewController', () => {
     expect(ctl.pendingFiles).toEqual([]);
   });
 
+  it('Keep on a file with mixed CRLF/LF line endings leaves nothing spurious pending', async () => {
+    fs.writeFileSync(path.join(root, 'mixed.txt'), 'one\r\ntwo\nthree\r\nfour\n');
+    await open();
+    const abs = await agentWrite('mixed.txt', 'one\r\nTWO\nthree\r\nfour\nfive\r\n');
+    const calls = core.calls.length;
+    // The core UI's models normalize line endings: the baseline it reports after keeping the TWO hunk uses one EOL.
+    await ctl.onReviewAction({ kind: 'accepted', path: abs, baseline: 'one\nTWO\nthree\nfour\n' });
+    await ctl.idle();
+    expect(await ctl.baselineText(abs)).toBe('one\r\nTWO\nthree\r\nfour\n'); // each line keeps its own ending
+    expect(await ctl.lineCounts(ctl.pendingFiles[0]!)).toEqual({ added: 1, removed: 0 }); // only "five"
+    expect(core.calls.length).toBe(calls); // an EOL-only difference is no reason to push again
+    // Keeping the last hunk leaves nothing pending.
+    await ctl.onReviewAction({ kind: 'accepted', path: abs, baseline: 'one\nTWO\nthree\nfour\nfive\n' });
+    await ctl.idle();
+    expect(ctl.pendingFiles).toEqual([]);
+    expect(core.shown.has(abs)).toBe(false);
+    expect(read(abs)).toBe('one\r\nTWO\nthree\r\nfour\nfive\r\n'); // the file is untouched
+  });
+
   it('Undo on a hunk: the buffer restore is saved like a user save and leaves the baseline alone', async () => {
     await open();
     const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\nDiscussion.\n');

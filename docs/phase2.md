@@ -94,6 +94,7 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 ## Engine additions
 
 - **E1 `setBaselineContent(file, content, { expectedBaseline? })`.** It sets the accepted baseline to exact content, as the editor computed it when one hunk was kept. It never touches the disk, `null` makes the file a pending creation, and it persists. There are 5 tests. Because the protocol passes the full baseline, hunk boundaries never have to match between core's diff and the engine's diff.
+- **`setBaselineContent(..., { restoreLineEndings: true })`.** VS Code's models keep one EOL per file, so the baseline a Keep sends back has lost a mixed CRLF/LF file's per-line endings. With this option each line takes its ending from the matching line on disk, else in the old baseline. Likewise `reportUserSave` attributes a save that VS Code wrote back with one EOL against the EOL-converted disk and baseline: the conversion folds in, and agent lines aren't mistaken for user rewrites (before, the edit log failed to replay and the agent's hunks were folded in).
 - **E2 was not needed.** A hunk Undo is a normal buffer edit that core saves. The engine then sees disk == baseline in that region; with unsaved edits, the edit log attributes the restore as user edits overlapping an agent hunk, which leaves the baseline alone. Both paths have tests.
 - No other engine changes. The engine's `isFresh` reads the disk between `reportUserSave` and the actual write, which made the save look external. The extension works around this by not querying the engine about a file while its save is in flight (test included). See *Remaining work*.
 
@@ -115,7 +116,6 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 
 - **Engine (Phase 1 follow-up):** make `isFresh` aware of an in-flight `reportUserSave`, so hosts don't need the workaround.
 - **Symlinked workspace roots:** the engine normalizes real paths, but editor URIs can use the link path, so an entry might not match the open editor.
-- **Mixed line endings:** the baseline model normalizes EOLs, so a file with mixed CRLF/LF can show a spurious change on Keep.
 - **The macOS packaged build hasn't been run.** The workflow exists but wasn't triggered, because macOS minutes bill at 10x on private repos (see CI).
 - **Not in the MVP:** a proposed API instead of commands, icons, signing, installers, and auto-update.
 

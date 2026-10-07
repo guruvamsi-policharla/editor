@@ -28,6 +28,7 @@ import {
   type HeadState,
   type IndexStat,
 } from './git/repo.js';
+import { convertEol, restoreLineEndings, uniformEol } from './eol.js';
 import { IgnoreRules, type IgnoreOptions } from './ignore.js';
 import { stagedRegions } from './staging.js';
 import { gitBlobId, ObjectStore } from './store/objectStore.js';
@@ -347,15 +348,25 @@ export class ReviewEngine {
         newBaseline = saved;
         attribution = 'file';
       } else {
-        const diskText = diskBytes ? decodeText(diskBytes)! : '';
+        let diskText = diskBytes ? decodeText(diskBytes)! : '';
         const savedText = decodeText(saved)!;
+        let baseText = baseBytes ? decodeText(baseBytes)! : '';
+        // Editors that keep one EOL per buffer (VS Code) write a file with mixed or other line endings back with
+        // that EOL, and report edits in its coordinates. That conversion is the editor's, not a change to any
+        // line: attribute against the converted disk and baseline, so it folds in everywhere and agent lines
+        // aren't mistaken for user rewrites.
+        const savedEol = uniformEol(savedText);
+        if (savedEol && convertEol(diskText, savedEol) !== diskText) {
+          diskText = convertEol(diskText, savedEol);
+          baseText = convertEol(baseText, savedEol);
+        }
         let prov = options.edits ? trackEdits(diskText, options.edits) : undefined;
         attribution = 'edits';
         if (!prov || joinLines(prov.lines.map((l) => l.text)) !== savedText) {
           prov = provenanceFromDiff(diskText, savedText, 'user');
           attribution = options.edits ? 'fallback' : 'diff';
         }
-        const baseLines = baseBytes ? splitLines(decodeText(baseBytes)!) : [];
+        const baseLines = splitLines(baseText);
         const folded = foldUserSave(baseLines, splitLines(diskText), prov);
         // An agent-created file the user saved without folding anything stays a pending creation.
         if (!baseEntry && folded.length === 0 && saved.length > 0) newBaseline = undefined;
@@ -499,8 +510,16 @@ export class ReviewEngine {
    * diff): the host sends the full new baseline text instead of an engine hunk id. `null` drops the file from
    * the baseline (it then shows as created if it exists on disk). If `expectedBaseline` is given and the
    * current baseline differs, throws `StaleChangeError` so the host re-reads and retries.
+   *
+   * `restoreLineEndings`: the content comes from an editor buffer that normalized line endings (VS Code keeps
+   * one EOL per model). Each line gets the ending of the matching line on disk, else in the current baseline,
+   * so a file with mixed CRLF/LF endings doesn't turn into a change on every line.
    */
-  setBaselineContent(file: string, content: string | Uint8Array | null, options: { expectedBaseline?: string | Uint8Array | null } = {}): Promise<void> {
+  setBaselineContent(
+    file: string,
+    content: string | Uint8Array | null,
+    options: { expectedBaseline?: string | Uint8Array | null; restoreLineEndings?: boolean } = {},
+  ): Promise<void> {
     return this.run(async () => {
       const rel = await this.relOrThrow(file);
       if (await this.rules.isIgnored(rel)) throw new Error(`${rel} is ignored; it has no baseline`);
@@ -512,7 +531,19 @@ export class ReviewEngine {
       if (content === null) {
         if (this.baseline.delete(rel)) this.dirty = true;
       } else {
-        await this.setBaseline(rel, toBytes(content));
+        let bytes = toBytes(content);
+        const text = options.restoreLineEndings ? decodeText(bytes) : undefined;
+        if (text !== undefined) {
+          const sources: string[] = [];
+          const disk = await this.readDisk(rel);
+          const diskText = disk ? decodeText(disk.data) : undefined;
+          if (diskText !== undefined) sources.push(diskText);
+          const base = this.baseline.get(rel);
+          const baseText = base ? decodeText(await this.store.read(base.oid)) : undefined;
+          if (baseText !== undefined) sources.push(baseText);
+          bytes = encodeText(restoreLineEndings(text, sources));
+        }
+        await this.setBaseline(rel, bytes);
       }
       this.updatePending(rel);
       this.emit('accept', [rel]);
