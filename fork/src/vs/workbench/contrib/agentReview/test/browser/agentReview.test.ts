@@ -28,6 +28,7 @@ import { IResolvedTextEditorModel, ITextModelContentProvider, ITextModelService 
 import { EditSources } from '../../../../../editor/common/textModelEditSource.js';
 import { instantiateTestCodeEditor, ITestCodeEditor } from '../../../../../editor/test/browser/testCodeEditor.js';
 import { SyncDescriptor } from '../../../../../platform/instantiation/common/descriptors.js';
+import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
 import { ServiceCollection } from '../../../../../platform/instantiation/common/serviceCollection.js';
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
 import { ITextFileSaveOptions, ITextFileService } from '../../../../services/textfile/common/textfiles.js';
@@ -36,6 +37,11 @@ import { IChatWidgetService } from '../../../chat/browser/chat.js';
 import { IChatEditingExplanationModelManager } from '../../../chat/browser/chatEditing/chatEditingExplanationModelManager.js';
 import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntryChangeHunk } from '../../../chat/common/editing/chatEditingService.js';
 import { TestWorkerService } from '../../../inlineChat/test/browser/testWorkerService.js';
+import { IEditorService } from '../../../../services/editor/common/editorService.js';
+import { IResourceDiffEditorInput } from '../../../../common/editor.js';
+import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
+import { IAction2Options } from '../../../../../platform/actions/common/actions.js';
+import { AcceptAction, AcceptAllEditsAction, AcceptHunkAction, NavigateAction, RejectAction, RejectHunkAction, ToggleAccessibleDiffViewAction, ToggleDiffAction } from '../../../chat/browser/chatEditing/chatEditingEditorActions.js';
 import { AgentReviewKind, IAgentReviewHunkEvent } from '../../browser/agentReviewEntry.js';
 import { AgentReviewService } from '../../browser/agentReviewService.js';
 
@@ -56,6 +62,7 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 	let hunkEvents: IAgentReviewHunkEvent[];
 	let dirty: boolean;
 	let saves: (ITextFileSaveOptions | undefined)[];
+	let insta: TestInstantiationService;
 
 	setup(() => {
 		zones = new Map();
@@ -98,7 +105,7 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 			override readonly onDidChangeViewVisibility = Event.None;
 		}());
 
-		const insta = store.add(store.add(workbenchInstantiationService(undefined, store)).createChild(collection));
+		insta = store.add(store.add(workbenchInstantiationService(undefined, store)).createChild(collection));
 		store.add(insta.get(IEditorWorkerService) as TestWorkerService);
 		modelService = insta.get(IModelService);
 		model = store.add(modelService.createModel(DISK, null, uri, false));
@@ -244,6 +251,42 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.strictEqual(changes.length, 2, 'not joined across the "}" line');
 		const inner = changes[1].innerChanges!;
 		assert.deepStrictEqual(inner.map(c => model.getValueInRange(c.modifiedRange)), ['red']);
+	});
+
+	test('the side-by-side diff is titled with agent-review wording', async () => {
+		const { integration } = await showPending();
+		const opened: IResourceDiffEditorInput[] = [];
+		const editorService = insta.get(IEditorService);
+		editorService.openEditor = (async (input: IResourceDiffEditorInput) => { opened.push(input); return undefined; }) as typeof editorService.openEditor;
+		await integration.toggleDiff(undefined, true);
+		assert.deepStrictEqual(opened.map(i => i.label), ['paper.tex (agent changes)']);
+	});
+
+	test('review commands use agent-review wording; Keep/Undo labels and keybindings are unchanged', () => {
+		const desc = (action: { desc: Readonly<IAction2Options> }) => {
+			const kb = action.desc.keybinding;
+			const title = action.desc.title;
+			return {
+				title: typeof title === 'string' ? title : title.value,
+				short: action.desc.shortTitle && (typeof action.desc.shortTitle === 'string' ? action.desc.shortTitle : action.desc.shortTitle.value),
+				key: (Array.isArray(kb) ? kb[0] : kb)?.primary,
+			};
+		};
+		const next = new (class extends NavigateAction { constructor() { super(true); } })();
+		const prev = new (class extends NavigateAction { constructor() { super(false); } })();
+		assert.deepStrictEqual(
+			[next, prev, new AcceptAction(), new RejectAction(), new AcceptAllEditsAction(), new AcceptHunkAction(), new RejectHunkAction(), new ToggleDiffAction(), new ToggleAccessibleDiffViewAction()].map(desc),
+			[
+				{ title: 'Go to Next Agent Change', short: undefined, key: KeyMod.Alt | KeyCode.F5 },
+				{ title: 'Go to Previous Agent Change', short: undefined, key: KeyMod.Alt | KeyMod.Shift | KeyCode.F5 },
+				{ title: 'Keep Agent Changes', short: 'Keep', key: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyY },
+				{ title: 'Undo Agent Changes', short: 'Undo', key: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyN },
+				{ title: 'Keep All Agent Changes', short: undefined, key: KeyMod.CtrlCmd | KeyMod.Alt | KeyCode.KeyY },
+				{ title: 'Keep this Change', short: 'Keep', key: KeyMod.CtrlCmd | KeyCode.KeyY },
+				{ title: 'Undo this Change', short: 'Undo', key: KeyMod.CtrlCmd | KeyCode.KeyN },
+				{ title: 'Toggle Diff Editor for Agent Changes', short: undefined, key: KeyMod.Alt | KeyMod.Shift | KeyCode.F7 },
+				{ title: 'Show Accessible Diff View for Agent Changes', short: undefined, key: KeyCode.F7 },
+			]);
 	});
 
 	test('a reload from disk (agent write) stays pending; a user keystroke outside hunks folds in', async () => {

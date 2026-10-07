@@ -1,16 +1,114 @@
+diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
+index 2e43b458..2fe7541c 100644
+--- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
++++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
+@@ -699,7 +699,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 				original: { resource: this._entry.originalURI },
+ 				modified: { resource: this._entry.modifiedURI },
+ 				options: { selection },
+-				label: localize('diff.generic', '{0} (changes from chat)', basename(this._entry.modifiedURI))
++				label: localize('agentReview.diff.generic', '{0} (agent changes)', basename(this._entry.modifiedURI))
+ 			});
+ 
+ 			if (diffEditor && diffEditor.input) {
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts
-index 01fe8016..824ae88d 100644
+index 01fe8016..d1784e0e 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts
 +++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts
-@@ -90,7 +90,7 @@ abstract class NavigateAction extends ChatEditingEditorAction {
- 				? localize2('next', 'Go to Next Chat Edit')
- 				: localize2('prev', 'Go to Previous Chat Edit'),
+@@ -79,7 +79,7 @@ abstract class ChatEditingEditorAction extends Action2 {
+ 	abstract runChatEditingCommand(accessor: ServicesAccessor, session: IChatEditReviewSession, entry: IModifiedFileEntry, integration: IModifiedFileEntryEditorIntegration, ...args: unknown[]): Promise<void> | void;
+ }
+ 
+-abstract class NavigateAction extends ChatEditingEditorAction {
++export abstract class NavigateAction extends ChatEditingEditorAction {
+ 
+ 	constructor(readonly next: boolean) {
+ 		super({
+@@ -87,10 +87,10 @@ abstract class NavigateAction extends ChatEditingEditorAction {
+ 				? 'chatEditor.action.navigateNext'
+ 				: 'chatEditor.action.navigatePrevious',
+ 			title: next
+-				? localize2('next', 'Go to Next Chat Edit')
+-				: localize2('prev', 'Go to Previous Chat Edit'),
++				? localize2('agentReview.next', 'Go to Next Agent Change')
++				: localize2('agentReview.prev', 'Go to Previous Agent Change'),
  			icon: next ? Codicon.arrowDown : Codicon.arrowUp,
 -			precondition: ContextKeyExpr.and(ChatContextKeys.enabled, ctxHasEditorModification),
 +			precondition: ContextKeyExpr.and(ContextKeyExpr.or(ChatContextKeys.enabled, ContextKeyExpr.has('agentReview.isActive')), ctxHasEditorModification),
  			keybinding: {
  				primary: next
  					? KeyMod.Alt | KeyCode.F5
+@@ -179,14 +179,14 @@ abstract class KeepOrUndoAction extends ChatEditingEditorAction {
+ 		super({
+ 			id,
+ 			title: _keep
+-				? localize2('accept', 'Keep Chat Edits')
+-				: localize2('discard', 'Undo Chat Edits'),
++				? localize2('agentReview.accept', 'Keep Agent Changes')
++				: localize2('agentReview.discard', 'Undo Agent Changes'),
+ 			shortTitle: _keep
+ 				? localize2('accept2', 'Keep')
+ 				: localize2('discard2', 'Undo'),
+ 			tooltip: _keep
+-				? localize2('accept3', 'Keep Chat Edits in this File')
+-				: localize2('discard3', 'Undo Chat Edits in this File'),
++				? localize2('agentReview.accept3', 'Keep Agent Changes in this File')
++				: localize2('agentReview.discard3', 'Undo Agent Changes in this File'),
+ 			precondition: ContextKeyExpr.and(ctxHasEditorModification, ctxIsCurrentlyBeingModified.negate()),
+ 			icon: _keep
+ 				? Codicon.check
+@@ -306,11 +306,11 @@ export class RejectHunkAction extends AcceptRejectHunkAction {
+ 	}
+ }
+ 
+-class ToggleDiffAction extends ChatEditingEditorAction {
++export class ToggleDiffAction extends ChatEditingEditorAction {
+ 	constructor() {
+ 		super({
+ 			id: 'chatEditor.action.toggleDiff',
+-			title: localize2('diff', 'Toggle Diff Editor for Chat Edits'),
++			title: localize2('agentReview.diff', 'Toggle Diff Editor for Agent Changes'),
+ 			category: CHAT_CATEGORY,
+ 			toggled: {
+ 				condition: ContextKeyExpr.or(EditorContextKeys.inDiffEditor, ActiveEditorContext.isEqualTo(TEXT_DIFF_EDITOR_ID))!,
+@@ -340,11 +340,11 @@ class ToggleDiffAction extends ChatEditingEditorAction {
+ 	}
+ }
+ 
+-class ToggleAccessibleDiffViewAction extends ChatEditingEditorAction {
++export class ToggleAccessibleDiffViewAction extends ChatEditingEditorAction {
+ 	constructor() {
+ 		super({
+ 			id: 'chatEditor.action.showAccessibleDiffView',
+-			title: localize2('accessibleDiff', 'Show Accessible Diff View for Chat Edits'),
++			title: localize2('agentReview.accessibleDiff', 'Show Accessible Diff View for Agent Changes'),
+ 			f1: true,
+ 			precondition: ContextKeyExpr.and(ctxHasEditorModification, ctxIsCurrentlyBeingModified.negate()),
+ 			keybinding: {
+@@ -388,8 +388,8 @@ export class AcceptAllEditsAction extends ChatEditingEditorAction {
+ 	constructor() {
+ 		super({
+ 			id: AcceptAllEditsAction.ID,
+-			title: localize2('acceptAllEdits', 'Keep All Chat Edits'),
+-			tooltip: localize2('acceptAllEditsTooltip', 'Keep All Chat Edits in this Session'),
++			title: localize2('agentReview.acceptAllEdits', 'Keep All Agent Changes'),
++			tooltip: localize2('agentReview.acceptAllEditsTooltip', 'Keep All Agent Changes'),
+ 			precondition: ContextKeyExpr.and(ctxHasEditorModification, ctxIsCurrentlyBeingModified.negate()),
+ 			icon: Codicon.checkAll,
+ 			f1: true,
+diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingServiceImpl.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingServiceImpl.ts
+index c0b57e5f..ccf58dbe 100644
+--- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingServiceImpl.ts
++++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingServiceImpl.ts
+@@ -450,7 +450,7 @@ class ChatDecorationsProvider extends Disposable implements IDecorationsProvider
+ 			return {
+ 				weight: 1000,
+ 				letter: Codicon.diffModified,
+-				tooltip: localize('chatEditing.modified2', "Pending changes from chat"),
++				tooltip: localize('agentReview.modified', "Pending agent changes"),
+ 				bubble: true
+ 			};
+ 		}
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
 index 309562ec..582489c7 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
@@ -61,3 +159,16 @@ index 309562ec..582489c7 100644
  			},
  			'advanced'
  		);
+diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/notebook/chatEditingNotebookEditorIntegration.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/notebook/chatEditingNotebookEditorIntegration.ts
+index 2eaea73e..b48e5c6c 100644
+--- a/src/vs/workbench/contrib/chat/browser/chatEditing/notebook/chatEditingNotebookEditorIntegration.ts
++++ b/src/vs/workbench/contrib/chat/browser/chatEditing/notebook/chatEditingNotebookEditorIntegration.ts
+@@ -666,7 +666,7 @@ class ChatEditingNotebookEditorWidgetIntegration extends Disposable implements I
+ 		const diffInput: IResourceDiffEditorInput = {
+ 			original: { resource: this._entry.originalURI },
+ 			modified: { resource: this._entry.modifiedURI },
+-			label: localize('diff.generic', '{0} (changes from chat)', basename(this._entry.modifiedURI))
++			label: localize('agentReview.diff.generic', '{0} (agent changes)', basename(this._entry.modifiedURI))
+ 		};
+ 		await this._editorService.openEditor(diffInput);
+ 
