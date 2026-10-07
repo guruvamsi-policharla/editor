@@ -41,6 +41,12 @@ export const DEFAULT_LARGE_FILE_THRESHOLD = 1024 * 1024;
 /** Stat-cache entries recorded less than this long after the file's mtime are not trusted (racy-git rule). */
 const RACY_MS = 2000;
 const GIT_RETRY_MS = 200;
+/**
+ * How long a reported save may take to reach the disk. Until then (or until the disk changes to anything else),
+ * the old content on disk is the save not having landed yet, not an external change. A save that never lands
+ * (the write failed) stops counting after this.
+ */
+const SAVE_IN_FLIGHT_MS = 10_000;
 
 export interface ReviewEngineOptions {
   /** Workspace root. Symlinks are resolved; all paths are reported relative to the real root. */
@@ -155,6 +161,15 @@ interface ReadResult {
   data: Uint8Array;
 }
 
+/** A save reported with `reportUserSave` that may not be on disk yet. */
+interface InFlightSave {
+  data: Uint8Array;
+  oid: string;
+  /** The file when the save was reported (null: no file). Same content and stat = the write hasn't landed. */
+  before: Pick<DiskEntry, 'oid' | 'size' | 'mtimeMs' | 'ctimeMs'> | null;
+  until: number;
+}
+
 export class ReviewEngine {
   readonly root: string;
   readonly storageDir: string;
@@ -173,6 +188,7 @@ export class ReviewEngine {
   private disk = new Map<string, DiskEntry>();
   private pending = new Set<string>();
   private expectedWrites = new Map<string, string | null>();
+  private inFlightSaves = new Map<string, InFlightSave>();
 
   private repo: GitRepoInfo | undefined;
   private gitHead: HeadState | undefined;
@@ -337,7 +353,10 @@ export class ReviewEngine {
       this.expectedWrites.set(rel, savedOid);
       if (await this.rules.isIgnored(rel)) return { attribution: 'file' as const };
 
-      const diskBytes = options.base !== undefined ? toBytes(options.base) : (await this.readDisk(rel))?.data;
+      const diskNow = await this.readDisk(rel);
+      const diskBytes = options.base !== undefined ? toBytes(options.base) : diskNow?.data;
+      if (diskNow?.entry.oid !== savedOid) this.inFlightSaves.set(rel, { data: saved, oid: savedOid, before: diskNow?.entry ?? null, until: this.now() + SAVE_IN_FLIGHT_MS });
+      else this.inFlightSaves.delete(rel);
       const baseEntry = this.baseline.get(rel);
       const baseBytes = baseEntry ? await this.store.read(baseEntry.oid) : undefined;
 
@@ -779,6 +798,7 @@ export class ReviewEngine {
   private async isFresh(rel: string): Promise<boolean> {
     const known = this.disk.get(rel);
     const now = await this.readDisk(rel);
+    if (this.saveInFlight(rel, now)) return true; // the reported save just hasn't landed yet
     if ((now?.entry.oid ?? null) === (known?.oid ?? null)) {
       if (now) this.disk.set(rel, now.entry);
       return true;
@@ -786,6 +806,22 @@ export class ReviewEngine {
     const changed = await this.refreshPath(rel);
     this.emit('external', changed);
     return false;
+  }
+
+  /**
+   * The save reported for `rel`, if it hasn't reached the disk yet: the file (`now`, as just read) is exactly
+   * as it was when the save was reported, same content and same stat. Forgotten once the disk shows anything
+   * else, when a watcher event for the path is handled, or after SAVE_IN_FLIGHT_MS.
+   */
+  private saveInFlight(rel: string, now: ReadResult | undefined): InFlightSave | undefined {
+    const f = this.inFlightSaves.get(rel);
+    if (!f) return undefined;
+    const b = f.before;
+    const e = now?.entry;
+    const unchanged = b && e ? b.oid === e.oid && b.size === e.size && b.mtimeMs === e.mtimeMs && b.ctimeMs === e.ctimeMs : !b && !e;
+    if (unchanged && this.now() <= f.until) return f;
+    this.inFlightSaves.delete(rel);
+    return undefined;
   }
 
   private async allFresh(paths: readonly string[]): Promise<boolean> {
@@ -812,6 +848,8 @@ export class ReviewEngine {
       this.updatePending(p);
     };
 
+    // Watcher events are what actually happened on disk: they end any in-flight save of these paths.
+    for (const p of [...this.inFlightSaves.keys()]) if (p === rel || p.startsWith(`${rel}/`)) this.inFlightSaves.delete(p);
     if (!st || (st.type !== 'file' && st.type !== 'directory')) {
       for (const p of this.trackedUnder(rel)) drop(p);
       return changed;
@@ -1019,7 +1057,8 @@ export class ReviewEngine {
     const b = this.baseline.get(rel);
     const baseText = b ? decodeText(await this.store.read(b.oid))! : '';
     const diskRead = this.disk.has(rel) ? await this.readDisk(rel) : undefined;
-    const diskText = diskRead ? decodeText(diskRead.data)! : '';
+    const diskData = this.saveInFlight(rel, diskRead)?.data ?? diskRead?.data;
+    const diskText = diskData ? decodeText(diskData)! : '';
     const baseLines = splitLines(baseText);
     const diskLines = splitLines(diskText);
     return { change: { ...summary, hunks: computeHunks(baseLines, diskLines) }, baseLines, diskLines };
@@ -1028,7 +1067,10 @@ export class ReviewEngine {
   private async acceptPath(rel: string, checkFresh: boolean): Promise<void> {
     if (checkFresh && !(await this.isFresh(rel))) throw new StaleChangeError(`${rel} changed on disk`);
     const r = this.disk.has(rel) ? await this.readDisk(rel) : undefined;
-    if (r) {
+    const saving = this.saveInFlight(rel, r);
+    if (saving) {
+      await this.setBaseline(rel, saving.data); // accept what is being saved, not the old disk
+    } else if (r) {
       this.disk.set(rel, r.entry);
       await this.setBaseline(rel, r.data);
     } else if (this.baseline.delete(rel)) {

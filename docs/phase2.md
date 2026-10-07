@@ -96,7 +96,7 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 - **E1 `setBaselineContent(file, content, { expectedBaseline? })`.** It sets the accepted baseline to exact content, as the editor computed it when one hunk was kept. It never touches the disk, `null` makes the file a pending creation, and it persists. There are 5 tests. Because the protocol passes the full baseline, hunk boundaries never have to match between core's diff and the engine's diff.
 - **`setBaselineContent(..., { restoreLineEndings: true })`.** VS Code's models keep one EOL per file, so the baseline a Keep sends back has lost a mixed CRLF/LF file's per-line endings. With this option each line takes its ending from the matching line on disk, else in the old baseline. Likewise `reportUserSave` attributes a save that VS Code wrote back with one EOL against the EOL-converted disk and baseline: the conversion folds in, and agent lines aren't mistaken for user rewrites (before, the edit log failed to replay and the agent's hunks were folded in).
 - **E2 was not needed.** A hunk Undo is a normal buffer edit that core saves. The engine then sees disk == baseline in that region; with unsaved edits, the edit log attributes the restore as user edits overlapping an agent hunk, which leaves the baseline alone. Both paths have tests.
-- No other engine changes. The engine's `isFresh` reads the disk between `reportUserSave` and the actual write, which made the save look external. The extension works around this by not querying the engine about a file while its save is in flight (test included). See *Remaining work*.
+- **Saves in flight.** Between `reportUserSave` and the editor's write, the disk still has the old content. The engine now remembers the reported save: while the file is exactly as it was when the save was reported (same content and stat, within 10 s), freshness checks, `getFileChange` and `acceptFile` use the saved content instead of calling the old disk an external change. A watcher event for the path, any other disk content, or the timeout ends it. The extension's workaround (not querying the engine about a file while its save was in flight) is gone.
 
 ## Decisions I made
 
@@ -114,7 +114,6 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 
 ## Remaining work (not in this PR)
 
-- **Engine (Phase 1 follow-up):** make `isFresh` aware of an in-flight `reportUserSave`, so hosts don't need the workaround.
 - **Symlinked workspace roots:** the engine normalizes real paths, but editor URIs can use the link path, so an entry might not match the open editor.
 - **The macOS packaged build hasn't been run.** The workflow exists but wasn't triggered, because macOS minutes bill at 10x on private repos (see CI).
 - **Not in the MVP:** a proposed API instead of commands, icons, signing, installers, and auto-update.
