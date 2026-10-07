@@ -1,0 +1,16 @@
+{
+  "name": "editor",
+  "private": true,
+  "description": "Agent-agnostic inline review for VS Code",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces",
+    "typecheck": "npm run typecheck --workspaces"
+  }
+}
