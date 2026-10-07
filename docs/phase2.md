@@ -87,8 +87,8 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 | Patch | Lines | Upstream files touched |
 |---|---|---|
 | `90-diff-preserve-short-matching-lines.patch` | +27 −1 (diff option + 2 unit tests) | `linesDiffComputer.ts`, `documentDiffProvider.ts`, `defaultLinesDiffComputer.ts`, the diff test file |
-| `91-chat-editing-review-hooks.patch` | +14 −5 | `chatEditingTextModelChangeService.ts` (C3 predicate gets the event; public `extendToSubwords` / `preserveShortMatchingLines`), `chatEditingEditorActions.ts` (C5 precondition) |
-| `92-agent-review.patch` | +701: new `contrib/agentReview/` (entry, service, contribution, CSS, 10 tests) + 1 import line in `workbench.common.main.ts` | `workbench.common.main.ts` (1 line) |
+| `91-chat-editing-review-hooks.patch` | +31 −21 | `chatEditingTextModelChangeService.ts` (C3 predicate gets the event; public `extendToSubwords` / `preserveShortMatchingLines`), `chatEditingEditorActions.ts` (C5 precondition; agent-review titles; 3 classes exported for tests), `chatEditingCodeEditorIntegration.ts` / `chatEditingNotebookEditorIntegration.ts` (diff title), `chatEditingServiceImpl.ts` (explorer tooltip) |
+| `92-agent-review.patch` | +1301 (incl. blank lines): new `contrib/agentReview/` (entry, service, contribution, save-attribution participants, 3-way merge, CSS, 18 tests in 3 files) + 1 import line in `workbench.common.main.ts` | `workbench.common.main.ts` (1 line) |
 | `93-default-layout.patch` | +2 −2 | Secondary side bar hidden by default (`workbench.contribution.ts`, `themeMainServiceImpl.ts`) |
 
 ## Engine additions
@@ -122,9 +122,9 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 
 | Suite | Count | Command |
 |---|---|---|
-| Engine (vitest) | 144 (11 files, incl. 5 for E1) | `npm test -w @editor/engine` |
-| Extension integration (vitest, real engine on temp dirs, fake core) | 16 | `npm test -w agent-review` |
-| Core `contrib/agentReview` (Electron) | 10 | `fork/scripts/test-core.sh` |
+| Engine (vitest) | 160 (13 files) | `npm test -w @editor/engine` |
+| Extension integration (vitest, real engine on temp dirs, fake core / fake terminal) | 27 | `npm test -w agent-review` |
+| Core `contrib/agentReview` (Electron) | 18 | `fork/scripts/test-core.sh` |
 | Upstream chat-editing regression (Electron) | 49 | `fork/scripts/test-core.sh` |
 | Upstream diff + fixtures (node, incl. 2 new) | 125 | `fork/scripts/test-core.sh` |
 | Core typecheck of the patched tree (tsgo) | 0 errors | `npm run typecheck-client` (CI `patches` job) |
