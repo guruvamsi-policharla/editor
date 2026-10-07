@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: VSCodium commit or tag to move to (default: latest release)
+        description: "VSCodium commit or tag to move to (default: latest release)"
         type: string
         default: ""
 
