@@ -137,7 +137,8 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 ## CI
 
 - **`ci.yml` (every push and PR, free runners).** Engine + extension typecheck/build/tests on ubuntu (Node 22 and 24) and macOS (Node 24). The `patches` job runs `prepare-vscodium.sh --patches-only` (our patches apply on top of VSCodium's), checks that `fork/src` matches what the patches create, and typechecks the whole patched `src/` with tsgo after `npm ci --ignore-scripts`. All green on this PR.
-- **`build-linux.yml` / `build-macos.yml` (full packaged build, pre-merge only).** They run on `workflow_dispatch` (runner label input), when a PR is marked ready for review or labeled `ready-to-merge`, in `merge_group`, and on `v*` tags (which also create a draft GitHub Release with the tarball/zip). On demand for a PR, add the label `full-build` (both), `full-build-linux` or `full-build-macos`. Default runners are `ubuntu-latest` / `macos-latest`, overridable via input or `vars.BUILD_RUNNER_LINUX|MACOS`.
+- **`build-linux.yml` (full packaged build, pre-merge).** It runs on `workflow_dispatch` (runner label input), when a PR is marked ready for review or labeled `ready-to-merge`, `full-build` or `full-build-linux`, in `merge_group`, and on `v*` tags (which also create a draft GitHub Release with the tarball).
+- **`build-macos.yml` (full packaged build, release-only).** It runs only on `v*` tags (creating a draft GitHub Release with the zip) and on `workflow_dispatch`, never on PRs or in the merge queue, because macOS minutes bill at 10x on private repos. Default runners are `ubuntu-latest` / `macos-latest`, overridable via input or `vars.BUILD_RUNNER_LINUX|MACOS`.
 - **`upstream-bump.yml` (monthly + manual).** Moves `fork/upstream.env` to the latest VSCodium release, runs the patch check, and opens a PR saying whether the patches apply.
 
 ### Does the full build fit the free private-repo runner? Yes, with mitigations
@@ -170,7 +171,7 @@ Peak RAM 7.67 GB of 7.9 GB, minimum available 271 MB, peak swap 4.6 GB of 10 GB,
 
 Locally (8 vCPU / 16 GB, no swap): prepare 258 s, build 468 s. A single `gulp vscode-min-prepack` process was OOM-killed twice in `bundle-vscode` on that box, so `build.sh` now runs the same steps as separate gulp processes (compile, extensions, media, minify, package). That build succeeded.
 
-macOS was not triggered: on a private repo its minutes bill at 10x, and the timeout is capped at 150 min. To run it once, add the label `full-build-macos` to a PR.
+macOS is release-only. The first macOS run (triggered by marking PR #3 ready, before this change) failed after about 10 min in the build job; it is unfixed, and the next tag or manual run will show whether it builds. To run it on demand, use `workflow_dispatch`.
 
 ## Try it
 

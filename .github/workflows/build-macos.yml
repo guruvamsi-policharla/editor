@@ -1,7 +1,7 @@
 name: Full build - macOS
 
-# Same triggers and runner rules as build-linux.yml (pre-merge only, configurable runner label);
-# the on-demand PR label for macOS alone is `full-build-macos`. macOS minutes bill at 10x on private repos.
+# Release-only: runs on a v* tag push, or manually (workflow_dispatch) with a configurable runner label.
+# It does not run on PRs or in the merge queue, because macOS minutes bill at 10x on private repos.
 # Default runner: macos-latest (Apple Silicon). Unsigned for now (no Developer ID yet), so users must
 # right-click > Open the first time. Note: macOS minutes on private repos count 10x against the free allowance.
 
@@ -16,9 +16,6 @@ on:
         description: Node heap cap for gulp, in MB
         type: string
         default: "6144"
-  pull_request:
-    types: [ready_for_review, labeled]
-  merge_group:
   push:
     tags: ["v*"]
 
@@ -27,10 +24,6 @@ permissions: {}
 
 jobs:
   build:
-    if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.action == 'ready_for_review') ||
-      (github.event.action == 'labeled' && contains(fromJSON('["ready-to-merge", "full-build", "full-build-macos"]'), github.event.label.name))
     concurrency:
       group: build-macos-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
