@@ -3,6 +3,7 @@ name: Full build - Linux
 # Full packaged build (~1 GB app). Expensive, so it runs only before a merge, never on plain pushes:
 #   - manually (workflow_dispatch), with a configurable runner label
 #   - when a PR is marked ready for review, or labeled `ready-to-merge`
+#   - on demand for a PR: label it `full-build` (Linux + macOS) or `full-build-linux`
 #   - in the merge queue (merge_group)
 #   - on version tags (v*), which also publish a GitHub Release
 # Defaults to the free GitHub-hosted runner. For a larger or self-hosted runner, pass `runner` or set
@@ -31,16 +32,16 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: build-linux-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 
 jobs:
   build:
     if: >-
       github.event_name != 'pull_request' ||
       (github.event.action == 'ready_for_review') ||
-      (github.event.action == 'labeled' && github.event.label.name == 'ready-to-merge')
+      (github.event.action == 'labeled' && contains(fromJSON('["ready-to-merge", "full-build", "full-build-linux"]'), github.event.label.name))
+    concurrency:
+      group: build-linux-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
     runs-on: ${{ inputs.runner || vars.BUILD_RUNNER_LINUX || 'ubuntu-latest' }}
     timeout-minutes: 300
     permissions:

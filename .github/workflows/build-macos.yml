@@ -1,6 +1,7 @@
 name: Full build - macOS
 
-# Same triggers and runner rules as build-linux.yml (pre-merge only, configurable runner label).
+# Same triggers and runner rules as build-linux.yml (pre-merge only, configurable runner label);
+# the on-demand PR label for macOS alone is `full-build-macos`. macOS minutes bill at 10x on private repos.
 # Default runner: macos-latest (Apple Silicon). Unsigned for now (no Developer ID yet), so users must
 # right-click > Open the first time. Note: macOS minutes on private repos count 10x against the free allowance.
 
@@ -23,18 +24,18 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: build-macos-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 
 jobs:
   build:
     if: >-
       github.event_name != 'pull_request' ||
       (github.event.action == 'ready_for_review') ||
-      (github.event.action == 'labeled' && github.event.label.name == 'ready-to-merge')
+      (github.event.action == 'labeled' && contains(fromJSON('["ready-to-merge", "full-build", "full-build-macos"]'), github.event.label.name))
+    concurrency:
+      group: build-macos-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
     runs-on: ${{ inputs.runner || vars.BUILD_RUNNER_MACOS || 'macos-latest' }}
-    timeout-minutes: 300
+    timeout-minutes: 150 # macOS minutes bill at 10x on private repos
     permissions:
       contents: read
     env:
