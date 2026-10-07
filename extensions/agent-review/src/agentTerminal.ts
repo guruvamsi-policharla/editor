@@ -1,41 +1,53 @@
 /** The agent terminal (configurable command, default `tact`, docked right) and Ctrl/Cmd+L. */
 import * as vscode from 'vscode';
+import { AgentSession, type AgentTerminalIO } from './agentSession';
 import { bracketedPaste, formatReference, selectionLines } from './reference';
 
 export class AgentTerminal implements vscode.Disposable {
   private terminal: vscode.Terminal | undefined;
+  /** Gates typing into the agent until its command has started (see agentSession.ts). */
+  private session: AgentSession | undefined;
   private readonly sub: vscode.Disposable;
 
   constructor() {
     this.sub = vscode.window.onDidCloseTerminal((t) => {
-      if (t === this.terminal) this.terminal = undefined;
+      if (t === this.terminal) {
+        this.terminal = undefined;
+        this.session = undefined;
+      }
     });
   }
 
   /** Show the agent terminal, starting the agent command in a new one if needed. */
   show(preserveFocus = false): vscode.Terminal {
-    if (this.terminal && this.terminal.exitStatus === undefined) {
+    return this.open(preserveFocus).terminal;
+  }
+
+  private open(preserveFocus: boolean): { terminal: vscode.Terminal; session: AgentSession } {
+    if (this.terminal && this.session && this.terminal.exitStatus === undefined) {
       this.terminal.show(preserveFocus);
-      return this.terminal;
+      return { terminal: this.terminal, session: this.session };
     }
     const config = vscode.workspace.getConfiguration('agentReview.agent');
     const command = config.get<string>('command', 'tact').trim();
     const location = config.get<string>('location', 'right');
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri;
-    this.terminal = vscode.window.createTerminal({
+    const terminal = vscode.window.createTerminal({
       name: `Agent${command ? `: ${command.split(/\s+/)[0]}` : ''}`,
       iconPath: new vscode.ThemeIcon('hubot'),
       ...(cwd ? { cwd } : {}),
       location: location === 'panel' ? vscode.TerminalLocation.Panel : { viewColumn: vscode.ViewColumn.Beside, preserveFocus },
     });
     // Start the agent inside the user's shell, so the terminal survives the agent exiting.
-    if (command) this.terminal.sendText(command, true);
-    this.terminal.show(preserveFocus);
-    return this.terminal;
+    const session = new AgentSession(terminalIO(terminal), command);
+    this.terminal = terminal;
+    this.session = session;
+    terminal.show(preserveFocus);
+    return { terminal, session };
   }
 
   /** Ctrl/Cmd+L: send `@path:L42-58` (and optionally the selected text) to the agent terminal. */
-  sendSelection(): void {
+  async sendSelection(): Promise<void> {
     const editor = vscode.window.activeTextEditor;
     if (!editor) return;
     const config = vscode.workspace.getConfiguration('agentReview.agent');
@@ -50,11 +62,32 @@ export class AgentTerminal implements vscode.Disposable {
     });
     let text = `${ref} `;
     if (config.get<boolean>('includeSelectedText', false) && !sel.isEmpty) text += bracketedPaste(doc.getText(sel));
-    const terminal = this.show(false);
-    terminal.sendText(text, false);
+    // In a terminal created just now, this waits until the agent command has started.
+    await this.open(false).session.send(text);
   }
 
   dispose(): void {
     this.sub.dispose();
   }
+}
+
+function terminalIO(terminal: vscode.Terminal): AgentTerminalIO {
+  return {
+    get executeCommand() {
+      const si = terminal.shellIntegration;
+      return si ? (commandLine: string) => void si.executeCommand(commandLine) : undefined;
+    },
+    onDidActivateShellIntegration: (listener) =>
+      vscode.window.onDidChangeTerminalShellIntegration((e) => {
+        if (e.terminal === terminal) listener();
+      }),
+    onDidStartExecution: (listener) =>
+      vscode.window.onDidStartTerminalShellExecution((e) => {
+        if (e.terminal === terminal) listener();
+      }),
+    sendText: (text, addNewLine) => terminal.sendText(text, addNewLine),
+    get isClosed() {
+      return terminal.exitStatus !== undefined;
+    },
+  };
 }

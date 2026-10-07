@@ -76,7 +76,7 @@ Created files are reviewed inline (baseline `''`). Deleted and renamed files, an
 | **C8** created / deleted files | Done. Created files inline; deleted (and renamed/binary) in the list with a diff and Keep/Undo |
 | **C7** multi-file review | Done, extension-side. The **Agent Changes** view (explorer) lists every file with kind and +/− and has Keep/Undo per file plus Keep All / Undo All. **Open All Changes** opens a multi-file diff (`vscode.changes`). An activity badge shows the file count |
 | Agent terminal | Done. **Agent: Open Agent Terminal** starts `agentReview.agent.command` (default `tact`) in a terminal docked right (editor area, beside), or in the panel (`agentReview.agent.location`) |
-| Ctrl/Cmd+L | Done. Sends `@relative/path:L42-58` (format: `agentReview.agent.referenceFormat`) to the agent terminal; optionally also the selected text as a bracketed paste (`agentReview.agent.includeSelectedText`) |
+| Ctrl/Cmd+L | Done. Sends `@relative/path:L42-58` (format: `agentReview.agent.referenceFormat`) to the agent terminal; optionally also the selected text as a bracketed paste (`agentReview.agent.includeSelectedText`). In a new terminal the agent command runs through shell integration, and the text waits until the shell reports the command started (timeouts: 3 s for shell integration, then the command is typed and the text follows 1 s later; 5 s for the start report) |
 | Hide built-in AI chat | Done. `chat.disableAIFeatures` is already true in VSCodium (we also set it as a configuration default), and patch 93 hides the empty secondary side bar by default |
 | Dirty-buffer merge view | Done. VS Code's 3-way merge editor (see the table above); no side is ever written over without the user completing the merge |
 
@@ -117,7 +117,6 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 - **Symlinked workspace roots:** the engine normalizes real paths, but editor URIs can use the link path, so an entry might not match the open editor.
 - **Mixed line endings:** the baseline model normalizes EOLs, so a file with mixed CRLF/LF can show a spurious change on Keep.
 - **The macOS packaged build hasn't been run.** The workflow exists but wasn't triggered, because macOS minutes bill at 10x on private repos (see CI).
-- **Agent terminal race:** Ctrl+L right after the terminal is created can type the reference before the agent command has started, so it lands at the shell prompt. Wait for the command to start, or send only to an existing terminal.
 - **Not in the MVP:** a proposed API instead of commands, icons, signing, installers, and auto-update.
 
 ## Tests
