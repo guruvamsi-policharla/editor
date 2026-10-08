@@ -117,10 +117,10 @@ index 00000000..0362ae67
 +registerWorkbenchContribution2(AgentReviewOrphanedMerges.ID, AgentReviewOrphanedMerges, WorkbenchPhase.AfterRestored);
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
 new file mode 100644
-index 00000000..4523abaf
+index 00000000..16491fb7
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
-@@ -0,0 +1,405 @@
+@@ -0,0 +1,463 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -151,6 +151,9 @@ index 00000000..4523abaf
 +import { basename } from '../../../../base/common/resources.js';
 +import { URI } from '../../../../base/common/uri.js';
 +import { getCodeEditor, ICodeEditor } from '../../../../editor/browser/editorBrowser.js';
++import { OffsetRange } from '../../../../editor/common/core/ranges/offsetRange.js';
++import { StringEdit, StringReplacement } from '../../../../editor/common/core/edits/stringEdit.js';
++import { DefaultLinesDiffComputer } from '../../../../editor/common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.js';
 +import { IDocumentDiff } from '../../../../editor/common/diff/documentDiffProvider.js';
 +import { DetailedLineRangeMapping } from '../../../../editor/common/diff/rangeMapping.js';
 +import { ILanguageService } from '../../../../editor/common/languages/language.js';
@@ -160,7 +163,8 @@ index 00000000..4523abaf
 +import { IResolvedTextEditorModel } from '../../../../editor/common/services/resolverService.js';
 +import { IModelContentChangedEvent } from '../../../../editor/common/textModelEvents.js';
 +import { localize } from '../../../../nls.js';
-+import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
++import { IFileService } from '../../../../platform/files/common/files.js';
++import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 +import { ILogService } from '../../../../platform/log/common/log.js';
 +import { INotificationService, Severity } from '../../../../platform/notification/common/notification.js';
 +import { IEditorPane, SaveReason } from '../../../common/editor.js';
@@ -437,6 +441,7 @@ index 00000000..4523abaf
 +
 +	/** The engine moved the baseline (user save folded in, git op, keep from the list, external write). */
 +	async setBaseline(baseline: string, kind: AgentReviewKind): Promise<void> {
++		baseline = await this._instantiationService.invokeFunction(baselineWithUnsavedEdits, this.modifiedURI, baseline);
 +		this._kind = kind;
 +		const stateChanged = this._stateObs.get() !== ModifiedFileEntryState.Modified;
 +		this._stateObs.set(ModifiedFileEntryState.Modified, undefined);
@@ -525,6 +530,59 @@ index 00000000..4523abaf
 +	async rejectNearestChange(): Promise<void> { }
 +	async toggleDiff(): Promise<void> { }
 +	dispose(): void { }
++}
++
++/**
++ * The baseline as the review shows it while the file has unsaved edits: with the user's edits (disk -> buffer) in
++ * it, where they don't touch a pending agent change (baseline -> disk), as typing is folded in while the entry
++ * exists. Without this, the user's own unsaved text showed as agent changes when the entry was created on a dirty
++ * buffer (a restart that restores unsaved edits) or got a new baseline (Keep from the list).
++ */
++export async function baselineWithUnsavedEdits(accessor: ServicesAccessor, uri: URI, baseline: string): Promise<string> {
++	const textFileService = accessor.get(ITextFileService);
++	const fileService = accessor.get(IFileService);
++	if (!textFileService.isDirty(uri)) {
++		return baseline;
++	}
++	const buffer = textFileService.files.get(uri)?.textEditorModel;
++	if (!buffer) {
++		return baseline;
++	}
++	let disk: string;
++	try {
++		disk = (await fileService.readFile(uri)).value.toString();
++	} catch {
++		return baseline; // e.g. deleted on disk: nothing to tell apart
++	}
++	return foldUnsavedEdits(baseline, disk, buffer.getValue(EndOfLinePreference.LF));
++}
++
++/** `baseline` plus the edits from `disk` to `buffer` that don't overlap an edit from `baseline` to `disk` (all as LF). */
++export function foldUnsavedEdits(baseline: string, disk: string, buffer: string): string {
++	baseline = baseline.replace(/\r\n/g, '\n');
++	disk = disk.replace(/\r\n/g, '\n');
++	const agent = stringEditOfDiff(baseline, disk);
++	const user = stringEditOfDiff(disk, buffer);
++	return user.rebaseSkipConflicting(agent.inverse(baseline)).apply(baseline);
++}
++
++function stringEditOfDiff(from: string, to: string): StringEdit {
++	const fromLines = from.split('\n');
++	const toLines = to.split('\n');
++	const offsets = (lines: string[]) => {
++		const result = [0];
++		for (const line of lines) {
++			result.push(result[result.length - 1] + line.length + 1);
++		}
++		return result;
++	};
++	const fromOffsets = offsets(fromLines);
++	const toOffsets = offsets(toLines);
++	const diff = new DefaultLinesDiffComputer().computeDiff(fromLines, toLines, { ignoreTrimWhitespace: false, computeMoves: false, maxComputationTimeMs: 1000 });
++	return StringEdit.create(diff.changes.flatMap(c => c.innerChanges ?? []).map(i => new StringReplacement(
++		new OffsetRange(fromOffsets[i.originalRange.startLineNumber - 1] + i.originalRange.startColumn - 1, fromOffsets[i.originalRange.endLineNumber - 1] + i.originalRange.endColumn - 1),
++		to.slice(toOffsets[i.modifiedRange.startLineNumber - 1] + i.modifiedRange.startColumn - 1, toOffsets[i.modifiedRange.endLineNumber - 1] + i.modifiedRange.endColumn - 1),
++	)));
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewMerge.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewMerge.ts
 new file mode 100644
@@ -766,10 +824,10 @@ index 00000000..341604e2
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts
 new file mode 100644
-index 00000000..155f9ac4
+index 00000000..12e40480
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts
-@@ -0,0 +1,255 @@
+@@ -0,0 +1,260 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -796,7 +854,7 @@ index 00000000..155f9ac4
 +import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntry } from '../../chat/common/editing/chatEditingService.js';
 +import { SaveReason } from '../../../common/editor.js';
 +import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
-+import { AGENT_REVIEW_BASELINE_SCHEME, AgentReviewEntry, AgentReviewKind, AgentReviewUndoHistory, IAgentReviewHunkEvent } from './agentReviewEntry.js';
++import { AGENT_REVIEW_BASELINE_SCHEME, AgentReviewEntry, baselineWithUnsavedEdits, AgentReviewKind, AgentReviewUndoHistory, IAgentReviewHunkEvent } from './agentReviewEntry.js';
 +import { openAgentReviewMerge } from './agentReviewMerge.js';
 +
 +export const IAgentReviewService = createDecorator<IAgentReviewService>('agentReviewService');
@@ -939,7 +997,12 @@ index 00000000..155f9ac4
 +			ref.dispose();
 +			return undefined;
 +		}
-+		const entry = this._instantiationService.createInstance(AgentReviewEntry, ref, latest.baseline, latest.kind, this._undoHistory);
++		const baseline = await this._instantiationService.invokeFunction(baselineWithUnsavedEdits, uri, latest.baseline);
++		if (this._store.isDisposed || this._latest.get(uri) !== latest) {
++			ref.dispose();
++			return this._store.isDisposed || !this._latest.get(uri) ? undefined : this._createEntry(uri);
++		}
++		const entry = this._instantiationService.createInstance(AgentReviewEntry, ref, baseline, latest.kind, this._undoHistory);
 +		const listener = entry.onDidHunkAction(e => {
 +			this._onDidHunkAction.fire(e);
 +			this._pushUndoForKeep(e);
@@ -1151,10 +1214,10 @@ index 00000000..546d6d59
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
 new file mode 100644
-index 00000000..2bc19709
+index 00000000..3112faf3
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
-@@ -0,0 +1,615 @@
+@@ -0,0 +1,649 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -1190,7 +1253,7 @@ index 00000000..2bc19709
 +import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
 +import { ServiceCollection } from '../../../../../platform/instantiation/common/serviceCollection.js';
 +import { IViewsService } from '../../../../services/views/common/viewsService.js';
-+import { ITextFileSaveOptions, ITextFileService } from '../../../../services/textfile/common/textfiles.js';
++import { ITextFileEditorModel, ITextFileSaveOptions, ITextFileService } from '../../../../services/textfile/common/textfiles.js';
 +import { workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
 +import { INotification, INotificationHandle, INotificationService, Severity } from '../../../../../platform/notification/common/notification.js';
 +import { IChatWidgetService } from '../../../chat/browser/chat.js';
@@ -1205,7 +1268,9 @@ index 00000000..2bc19709
 +import { ContextKeyService } from '../../../../../platform/contextkey/browser/contextKeyService.js';
 +import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 +import { AcceptAction, AcceptAllEditsAction, AcceptHunkAction, NavigateAction, RejectAction, RejectHunkAction, ToggleAccessibleDiffViewAction, ToggleDiffAction } from '../../../chat/browser/chatEditing/chatEditingEditorActions.js';
-+import { AgentReviewKind, IAgentReviewHunkEvent } from '../../browser/agentReviewEntry.js';
++import { AgentReviewKind, foldUnsavedEdits, IAgentReviewHunkEvent } from '../../browser/agentReviewEntry.js';
++import { IFileContent, IFileService } from '../../../../../platform/files/common/files.js';
++import { VSBuffer } from '../../../../../base/common/buffer.js';
 +import { AgentReviewService } from '../../browser/agentReviewService.js';
 +
 +suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
@@ -1232,8 +1297,11 @@ index 00000000..2bc19709
 +	let holdSave: Promise<void> | undefined;
 +	let saveOutcome: 'ok' | 'cancelled' | 'error';
 +	let notifications: INotification[];
++	/** The file on disk, for the entry's view of unsaved edits (disk -> buffer). */
++	let diskContent: string;
 +
 +	setup(() => {
++		diskContent = DISK;
 +		zones = new Map();
 +		overlays = new Set();
 +		registeredSessions = [];
@@ -1265,7 +1333,15 @@ index 00000000..2bc19709
 +		collection.set(IChatEditingExplanationModelManager, new class extends mock<IChatEditingExplanationModelManager>() {
 +			override readonly state = constObservable(new ResourceMap<never>());
 +		}());
++		collection.set(IFileService, new class extends mock<IFileService>() {
++			override async readFile(): Promise<IFileContent> {
++				return { value: VSBuffer.fromString(diskContent) } as IFileContent;
++			}
++		}());
 +		collection.set(ITextFileService, new class extends mock<ITextFileService>() {
++			override readonly files = new class extends mock<ITextFileService['files']>() {
++				override get() { return { textEditorModel: model } as unknown as ITextFileEditorModel; }
++			}();
 +			override isDirty(): boolean {
 +				return dirty || (trackSaves && model.getAlternativeVersionId() !== savedVersion);
 +			}
@@ -1453,6 +1529,27 @@ index 00000000..2bc19709
 +		assert.ok(position && typeof position === 'object');
 +		assert.ok(position.left > 50 + 'b TWO'.length * 7, 'right of the text');
 +		assert.ok(position.top < editor.getTopForLineNumber(3), 'on line 2, not below it');
++	});
++
++	test('unsaved user edits in the buffer when the entry is created (restored after a restart) are not agent changes', async () => {
++		// Disk: the agent's version (a line deleted). The buffer: that plus the user's unsaved edit of line 1.
++		model.setValue('Intro sentence, as the user rewrote it.\nClosing sentence.\n');
++		dirty = true;
++		const { entry } = await showPending();
++		assert.deepStrictEqual(entry.diffInfo.get().changes.map(c => `${c.original} -> ${c.modified}`), ['[2,3) -> [2,2)'], 'only the agent\'s deletion');
++		assert.strictEqual(hunkWidgets().length, 1);
++
++		// The engine accepts the file (Keep from the list): nothing pending, the user's edit still isn't an agent change.
++		await entry.setBaseline(DISK, 'modified');
++		assert.strictEqual(entry.diffInfo.get().changes.length, 0);
++	});
++
++	test('foldUnsavedEdits: the user\'s edits go into the baseline, except where they touch an agent change', () => {
++		const baseline = 'a\nb\nc\nd\n';
++		const disk = 'a\nB by agent\nc\nd\n';
++		assert.strictEqual(foldUnsavedEdits(baseline, disk, 'a user\nB by agent\nc\nd\n'), 'a user\nb\nc\nd\n');
++		assert.strictEqual(foldUnsavedEdits(baseline, disk, 'a\nB by the agent\nc\nd\n'), baseline, 'inside the agent change: part of it');
++		assert.strictEqual(foldUnsavedEdits(baseline.replace(/\n/g, '\r\n'), disk.replace(/\n/g, '\r\n'), 'a\nB by agent\nc\nd user\n'), 'a\nb\nc\nd user\n');
 +	});
 +
 +	test('the 3-way merge editor\'s result shows the file without the review (no red rows, no Keep/Undo)', async () => {

@@ -33,7 +33,7 @@ import { SyncDescriptor } from '../../../../../platform/instantiation/common/des
 import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
 import { ServiceCollection } from '../../../../../platform/instantiation/common/serviceCollection.js';
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
-import { ITextFileSaveOptions, ITextFileService } from '../../../../services/textfile/common/textfiles.js';
+import { ITextFileEditorModel, ITextFileSaveOptions, ITextFileService } from '../../../../services/textfile/common/textfiles.js';
 import { workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
 import { INotification, INotificationHandle, INotificationService, Severity } from '../../../../../platform/notification/common/notification.js';
 import { IChatWidgetService } from '../../../chat/browser/chat.js';
@@ -48,7 +48,9 @@ import { IContextKeyService } from '../../../../../platform/contextkey/common/co
 import { ContextKeyService } from '../../../../../platform/contextkey/browser/contextKeyService.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { AcceptAction, AcceptAllEditsAction, AcceptHunkAction, NavigateAction, RejectAction, RejectHunkAction, ToggleAccessibleDiffViewAction, ToggleDiffAction } from '../../../chat/browser/chatEditing/chatEditingEditorActions.js';
-import { AgentReviewKind, IAgentReviewHunkEvent } from '../../browser/agentReviewEntry.js';
+import { AgentReviewKind, foldUnsavedEdits, IAgentReviewHunkEvent } from '../../browser/agentReviewEntry.js';
+import { IFileContent, IFileService } from '../../../../../platform/files/common/files.js';
+import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { AgentReviewService } from '../../browser/agentReviewService.js';
 
 suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
@@ -75,8 +77,11 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 	let holdSave: Promise<void> | undefined;
 	let saveOutcome: 'ok' | 'cancelled' | 'error';
 	let notifications: INotification[];
+	/** The file on disk, for the entry's view of unsaved edits (disk -> buffer). */
+	let diskContent: string;
 
 	setup(() => {
+		diskContent = DISK;
 		zones = new Map();
 		overlays = new Set();
 		registeredSessions = [];
@@ -108,7 +113,15 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		collection.set(IChatEditingExplanationModelManager, new class extends mock<IChatEditingExplanationModelManager>() {
 			override readonly state = constObservable(new ResourceMap<never>());
 		}());
+		collection.set(IFileService, new class extends mock<IFileService>() {
+			override async readFile(): Promise<IFileContent> {
+				return { value: VSBuffer.fromString(diskContent) } as IFileContent;
+			}
+		}());
 		collection.set(ITextFileService, new class extends mock<ITextFileService>() {
+			override readonly files = new class extends mock<ITextFileService['files']>() {
+				override get() { return { textEditorModel: model } as unknown as ITextFileEditorModel; }
+			}();
 			override isDirty(): boolean {
 				return dirty || (trackSaves && model.getAlternativeVersionId() !== savedVersion);
 			}
@@ -296,6 +309,27 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.ok(position && typeof position === 'object');
 		assert.ok(position.left > 50 + 'b TWO'.length * 7, 'right of the text');
 		assert.ok(position.top < editor.getTopForLineNumber(3), 'on line 2, not below it');
+	});
+
+	test('unsaved user edits in the buffer when the entry is created (restored after a restart) are not agent changes', async () => {
+		// Disk: the agent's version (a line deleted). The buffer: that plus the user's unsaved edit of line 1.
+		model.setValue('Intro sentence, as the user rewrote it.\nClosing sentence.\n');
+		dirty = true;
+		const { entry } = await showPending();
+		assert.deepStrictEqual(entry.diffInfo.get().changes.map(c => `${c.original} -> ${c.modified}`), ['[2,3) -> [2,2)'], 'only the agent\'s deletion');
+		assert.strictEqual(hunkWidgets().length, 1);
+
+		// The engine accepts the file (Keep from the list): nothing pending, the user's edit still isn't an agent change.
+		await entry.setBaseline(DISK, 'modified');
+		assert.strictEqual(entry.diffInfo.get().changes.length, 0);
+	});
+
+	test('foldUnsavedEdits: the user\'s edits go into the baseline, except where they touch an agent change', () => {
+		const baseline = 'a\nb\nc\nd\n';
+		const disk = 'a\nB by agent\nc\nd\n';
+		assert.strictEqual(foldUnsavedEdits(baseline, disk, 'a user\nB by agent\nc\nd\n'), 'a user\nb\nc\nd\n');
+		assert.strictEqual(foldUnsavedEdits(baseline, disk, 'a\nB by the agent\nc\nd\n'), baseline, 'inside the agent change: part of it');
+		assert.strictEqual(foldUnsavedEdits(baseline.replace(/\n/g, '\r\n'), disk.replace(/\n/g, '\r\n'), 'a\nB by agent\nc\nd user\n'), 'a\nb\nc\nd user\n');
 	});
 
 	test('the 3-way merge editor\'s result shows the file without the review (no red rows, no Keep/Undo)', async () => {
