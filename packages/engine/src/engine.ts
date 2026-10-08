@@ -408,7 +408,9 @@ export class ReviewEngine {
             prov = provenanceFromDiff(diskText, userText, 'user');
             attribution = options.edits ? 'fallback' : 'diff';
           }
-          prov = addFormatterPass(prov, userText, savedText);
+          const agentLines = new Set<number>();
+          for (const r of diffRegions(splitLines(baseText), splitLines(diskText))) { for (let d = r.bStart; d < r.bEnd; d++) { agentLines.add(d); } }
+          prov = addFormatterPass(prov, userText, savedText, (d) => agentLines.has(d));
         } else {
           prov = options.edits ? trackEdits(diskText, options.edits) : undefined;
           attribution = 'edits';

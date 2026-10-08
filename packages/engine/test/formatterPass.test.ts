@@ -53,4 +53,26 @@ describe('format on save with the user text', () => {
     expect(r.attribution).toBe('diff');
     expect(await baselineFiles(engine)).toEqual({ 'a.txt': 'one!\ntwo\n' });
   });
+
+  it('P2-7: the user\'s line reflowed next to the agent hunk folds in; only the agent\'s lines stay pending', async () => {
+    const { engine, baseline } = await save({ edits: [...typing, formatter], userContent: user });
+    expect(baseline).toBe('{\n  "runs": 50,\n  "batch": [\n    32,\n    128,\n    512\n  ],\n  2048\n}\n');
+    const [change] = (await engine.getFileChange('data.json'))!.hunks;
+    expect(change!.oldLines).toEqual([]);
+    expect(change!.newLines).toEqual(['  "warmup": 5,\n', '  "cores": [\n', '    1,\n', '    2,\n', '    4\n', '  ],\n']);
+  });
+
+  it('a formatter line mixing agent and user words stays pending, even in a line-for-line rewrite', async () => {
+    const ws = memWorkspace({ 'a.tex': 'Intro.\nOld words here.\nEnd.\n' });
+    const engine = await ws.open();
+    await engine.handleFsEvents([ws.write('a.tex', 'Intro.\nAgent words\nhere.\nEnd.\n')]); // agent: line 2 -> 2 lines
+    // The user types on "Intro."; the formatter joins the agent's two lines and moves "here." up into the user's line.
+    const userText = 'Intro. Mine.\nAgent words\nhere.\nEnd.\n';
+    const saved = 'Intro. Mine. here.\nAgent words\nEnd.\n';
+    await engine.reportUserSave('a.tex', saved, { userContent: userText });
+    const b = (await baselineFiles(engine))['a.tex']!;
+    expect(b).not.toContain('Agent');
+    expect(b).not.toMatch(/Mine\. here/); // the agent's "here." is not folded in with the user's line
+    expect(engine.listChanges().map((c) => c.path)).toEqual(['a.tex']);
+  });
 });
