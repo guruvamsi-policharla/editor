@@ -1,4 +1,4 @@
-// ESLint for the repo's own TypeScript (packages/engine, extensions/agent-review): VS Code's generic rules
+// ESLint for the repo's own TypeScript (packages/*, extensions/*): VS Code's generic rules
 // (from vscode/eslint.config.js, same eslint / typescript-eslint versions), as errors. VS Code-only rules
 // (its local plugin, the Microsoft header, layering) don't apply here. The core files in fork/src are linted
 // with VS Code's own config in the prepared tree: fork/scripts/lint-core.sh.
@@ -7,7 +7,7 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
 	{
-		ignores: ['**/node_modules/**', '**/dist/**', '**/coverage/**', 'fork/src/**'],
+		ignores: ['**/node_modules/**', '**/dist/**', '**/coverage/**', 'fork/src/**', '**/src/typings/**'], // typings: vendored upstream proposal .d.ts files
 	},
 	{
 		files: ['**/*.{ts,mts,cts,js,mjs}'],

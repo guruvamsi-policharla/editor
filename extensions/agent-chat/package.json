@@ -1,0 +1,131 @@
+{
+  "name": "agent-chat",
+  "displayName": "Agent Chat",
+  "description": "Spike (phase A0): VS Code's native chat driven by ACP harnesses (Claude Code, Codex) through chat session providers.",
+  "version": "0.0.1",
+  "publisher": "editor",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.134.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "enabledApiProposals": [
+    "chatSessionsProvider",
+    "chatParticipantPrivate",
+    "chatParticipantAdditions",
+    "defaultChatParticipant",
+    "chatProvider"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    },
+    "virtualWorkspaces": false
+  },
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "agent-chat.default",
+        "name": "agent",
+        "fullName": "Agent",
+        "description": "Start a Claude Code or Codex session",
+        "isDefault": true,
+        "modes": [
+          "ask",
+          "agent",
+          "edit"
+        ],
+        "locations": [
+          "panel"
+        ]
+      }
+    ],
+    "chatSessions": [
+      {
+        "type": "agent-claude",
+        "name": "claude",
+        "displayName": "Claude Code",
+        "icon": "$(sparkle)",
+        "welcomeTitle": "Claude Code",
+        "welcomeMessage": "Your Claude Code, over ACP. Edits show up as Keep/Undo in the editor.",
+        "inputPlaceholder": "Ask Claude Code",
+        "order": 1,
+        "canDelegate": true,
+        "capabilities": {
+          "supportsFileAttachments": true
+        },
+        "requiresCustomModels": true
+      },
+      {
+        "type": "agent-echo",
+        "name": "echo",
+        "displayName": "Echo (spike)",
+        "icon": "$(debug-console)",
+        "welcomeTitle": "Echo (spike)",
+        "welcomeMessage": "Echoes prompts. Five pickers; type 'permission' for a native confirmation.",
+        "inputPlaceholder": "Say something",
+        "order": 2,
+        "canDelegate": true,
+        "requiresCustomModels": true
+      }
+    ],
+    "configurationDefaults": {
+      "chat.editor.localAgent.enabled": false
+    },
+    "commands": [
+      {
+        "command": "agentChat.newClaude",
+        "title": "New Claude Code Chat",
+        "category": "Agent Chat"
+      },
+      {
+        "command": "agentChat.newEcho",
+        "title": "New Echo Chat (spike)",
+        "category": "Agent Chat"
+      },
+      {
+        "command": "agentChat.insertReference",
+        "title": "Insert Selection Reference into Chat",
+        "category": "Agent Chat"
+      }
+    ],
+    "configuration": {
+      "title": "Agent Chat",
+      "properties": {
+        "agentChat.claude.adapterPath": {
+          "type": "string",
+          "default": "claude-agent-acp",
+          "description": "The claude-agent-acp adapter command (spike: no installer yet)."
+        }
+      }
+    },
+    "languageModelChatProviders": [
+      {
+        "vendor": "agent-chat",
+        "displayName": "Agent harness models"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@editor/acp-client": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "@types/vscode": "1.134.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.3"
+  }
+}
