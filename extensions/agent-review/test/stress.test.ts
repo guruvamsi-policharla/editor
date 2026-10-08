@@ -3,7 +3,7 @@
  * with a fake core and VS Code's event order): agent writes, typing (the first keystroke of a clean buffer sometimes
  * reported clean, its dirty state just after), saves with format on save (the log from EditLogs, the user text from
  * core), Keep/Undo as the core UI does them, editor undo, restarts (hot exit: no edit log for unsaved buffers) and git.
- * After every step: no agent text in the baseline without a Keep, a HEAD move or staging.
+ * After every step: no agent text in the baseline without a Keep, staging that file, or a HEAD move whose diff includes it.
  *
  * Replay: STRESS_SEED=<seed> [STRESS_GIT=1] npx vitest run test/stress.test.ts. More: STRESS_SEEDS=<n>. Without the user
  * text from core (edit log only): STRESS_NO_USER_TEXT=1.
@@ -141,7 +141,7 @@ async function runSeed(seed: number, withGit: boolean): Promise<void> {
   }
 }
 
-describe('stress through the controller: agent text is never folded into the baseline without a Keep, a HEAD move or staging', () => {
+describe('stress through the controller: agent text is never folded into the baseline without a Keep, staging, or a HEAD move that changed the file', () => {
   if (ONLY !== undefined) {
     it(`seed ${ONLY}`, () => runSeed(ONLY, process.env.STRESS_GIT === '1'), 120_000);
     return;

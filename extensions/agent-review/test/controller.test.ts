@@ -405,15 +405,22 @@ describe('ReviewController', () => {
     ]);
   });
 
-  it('a git commit accepts everything (HEAD moved)', async () => {
-    const git = (...args: string[]) => execFileSync('git', args, { cwd: root, stdio: 'pipe' });
+  it('a git commit accepts the files it changed; another file\'s pending change stays (#12)', async () => {
+    const git = (...args: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: root, stdio: 'pipe' });
     git('init', '-q');
-    git('-c', 'user.name=t', '-c', 'user.email=t@t', 'add', '.');
-    git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'init');
+    git('add', '.');
+    git('commit', '-qm', 'init');
     await open(true);
     const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\n');
     expect(core.shown.has(abs)).toBe(true);
-    git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qam', 'agent work');
+    fs.writeFileSync(path.join(root, '.gitignore'), '*.log\n');
+    git('add', '.gitignore');
+    git('commit', '-qm', 'ignore logs');
+    await ctl.handleFsEvents([path.join(root, '.git', 'HEAD'), path.join(root, '.gitignore')]);
+    await ctl.idle();
+    expect(ctl.pendingFiles.map((f) => f.rel)).toEqual(['paper.tex']);
+    expect(core.shown.get(abs)).toEqual({ baseline: 'Intro.\nMethods.\nResults.\n', kind: 'modified' });
+    git('commit', '-qam', 'agent work');
     await ctl.handleFsEvents([path.join(root, '.git', 'HEAD')]);
     await ctl.idle();
     expect(ctl.pendingFiles).toEqual([]);

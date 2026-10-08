@@ -1229,20 +1229,29 @@ export class ReviewEngine {
 
     const stashOnly = this.gitHead !== undefined && this.gitHead.head === head.head && this.gitHead.oid === head.oid;
     if (this.gitHead && !headStatesEqual(this.gitHead, head) && !stashOnly) {
-      // HEAD moved (commit, checkout, pull, merge, rebase, reset): everything on disk becomes the baseline.
+      // HEAD moved (commit, checkout, pull, merge, rebase, reset): the files that differ between the old and the new
+      // HEAD tree (both sides of a rename, deletions too) are accepted whole, as they are on disk. Pending changes in
+      // every other file stay pending: committing one file does not end the review of the rest (Guru, Oct 8 2026).
       // Only refs/stash moving (`git stash`, `git stash pop`) is not a HEAD move: the stash takes the files back to
       // HEAD and pop brings them back, as plain disk changes against the baseline. Agents run `git stash` + `pop` to
       // check something; accepting there would end the review of everything they wrote.
+      const from = this.gitHead.oid;
+      const changed = await this.gitReader.changedPaths(repo, from, head.oid);
+      const inDiff = changed && new Set(changed.map((p) => this.repoToRel(p)).filter((p) => p !== undefined));
+      if (!inDiff) { this.trace(`git could not diff ${short(from ?? undefined)}..${short(head.oid ?? undefined)}; accepting every pending change`); }
       await this.fullScan({ trustStatCache: true });
       const accepted: string[] = [];
       for (const rel of [...this.pending]) {
-        await this.acceptPath(rel, false, `git HEAD moved (${short(this.gitHead.oid ?? undefined)} -> ${short(head.oid ?? undefined)})`);
+        if (inDiff && !inDiff.has(rel)) { continue; }
+        await this.acceptPath(rel, false, `git HEAD moved (${short(from ?? undefined)} -> ${short(head.oid ?? undefined)})`);
         accepted.push(rel);
       }
       this.gitHead = head;
-      this.gitIndexStat = idxStat;
-      this.gitIndex = await readIndex(this.fs, repo);
-      this.dirty = true;
+      // Index changes outside the diff (a `git add` in the same batch as the commit) count as staging.
+      const staged = (await this.reindex(idxStat)).filter((rel) => !inDiff?.has(rel));
+      if (inDiff) { accepted.push(...(await this.acceptStaged(staged))); }
+      accepted.sort();
+      this.trace(`git HEAD moved; diff: ${inDiff ? [...inDiff].join(', ') || 'nothing' : 'unknown'}; accepted: ${accepted.join(', ') || 'nothing'}`);
       this.emit('git-head', accepted);
       return { kind: 'head', accepted };
     }
@@ -1258,20 +1267,26 @@ export class ReviewEngine {
         idxStat.ctimeMs === this.gitIndexStat.ctimeMs);
     if (statSame) { return { kind: 'none' }; }
 
-    const next = await readIndex(this.fs, repo);
-    const staged: string[] = [];
-    for (const p of new Set([...this.gitIndex.keys(), ...next.keys()])) {
-      if (this.gitIndex.get(p) === next.get(p)) { continue; }
-      const rel = this.repoToRel(p);
-      if (rel !== undefined) { staged.push(rel); }
-    }
-    this.gitIndex = next;
-    this.gitIndexStat = idxStat;
-    this.dirty = true;
+    const staged = await this.reindex(idxStat);
     const accepted = await this.acceptStaged(staged);
     if (staged.length) { this.trace(`git index changed for ${staged.join(', ')}; accepted: ${accepted.join(', ') || 'nothing'}`); }
     if (accepted.length) { this.emit('git-index', accepted); }
     return { kind: 'index', staged: staged.sort(), accepted };
+  }
+
+  /** Read the index again; returns the workspace paths whose entries changed. */
+  private async reindex(idxStat: IndexStat | null): Promise<string[]> {
+    const next = await readIndex(this.fs, this.repo!);
+    const changed: string[] = [];
+    for (const p of new Set([...this.gitIndex.keys(), ...next.keys()])) {
+      if (this.gitIndex.get(p) === next.get(p)) { continue; }
+      const rel = this.repoToRel(p);
+      if (rel !== undefined) { changed.push(rel); }
+    }
+    this.gitIndex = next;
+    this.gitIndexStat = idxStat;
+    this.dirty = true;
+    return changed;
   }
 
   /** Index-only change: accept pending changes in the staged files, as far as the index agrees with disk. */
