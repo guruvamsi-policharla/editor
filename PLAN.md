@@ -6,7 +6,7 @@
 
 Build Cursor-style inline diff review (red/green hunks with Accept/Reject, plus Cmd+L to send a selection to the agent) that works with **any** coding agent: tact/nanocodex, Claude Code, Codex, or anything else that edits files.
 
-The editor contains **no AI**. It doesn't embed or drive an agent, call models, or speak an agent protocol; it only opens a terminal running your configured agent command. It watches the workspace, treats any file change it didn't make itself as pending, and shows it inline for review against an accepted baseline.
+The editor contains **no AI**. It contains no agent and calls no models. It can launch your agent in a terminal or, for agents that speak ACP, talk to it from a chat panel. It watches the workspace, treats any file change it didn't make itself as pending, and shows it inline for review against an accepted baseline.
 
 It ships as a **VSCodium-based fork** with a **built-in extension** that holds all the logic. The fork adds true inline rendering (deleted lines as real rows), which the public extension API can't provide. There is no standalone release for stock VS Code or Cursor.
 
@@ -30,8 +30,8 @@ It ships as a **VSCodium-based fork** with a **built-in extension** that holds a
 
 **Non-goals**
 
-- No built-in agent, model selection, prompting, or autocomplete. (This scope is what sank Void: it tried to compete on agent quality instead of focusing on the editor.)
-- No dependency on ACP or any other agent protocol for review. ACP is optional, comes later, and is only for a nicer chat panel.
+- No built-in agent, prompting, or autocomplete. The chat panel only forwards the harness's own options (model, effort, mode) to it. (This scope is what sank Void: it tried to compete on agent quality instead of focusing on the editor.)
+- No dependency on ACP or any other agent protocol for review. ACP is optional and is only for a nicer chat panel.
 
 ## 4. Design principles
 
@@ -86,9 +86,33 @@ The core. Keep it editor-independent so it can be reused (Zed, Neovim, etc.).
   - **(b)** Feed engine hunks into VS Code's existing chat-editing session UI (the Keep/Undo machinery used by Copilot agent mode, now in the open-source core). This also provides the multi-file review list and checkpoint UI for free.
 - Try to upstream the rendering hook as a proposed API. If it's accepted, that part of the fork goes away. (The aim is less to maintain, not restoring stock VS Code support.)
 
-### 5.4 Optional, later: ACP mode
+### 5.4 ACP chat panel (connector)
 
-For agents that speak [ACP](https://agentclientprotocol.com), offer a native chat panel instead of the terminal, possibly by registering as a session target in VS Code's chat view. Review still comes from the engine, not from ACP. A `tact acp` subcommand is a separate, optional upstream contribution to tact.
+For agents that speak [ACP](https://agentclientprotocol.com) (Claude Code via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp), Codex via [codex-acp](https://github.com/agentclientprotocol/codex-acp), and Gemini CLI via `gemini --acp`), offer a native chat panel next to the agent terminal. Review still comes only from the engine, never from ACP. Design and citations: [docs/acp-design.md](docs/acp-design.md).
+
+- **The harness makes its own edits.** The editor advertises no `fs` or `terminal` client capabilities, so the agent reads, writes and runs commands with its own tools, exactly as in a terminal. The file watcher shows those edits as Keep/Undo. ACP v2 (draft) removes those client APIs anyway.
+- **One client, small profiles.** ACP lives in an editor-independent `packages/acp-client`: process management, the connection (`@agentclientprotocol/sdk`, protocol v1), a session reducer, a permission broker and profiles. Per-harness profiles hold only tailoring data: launch command and pinned adapter version, env, defaults, dangerous values, and the rules-file format. All UI comes from what the adapter advertises.
+- **Native chat UI.** A built-in extension `extensions/agent-chat` drives VS Code's hidden chat through the chat-session-provider proposed APIs. ACP config options become the input-bar pickers (mode → the permission picker; model; effort; fast; plan), tool calls become tool cards, plans become the todo list, and permission requests use the core confirmation tool, which can't be auto-approved. Copilot stays disabled. If the spike shows the native chat can't be un-hidden cleanly, fall back to a webview over the same client.
+- **The buttons.** These work live over ACP for Claude and Codex:
+  - permission prompts;
+  - permission mode;
+  - model;
+  - reasoning effort;
+  - fast mode;
+  - plan mode;
+  - cancel;
+  - list/resume sessions.
+
+  Codex applies mode, model, effort and fast changes from the next turn. Effort and fast appear only for models that support them.
+- **Defaults.** Claude starts in Accept edits (commands still prompt); Codex starts in Workspace access. Claude's Bypass is hidden; Codex's Full access needs a confirmation. The chat lives in the secondary side bar (right), and sessions can also open as editor tabs. The user's installed `claude`/`codex` are used when found on PATH; otherwise pinned adapters are downloaded on first use.
+- **Standing permission rules aren't in ACP.** A rules editor edits the harness's own files: `permissions.allow/deny/ask` in Claude's `settings.json` files, and `prefix_rule` in `~/.codex/rules/default.rules`. Then it restarts the agent and resumes the chat.
+- **Cmd+L** inserts `@path:L42-58` into the chat input when the chat is the active agent target (`agentReview.agent.target`: auto / terminal / chat; auto = whichever was used last). The reference goes to the agent as plain text.
+- **Permission safety:**
+  - only an explicit click answers a prompt;
+  - prompts show the exact command or paths and whether "always" writes a persistent rule;
+  - dangerous modes (Claude Bypass, Codex Full access) need confirmation and show a badge; Claude Bypass is hidden by default;
+  - adapter versions are pinned, and agents don't start in Restricted Mode.
+- `.claude/settings.local.json` joins the built-in ignores, so "always allow" clicks don't show up as agent edits. A `tact acp` subcommand remains a separate upstream contribution.
 
 ## 6. Phases
 
@@ -115,7 +139,7 @@ For agents that speak [ACP](https://agentclientprotocol.com), offer a native cha
   - The macOS build (`fork/scripts/build-macos.sh`, ad-hoc signed) is untested on real hardware. Only its logic was checked, under bash 3.2 with stubbed macOS tools; the release-only macOS CI workflow hasn't run since its out-of-memory fix.
   - Signing and notarization (Apple Developer ID), installers and auto-update.
   - Windows builds.
-  - The typed proposed API for the review hook moves to Phase 4; Phase 2 uses internal commands.
+  - The typed proposed API for the review hook moves to Phase 5; Phase 2 uses internal commands.
 
 ### Phase 3: Dogfood (about 2 weeks)
 
@@ -123,10 +147,18 @@ For agents that speak [ACP](https://agentclientprotocol.com), offer a native cha
 - Track what the rendering and review workflow get wrong.
 - **Exit criteria:** a full paper written with it, and a few teammates using it daily.
 
-### Phase 4: Polish and extend
+### Phase 4: ACP connector (about 3–4 weeks)
+
+- **A0. Spike (2–3 days).** Run both adapters headless without fs/terminal: record their capabilities and config options, and confirm an edit lands on disk through the harness's own tools and shows as pending. In the packaged build, show a chat-session provider with 5 option groups and a confirmation prompt while Copilot stays disabled. **Exit criteria:** native chat or webview decided, list of required core patches, fixtures checked in.
+- **A. `packages/acp-client`.** Process manager (process-group kill, restart with backoff), connection, v1 reducer for every `session/update` kind, config options, permission broker, profiles, pinned adapter installer. **Exit criteria:** reducer property tests and fake-agent tests pass in CI; an opt-in contract test against the real Claude and Codex adapters passes, including "the agent never calls `fs/*` or `terminal/*`".
+- **B. Chat panel MVP.** Sessions per harness, streaming text and thinking, tool cards, plan, slash commands, Stop, permission prompts, config-option pickers, Cmd+L to chat. **Exit criteria:** Claude Code and Codex run from the panel on a LaTeX paper; mode, model and effort can be changed; prompts can be answered; edits review inline; no Copilot UI appears; packaged-app smoke test passes.
+- **C. Permissions UX.** Rules editor (Claude settings, Codex exec-policy rules) with restart-and-resume, dangerous-mode confirmation, persistent-option labels, audit log. **Exit criteria:** every button in the capability table is reachable from the panel.
+- **D. Sessions and robustness.** History, reopening with replay, multiple sessions, crash recovery, login flows, an adapter update command. **Exit criteria:** a chat survives a restart and an adapter crash with its transcript.
+- **E. More harnesses.** Gemini CLI by profile only; `tact acp` when available; ACP v2 behind a flag once it's stable. **Exit criteria:** a third harness passes the same contract and UI tests without UI code.
+
+### Phase 5: Polish and extend
 
 - "Restore to before" checkpoints.
-- Optional ACP chat panel; `tact acp`.
 - Upstream the rendering hook as a VS Code proposed API (replacing Phase 2's internal `_agentReview.*` commands).
 
 ## 7. Edge cases checklist
