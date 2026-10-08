@@ -58,7 +58,8 @@ export type ReviewAction =
   | { kind: 'accepted'; path: string; baseline: string } // a hunk was kept: the full new baseline
   | { kind: 'rejected'; path: string } // a hunk was undone in the buffer; the save that follows reaches the engine
   | { kind: 'acceptFile'; path: string }
-  | { kind: 'rejectFile'; path: string };
+  | { kind: 'rejectFile'; path: string }
+  | { kind: 'restore'; path: string; baseline: string | null }; // Ctrl+Z after a Keep: the baseline goes back (null: pending creation)
 
 export interface BulkOutcome {
   done: string[];
@@ -217,6 +218,10 @@ export class ReviewController {
           break;
         case 'rejectFile':
           await engine.rejectFile(abs);
+          break;
+        case 'restore':
+          // Not recorded in `pushed`: the change has to be pushed back to the UI (its entry may be gone).
+          await engine.setBaselineContent(abs, action.baseline, { restoreLineEndings: true });
           break;
       }
     } catch (err) {

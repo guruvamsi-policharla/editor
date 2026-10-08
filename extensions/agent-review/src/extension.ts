@@ -95,10 +95,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // core -> extension
   context.subscriptions.push(
-    vscode.commands.registerCommand('agentReview.ext.onDidHunkAction', async (e: { uri: CoreUri; kind: ReviewAction['kind']; baseline?: string }) => {
+    vscode.commands.registerCommand('agentReview.ext.onDidHunkAction', async (e: { uri: CoreUri; kind: ReviewAction['kind']; baseline?: string | null }) => {
       const uri = toUri(e.uri);
       if (uri.scheme !== 'file') { return; }
-      const action = (e.kind === 'accepted' ? { kind: 'accepted', path: uri.fsPath, baseline: e.baseline ?? '' } : { kind: e.kind, path: uri.fsPath }) as ReviewAction;
+      const action = (e.kind === 'accepted' ? { kind: 'accepted', path: uri.fsPath, baseline: e.baseline ?? '' }
+        : e.kind === 'restore' ? { kind: 'restore', path: uri.fsPath, baseline: e.baseline ?? null }
+          : { kind: e.kind, path: uri.fsPath }) as ReviewAction;
       try {
         await ctl.onReviewAction(action);
       } catch (err) {

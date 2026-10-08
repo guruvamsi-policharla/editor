@@ -287,6 +287,50 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.strictEqual(saves[0]?.skipSaveParticipants, true);
 	});
 
+	test('Ctrl+Z after Keep puts the change back up for review (restore the previous baseline); Ctrl+Shift+Z keeps it again', async () => {
+		const { integration } = await showPending();
+		await integration.acceptNearestChange(hunkWidgets()[0]);
+		assert.deepStrictEqual(hunkEvents.map(e => [e.kind, e.baseline]), [['accepted', DISK]]);
+
+		await model.undo();
+		assert.strictEqual(model.getValue(), DISK, 'the buffer is not touched');
+		assert.deepStrictEqual(hunkEvents.slice(1).map(e => [e.kind, e.baseline]), [['restore', BASELINE]]);
+		await model.redo();
+		assert.deepStrictEqual(hunkEvents.slice(2).map(e => [e.kind, e.baseline]), [['restore', DISK]]);
+		assert.deepStrictEqual(saves, []);
+	});
+
+	test('Ctrl+Z after Undo brings the agent text back as a pending change (saved, like the Undo), not as user typing', async () => {
+		trackSaves = true;
+		savedVersion = model.getAlternativeVersionId();
+		const { entry, integration } = await showPending();
+		await integration.rejectNearestChange(hunkWidgets()[0]);
+		assert.strictEqual(model.getValue(), BASELINE);
+		assert.strictEqual(saves.length, 1);
+
+		await model.undo();
+		assert.strictEqual(model.getValue(), DISK);
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 ? d : undefined));
+		assert.strictEqual(entry.originalModel.getValue(), BASELINE, 'not folded into the baseline as if the user typed it');
+		await timeout(10);
+		assert.strictEqual(saves.length, 2, 'saved, so the disk shows the change again');
+		assert.strictEqual(saves[1]?.skipSaveParticipants, true);
+
+		await model.redo();
+		assert.strictEqual(model.getValue(), BASELINE);
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 0 ? d : undefined));
+		await timeout(10);
+		assert.strictEqual(saves.length, 3);
+
+		// The extension removes the entry once nothing is pending. Ctrl+Z still saves the agent text back to
+		// disk, where the engine sees it as an external write and pushes the change again.
+		service.remove(uri);
+		await model.undo();
+		assert.strictEqual(model.getValue(), DISK);
+		await timeout(10);
+		assert.strictEqual(saves.length, 4);
+	});
+
 	test('Undo never saves a buffer that has unsaved user edits', async () => {
 		const { integration } = await showPending();
 		dirty = true;

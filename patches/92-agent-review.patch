@@ -107,10 +107,10 @@ index 00000000..2820c19f
 +registerWorkbenchContribution2(AgentReviewEditorState.ID, AgentReviewEditorState, WorkbenchPhase.AfterRestored);
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
 new file mode 100644
-index 00000000..4e1e6787
+index 00000000..baccb665
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
-@@ -0,0 +1,307 @@
+@@ -0,0 +1,382 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -126,6 +126,9 @@ index 00000000..4e1e6787
 +//   Keep hunk  -> original model edited here -> 'accepted' with the full new baseline
 +//   Undo hunk  -> buffer edited here -> saved (when it was clean) -> the engine sees disk == baseline there
 +//   Keep file  -> 'acceptFile';  Undo file -> buffer restored + saved, or 'rejectFile' for a created file
++// Ctrl+Z after a Keep puts the change back up for review ('restore' with the previous baseline, see
++// AgentReviewService); Ctrl+Z after an Undo brings the agent's text back as a pending change (and saves it, as
++// the Undo was saved), never as if the user had typed it.
 +// Undo writes the file, so the disk matches what the reviewer sees and the agent can't read the undone text
 +// back. The one exception is a buffer with the user's own unsaved edits: it's never saved for them, so the
 +// undo stays in the buffer (dirty) until they save. Keep never writes: the agent's text is already on disk.
@@ -133,6 +136,7 @@ index 00000000..4e1e6787
 +import { toAction } from '../../../../base/common/actions.js';
 +import { Emitter } from '../../../../base/common/event.js';
 +import { Disposable, DisposableMap, IReference } from '../../../../base/common/lifecycle.js';
++import { ResourceMap } from '../../../../base/common/map.js';
 +import { constObservable, derived, IObservable, observableValue } from '../../../../base/common/observable.js';
 +import { basename } from '../../../../base/common/resources.js';
 +import { URI } from '../../../../base/common/uri.js';
@@ -168,14 +172,61 @@ index 00000000..4e1e6787
 +	 * - `rejected`: one hunk undone in the buffer (the engine follows from the save).
 +	 * - `acceptFile`: everything in the file kept (accept the file as it is on disk).
 +	 * - `rejectFile`: undo a created file, i.e. delete it.
++	 * - `restore`: set the baseline back to `baseline` (`null`: a pending creation); Ctrl+Z after a Keep.
 +	 */
-+	readonly kind: 'accepted' | 'rejected' | 'acceptFile' | 'rejectFile';
-+	readonly baseline?: string;
++	readonly kind: 'accepted' | 'rejected' | 'acceptFile' | 'rejectFile' | 'restore';
++	readonly baseline?: string | null;
++	/** For `accepted` and `acceptFile`: the baseline before the Keep (`null`: the file was a pending creation). */
++	readonly previousBaseline?: string | null;
 +}
 +
 +/** Content changes caused by reloading the file from disk are agent (external) edits. */
 +export function isDiskReload(e: IModelContentChangedEvent): boolean {
 +	return e.detailedReasons.some(r => r.metadata.source === 'reloadFromDisk');
++}
++
++/**
++ * Per file: the buffer text right before and after each Undo (newest last, bounded). An editor undo (Ctrl+Z) that
++ * brings the buffer back to `before` takes that Undo back, so the agent's text is pending again rather than the
++ * user's typing; a redo back to `after` repeats it. `saved`: the Undo was saved, so taking it back is saved too.
++ * Owned by the service, because the last Undo in a file removes the file's entry.
++ */
++export class AgentReviewUndoHistory {
++	private readonly _snapshots = new ResourceMap<{ readonly before: string; readonly after: string; readonly saved: boolean }[]>();
++	private readonly _onDidRemember = new Emitter<ITextModel>();
++	readonly onDidRemember = this._onDidRemember.event;
++
++	remember(model: ITextModel, before: string, saved: boolean): void {
++		let list = this._snapshots.get(model.uri);
++		if (!list) {
++			list = [];
++			this._snapshots.set(model.uri, list);
++		}
++		list.push({ before, after: model.getValue(), saved });
++		if (list.length > 20) {
++			list.shift();
++		}
++		this._onDidRemember.fire(model);
++	}
++
++	/** The Undo that this editor undo/redo of `model` takes back or repeats, if any. Call while handling the change. */
++	match(model: ITextModel, e: IModelContentChangedEvent): { readonly saved: boolean } | undefined {
++		const list = this._snapshots.get(model.uri);
++		if ((!e.isUndoing && !e.isRedoing) || !list) {
++			return undefined;
++		}
++		const value = model.getValue();
++		return list.findLast(s => (e.isUndoing ? s.before : s.after) === value);
++	}
++
++	forget(uri: URI): void {
++		this._snapshots.delete(uri);
++	}
++
++	dispose(): void {
++		this._onDidRemember.dispose();
++		this._snapshots.clear();
++	}
 +}
 +
 +export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
@@ -222,6 +273,7 @@ index 00000000..4e1e6787
 +		modifiedRef: IReference<IResolvedTextEditorModel>,
 +		baseline: string,
 +		kind: AgentReviewKind,
++		private readonly _undoHistory: AgentReviewUndoHistory,
 +		@IModelService modelService: IModelService,
 +		@ILanguageService languageService: ILanguageService,
 +		@IInstantiationService private readonly _instantiationService: IInstantiationService,
@@ -248,7 +300,8 @@ index 00000000..4e1e6787
 +			this._stateObs,
 +			// Disk reloads are agent edits: keep them pending instead of folding them into the baseline.
 +			// Typing in the editor is a user edit: folded into the baseline where it does not touch a pending change.
-+			isDiskReload,
++			// Ctrl+Z / Ctrl+Shift+Z of an Undo puts the agent's text back (or removes it again): not typing either.
++			e => isDiskReload(e) || this._isEditorUndoOfUndo(e),
 +		));
 +		this._changeService.extendToSubwords = true;
 +		this._changeService.preserveShortMatchingLines = true;
@@ -266,19 +319,22 @@ index 00000000..4e1e6787
 +	}
 +
 +	private async _keepHunk(diff: IDocumentDiff2, change: DetailedLineRangeMapping): Promise<boolean> {
++		const previousBaseline = this.originalModel.getValue();
 +		const done = await diff.keep(change);
 +		if (done) {
-+			this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'accepted', baseline: this.originalModel.getValue() });
++			this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'accepted', baseline: this.originalModel.getValue(), previousBaseline });
 +		}
 +		return done;
 +	}
 +
 +	private async _undoHunk(diff: IDocumentDiff2, change: DetailedLineRangeMapping): Promise<boolean> {
 +		const wasDirty = this._hasUnsavedUserEdits();
++		const before = this.modifiedModel.getValue();
 +		const done = await diff.undo(change);
 +		if (!done) {
 +			return false;
 +		}
++		this._rememberUndo(before, !wasDirty);
 +		if (this._kind === 'created' && this.modifiedModel.getValueLength() === 0) {
 +			// Undoing everything the agent wrote in a new file: the file should not exist.
 +			this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'rejectFile' });
@@ -286,8 +342,24 @@ index 00000000..4e1e6787
 +		}
 +		this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'rejected' });
 +		if (!wasDirty) {
-+			await this._saveUndo();
++			await this.saveUndo();
 +		}
++		return true;
++	}
++
++	private _rememberUndo(before: string, saved: boolean): void {
++		this._undoHistory.remember(this.modifiedModel, before, saved);
++	}
++
++	/**
++	 * An editor undo that takes one of our Undos back (or a redo that repeats it) is treated like an agent write:
++	 * pending, not folded into the baseline. (The service saves it if the Undo was saved.)
++	 */
++	private _isEditorUndoOfUndo(e: IModelContentChangedEvent): boolean {
++		if (!this._undoHistory.match(this.modifiedModel, e)) {
++			return false;
++		}
++		this._stateObs.set(ModifiedFileEntryState.Modified, undefined); // e.g. after Undo of the last hunk
 +		return true;
 +	}
 +
@@ -308,7 +380,7 @@ index 00000000..4e1e6787
 +	 * Unsaved user edits are never saved for them; in that case the undo is saved with their next save.
 +	 * If the write fails, the user is told: the agent would otherwise still read its own text on disk.
 +	 */
-+	private async _saveUndo(): Promise<void> {
++	async saveUndo(): Promise<void> {
 +		const previous = this._undoSave?.done;
 +		const versionId = this.modifiedModel.getAlternativeVersionId();
 +		const done = (async () => {
@@ -363,9 +435,10 @@ index 00000000..4e1e6787
 +	}
 +
 +	async accept(): Promise<void> {
++		const previousBaseline = this._kind === 'created' ? null : this.originalModel.getValue();
 +		this._changeService.keep();
 +		this._stateObs.set(ModifiedFileEntryState.Accepted, undefined);
-+		this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'acceptFile' });
++		this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'acceptFile', previousBaseline });
 +	}
 +
 +	async reject(): Promise<void> {
@@ -386,13 +459,15 @@ index 00000000..4e1e6787
 +			return 'deleted';
 +		}
 +		const wasDirty = this._hasUnsavedUserEdits();
++		const before = this.modifiedModel.getValue();
 +		this._changeService.undo();
++		this._rememberUndo(before, !wasDirty);
 +		this._stateObs.set(ModifiedFileEntryState.Rejected, undefined);
 +		this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'rejected' });
 +		if (wasDirty) {
 +			return 'unsaved';
 +		}
-+		await this._saveUndo();
++		await this.saveUndo();
 +		return this._textFileService.isDirty(this.modifiedURI) ? 'unsaved' : 'saved';
 +	}
 +
@@ -631,10 +706,10 @@ index 00000000..341604e2
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts
 new file mode 100644
-index 00000000..ac216fba
+index 00000000..155f9ac4
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,255 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -647,17 +722,21 @@ index 00000000..ac216fba
 +// keybindings, and explorer decorations.
 +
 +import { Emitter, Event } from '../../../../base/common/event.js';
-+import { Disposable, IDisposable } from '../../../../base/common/lifecycle.js';
++import { Disposable, DisposableMap, IDisposable } from '../../../../base/common/lifecycle.js';
 +import { ResourceMap } from '../../../../base/common/map.js';
 +import { IObservable, IReader, observableValue } from '../../../../base/common/observable.js';
 +import { isEqual } from '../../../../base/common/resources.js';
 +import { URI } from '../../../../base/common/uri.js';
++import { localize } from '../../../../nls.js';
 +import { ITextModel } from '../../../../editor/common/model.js';
 +import { IModelService } from '../../../../editor/common/services/model.js';
 +import { ITextModelContentProvider, ITextModelService } from '../../../../editor/common/services/resolverService.js';
 +import { createDecorator, IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
++import { IUndoRedoService, UndoRedoElementType } from '../../../../platform/undoRedo/common/undoRedo.js';
 +import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntry } from '../../chat/common/editing/chatEditingService.js';
-+import { AGENT_REVIEW_BASELINE_SCHEME, AgentReviewEntry, AgentReviewKind, IAgentReviewHunkEvent } from './agentReviewEntry.js';
++import { SaveReason } from '../../../common/editor.js';
++import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
++import { AGENT_REVIEW_BASELINE_SCHEME, AgentReviewEntry, AgentReviewKind, AgentReviewUndoHistory, IAgentReviewHunkEvent } from './agentReviewEntry.js';
 +import { openAgentReviewMerge } from './agentReviewMerge.js';
 +
 +export const IAgentReviewService = createDecorator<IAgentReviewService>('agentReviewService');
@@ -740,13 +819,20 @@ index 00000000..ac216fba
 +	private readonly _onDidHunkAction = this._register(new Emitter<IAgentReviewHunkEvent>());
 +	readonly onDidHunkAction = this._onDidHunkAction.event;
 +
++	private readonly _undoHistory = new AgentReviewUndoHistory();
++	private readonly _undoHistoryListeners = this._register(new DisposableMap<string>());
++
 +	constructor(
 +		@IChatEditingService chatEditingService: IChatEditingService,
 +		@ITextModelService private readonly _textModelService: ITextModelService,
 +		@IModelService private readonly _modelService: IModelService,
 +		@IInstantiationService private readonly _instantiationService: IInstantiationService,
++		@IUndoRedoService private readonly _undoRedoService: IUndoRedoService,
++		@ITextFileService private readonly _textFileService: ITextFileService,
 +	) {
 +		super();
++		this._register(this._undoHistory);
++		this._register(this._undoHistory.onDidRemember(model => this._watchUndoOfUndo(model)));
 +		this._register(chatEditingService.registerEditReviewSession(this._session));
 +
 +		// Lets "open side-by-side diff" (toggleDiff) resolve the in-memory baseline model.
@@ -793,11 +879,65 @@ index 00000000..ac216fba
 +			ref.dispose();
 +			return undefined;
 +		}
-+		const entry = this._instantiationService.createInstance(AgentReviewEntry, ref, latest.baseline, latest.kind);
-+		const listener = entry.onDidHunkAction(e => this._onDidHunkAction.fire(e));
++		const entry = this._instantiationService.createInstance(AgentReviewEntry, ref, latest.baseline, latest.kind, this._undoHistory);
++		const listener = entry.onDidHunkAction(e => {
++			this._onDidHunkAction.fire(e);
++			this._pushUndoForKeep(e);
++		});
 +		this._entries.set(uri, { entry, listener });
 +		this._session.entriesObs.set([...this._session.entriesObs.get(), entry], undefined);
 +		return entry;
++	}
++
++	/**
++	 * Ctrl+Z after an Undo that was saved: save again, so that the disk shows the agent's text, pending, as the editor
++	 * does. With the entry gone (the Undo was the file's last change), the save is what brings the change back: the
++	 * engine sees an external write.
++	 */
++	private _watchUndoOfUndo(model: ITextModel): void {
++		const key = model.uri.toString();
++		if (this._undoHistoryListeners.has(key)) {
++			return;
++		}
++		const listener = model.onDidChangeContent(e => {
++			if (!this._undoHistory.match(model, e)?.saved) {
++				return;
++			}
++			setTimeout(() => { // not while the model is still dispatching this change
++				const entry = this.getEntry(model.uri);
++				if (entry) {
++					entry.saveUndo();
++				} else if (!model.isDisposed()) {
++					this._textFileService.save(model.uri, { reason: SaveReason.EXPLICIT, skipSaveParticipants: true });
++				}
++			}, 0);
++		});
++		const disposeListener = model.onWillDispose(() => {
++			this._undoHistory.forget(model.uri);
++			this._undoHistoryListeners.deleteAndDispose(key);
++		});
++		this._undoHistoryListeners.set(key, { dispose: () => { listener.dispose(); disposeListener.dispose(); } });
++	}
++
++	/**
++	 * Ctrl+Z after a Keep (hunk or file, in the editor) puts the change back up for review: the engine's baseline goes
++	 * back to what it was, and the change is pushed back in. Ctrl+Shift+Z keeps it again. The element lives on the
++	 * file's own undo stack, so it interleaves with typing and Undo, and works after the last Keep removed the entry.
++	 */
++	private _pushUndoForKeep(e: IAgentReviewHunkEvent): void {
++		if ((e.kind !== 'accepted' && e.kind !== 'acceptFile') || e.previousBaseline === undefined) {
++			return;
++		}
++		const { uri, previousBaseline } = e;
++		const redo: IAgentReviewHunkEvent = e.kind === 'accepted' ? { uri, kind: 'restore', baseline: e.baseline } : { uri, kind: 'acceptFile' };
++		this._undoRedoService.pushElement({
++			type: UndoRedoElementType.Resource,
++			resource: uri,
++			label: localize('agentReview.keepUndoLabel', "Keep Agent Change"),
++			code: 'agentReview.keep',
++			undo: () => this._onDidHunkAction.fire({ uri, kind: 'restore', baseline: previousBaseline }),
++			redo: () => this._onDidHunkAction.fire(redo),
++		});
 +	}
 +
 +	remove(uri: URI): void {
@@ -902,10 +1042,10 @@ index 00000000..68180ed8
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
 new file mode 100644
-index 00000000..51dad5fc
+index 00000000..86162486
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
-@@ -0,0 +1,474 @@
+@@ -0,0 +1,518 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -1193,6 +1333,50 @@ index 00000000..51dad5fc
 +		assert.deepStrictEqual(hunkEvents.map(e => e.kind), ['rejected']);
 +		assert.strictEqual(saves.length, 1);
 +		assert.strictEqual(saves[0]?.skipSaveParticipants, true);
++	});
++
++	test('Ctrl+Z after Keep puts the change back up for review (restore the previous baseline); Ctrl+Shift+Z keeps it again', async () => {
++		const { integration } = await showPending();
++		await integration.acceptNearestChange(hunkWidgets()[0]);
++		assert.deepStrictEqual(hunkEvents.map(e => [e.kind, e.baseline]), [['accepted', DISK]]);
++
++		await model.undo();
++		assert.strictEqual(model.getValue(), DISK, 'the buffer is not touched');
++		assert.deepStrictEqual(hunkEvents.slice(1).map(e => [e.kind, e.baseline]), [['restore', BASELINE]]);
++		await model.redo();
++		assert.deepStrictEqual(hunkEvents.slice(2).map(e => [e.kind, e.baseline]), [['restore', DISK]]);
++		assert.deepStrictEqual(saves, []);
++	});
++
++	test('Ctrl+Z after Undo brings the agent text back as a pending change (saved, like the Undo), not as user typing', async () => {
++		trackSaves = true;
++		savedVersion = model.getAlternativeVersionId();
++		const { entry, integration } = await showPending();
++		await integration.rejectNearestChange(hunkWidgets()[0]);
++		assert.strictEqual(model.getValue(), BASELINE);
++		assert.strictEqual(saves.length, 1);
++
++		await model.undo();
++		assert.strictEqual(model.getValue(), DISK);
++		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 ? d : undefined));
++		assert.strictEqual(entry.originalModel.getValue(), BASELINE, 'not folded into the baseline as if the user typed it');
++		await timeout(10);
++		assert.strictEqual(saves.length, 2, 'saved, so the disk shows the change again');
++		assert.strictEqual(saves[1]?.skipSaveParticipants, true);
++
++		await model.redo();
++		assert.strictEqual(model.getValue(), BASELINE);
++		await waitForState(entry.diffInfo.map(d => d.changes.length === 0 ? d : undefined));
++		await timeout(10);
++		assert.strictEqual(saves.length, 3);
++
++		// The extension removes the entry once nothing is pending. Ctrl+Z still saves the agent text back to
++		// disk, where the engine sees it as an external write and pushes the change again.
++		service.remove(uri);
++		await model.undo();
++		assert.strictEqual(model.getValue(), DISK);
++		await timeout(10);
++		assert.strictEqual(saves.length, 4);
 +	});
 +
 +	test('Undo never saves a buffer that has unsaved user edits', async () => {

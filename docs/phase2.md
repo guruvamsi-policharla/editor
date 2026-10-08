@@ -75,6 +75,8 @@ The rule: after Undo, the file on disk matches what the user sees (as in Cursor)
 | **Undo** a hunk, or a file in the editor | The baseline text goes back into the buffer, which is **saved right away** (without save participants, so formatters can't touch other pending lines). Disk = what you see | The undo stays **in the buffer**, which stays dirty; it reaches the disk with the user's next save (and is attributed correctly then). Until then the agent still sees its own text on disk |
 | **Undo** from the list / **Undo All** | The engine writes the baseline (or deletes a created file, restores a deleted one) | Undone in the buffer as above, not saved. Created/deleted files and files in conflict are skipped, with a message |
 
+**Ctrl/Cmd+Z** takes a Keep or an Undo back. After a Keep (a hunk, or a file from the overlay), the change is up for review again: the engine's baseline goes back to what it was, and the disk isn't touched. After an Undo, the agent's text comes back as a pending change, and it's saved if the Undo was saved. Redo repeats the Keep or Undo. Before this, Ctrl+Z after Keep undid the agent's last write in the buffer instead, and Ctrl+Z after Undo brought the agent's text back as if the user had typed it, so it was accepted on the next save.
+
 If the save after an Undo fails or is cancelled (disk full, permissions, a newer version on disk), a warning says the undo isn't on disk yet and offers **Save**. Two Undos in quick succession both get saved, even while the first save is still running.
 
 ## Scope status
