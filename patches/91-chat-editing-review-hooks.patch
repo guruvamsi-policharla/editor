@@ -1,5 +1,5 @@
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
-index 2e43b458..35c53899 100644
+index 2e43b458..ee7303c8 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
 +++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
 @@ -17,12 +17,13 @@ import { AccessibleDiffViewer, IAccessibleDiffViewerModel } from '../../../../..
@@ -38,15 +38,29 @@ index 2e43b458..35c53899 100644
  
  	private readonly _accessibleDiffViewVisible = observableValue<boolean>(this, false);
  
-@@ -194,6 +202,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -180,6 +188,12 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 			}
+ 		}));
+ 
++		// Agent review: where each hunk's Keep/Undo goes depends on the width (end of its last row, or a row of its own),
++		// so place them again when the editor gets narrower or wider (a split, the side bar, the agent terminal).
++		const toolbarRoomWidth = (_entry as { readonly hunkToolbarRows?: boolean }).hunkToolbarRows === true
++			? codeEditorObs.layoutInfo.map(l => l.contentWidth)
++			: constObservable(0);
++
+ 		// render diff decorations
+ 		this._store.add(autorun(r => {
+ 
+@@ -194,6 +208,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  
  				codeEditorObs.getOption(EditorOption.fontInfo).read(r);
  				codeEditorObs.getOption(EditorOption.lineHeight).read(r);
 +				codeEditorObs.getOption(EditorOption.wrappingInfo).read(r); // deleted lines wrap like the editor's
++				toolbarRoomWidth.read(r);
  
  				const reviewMode = _entry.reviewMode.read(r);
  				const diff = documentDiffInfo.read(r);
-@@ -201,16 +210,29 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -201,16 +217,29 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  			}
  		}));
  
@@ -78,7 +92,7 @@ index 2e43b458..35c53899 100644
  
  			const diff = documentDiffInfo.read(r);
  			const changeAtCursor = diff.changes.find(m => m.modified.contains(position.lineNumber) || m.modified.isEmpty && m.modified.startLineNumber === position.lineNumber);
-@@ -312,11 +334,15 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -312,11 +341,15 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  
  	private _clearDiffRendering() {
  		this._editor.changeViewZones((viewZoneChangeAccessor) => {
@@ -96,7 +110,7 @@ index 2e43b458..35c53899 100644
  		this._diffHunksRenderStore.clear();
  		for (const widget of this._diffHunkWidgetPool.free) {
  			widget.remove();
-@@ -324,6 +350,40 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -324,6 +357,40 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  		this._diffVisualDecorations.clear();
  	}
  
@@ -137,7 +151,7 @@ index 2e43b458..35c53899 100644
  	private _updateDiffRendering(diff: IDocumentDiff2, reviewMode: boolean, diffMode: boolean): void {
  
  		const chatDiffAddDecoration = ModelDecorationOptions.createDynamic({
-@@ -334,6 +394,12 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -334,6 +401,12 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  			...diffWholeLineAddDecoration,
  			stickiness: TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
  		});
@@ -150,9 +164,15 @@ index 2e43b458..35c53899 100644
  		const createOverviewDecoration = (overviewRulerColor: string, minimapColor: string) => {
  			return ModelDecorationOptions.createDynamic({
  				description: 'chat-editing-decoration',
-@@ -348,32 +414,94 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -347,33 +420,100 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 
  		this._diffHunksRenderStore.clear();
  		this._diffHunkWidgets.length = 0;
++		// First in the store, so it's set before anything else of this rendering is disposed: clearing its decorations
++		// fires editor events that reach its scroll/layout listener, which then found no ranges and disposed the widgets
++		// (pooled, so the next rendering showed them with no Keep/Undo). Seen when a layout change re-renders (agent review).
++		let replaced = false;
++		this._diffHunksRenderStore.add(toDisposable(() => replaced = true));
  		const diffHunkDecorations: IModelDeltaDecoration[] = [];
 +		const toolbarRows = reviewMode && !diffMode && (this._entry as { readonly hunkToolbarRows?: boolean }).hunkToolbarRows === true;
 +		const trackChangesEnabled = reviewMode && !diffMode && (this._entry as { readonly trackChanges?: boolean }).trackChanges === true;
@@ -248,7 +268,7 @@ index 2e43b458..35c53899 100644
  						decorations.push(new InlineDecoration(
  							i.originalRange.delta(-(diffEntry.original.startLineNumber - 1)),
  							diffDeleteDecoration.className!,
-@@ -396,7 +524,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -396,7 +536,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  				if (!diffEntry.modified.isEmpty) {
  					modifiedVisualDecorations.push({
  						range: diffEntry.modified.toInclusiveRange()!,
@@ -257,7 +277,7 @@ index 2e43b458..35c53899 100644
  					});
  				}
  
-@@ -421,21 +549,31 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -421,21 +561,31 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  				}
  
  				let extraLines = 0;
@@ -292,7 +312,7 @@ index 2e43b458..35c53899 100644
  					}
  				}
  
-@@ -456,6 +594,39 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -456,6 +606,39 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  						this._diffHunkWidgetPool.putBack(widget);
  					}));
  
@@ -332,7 +352,7 @@ index 2e43b458..35c53899 100644
  					widget.layout(diffEntry.modified.startLineNumber);
  
  					this._diffHunkWidgets.push(widget);
-@@ -470,8 +641,26 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -470,8 +653,26 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  			}
  
  			this._diffVisualDecorations.set(!diffMode ? modifiedVisualDecorations : []);
@@ -359,7 +379,7 @@ index 2e43b458..35c53899 100644
  		const diffHunkDecoCollection = this._editor.createDecorationsCollection(diffHunkDecorations);
  
  		this._diffHunksRenderStore.add(toDisposable(() => {
-@@ -514,7 +703,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -514,7 +715,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  			if (e.target.type === MouseTargetType.CONTENT_VIEW_ZONE) {
  				const zone = e.target.detail;
  				const idx = this._viewZones.findIndex(id => id === zone.viewZoneId);
@@ -368,7 +388,7 @@ index 2e43b458..35c53899 100644
  					this._editor.setPosition(e.target.position);
  					this._editor.focus();
  				}
-@@ -532,7 +721,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -532,7 +733,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  			} else if (e.target.type === MouseTargetType.CONTENT_VIEW_ZONE) {
  				const zone = e.target.detail;
  				const idx = this._viewZones.findIndex(id => id === zone.viewZoneId);
@@ -378,7 +398,17 @@ index 2e43b458..35c53899 100644
  
  			} else if (e.target.position) {
  				const { position } = e.target;
-@@ -642,7 +832,14 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -545,6 +747,9 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 		}));
+ 
+ 		this._diffHunksRenderStore.add(Event.any(this._editor.onDidScrollChange, this._editor.onDidLayoutChange)(() => {
++			if (replaced) {
++				return;
++			}
+ 			for (let i = 0; i < this._diffHunkWidgets.length; i++) {
+ 				const widget = this._diffHunkWidgets[i];
+ 				const range = diffHunkDecoCollection.getRange(i);
+@@ -642,7 +847,14 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  		if (!this._editor.hasModel()) {
  			return undefined;
  		}
@@ -394,7 +424,7 @@ index 2e43b458..35c53899 100644
  		let closestWidget: DiffHunkWidget | undefined;
  		let closestDistance = Number.MAX_VALUE;
  
-@@ -699,7 +896,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -699,7 +911,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  				original: { resource: this._entry.originalURI },
  				modified: { resource: this._entry.modifiedURI },
  				options: { selection },
@@ -403,7 +433,7 @@ index 2e43b458..35c53899 100644
  			});
  
  			if (diffEditor && diffEditor.input) {
-@@ -735,6 +932,54 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -735,6 +947,54 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  	}
  }
  
@@ -458,7 +488,7 @@ index 2e43b458..35c53899 100644
  class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  
  	private static _idPool = 0;
-@@ -745,6 +990,19 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+@@ -745,6 +1005,19 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  	private _position: IOverlayWidgetPosition | undefined;
  	private _lastStartLineNumber: number | undefined;
  	private _removed: boolean = false;
@@ -478,7 +508,7 @@ index 2e43b458..35c53899 100644
  
  	constructor(
  		private readonly _editor: ICodeEditor,
-@@ -806,13 +1064,87 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+@@ -806,13 +1079,87 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  		return this._id;
  	}
  
@@ -567,7 +597,7 @@ index 2e43b458..35c53899 100644
  			stackOrdinal: 1,
  			preference: {
  				top: this._editor.getTopForLineNumber(startLineNumber) - scrollTop - (lineHeight * this._lineDelta),
-@@ -853,6 +1185,10 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+@@ -853,6 +1200,10 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  		return this._lastStartLineNumber;
  	}
  
@@ -579,7 +609,7 @@ index 2e43b458..35c53899 100644
  
  	async reject(): Promise<boolean> {
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts
-index 01fe8016..13568ccd 100644
+index 01fe8016..02c409a7 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts
 +++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts
 @@ -29,7 +29,6 @@ import { IDocumentDiffItemWithMultiDiffEditorItem, MultiDiffEditorInput } from '
@@ -649,7 +679,7 @@ index 01fe8016..13568ccd 100644
  			precondition: ContextKeyExpr.and(ctxHasEditorModification, ctxIsCurrentlyBeingModified.negate()),
  			icon: _keep
  				? Codicon.check
-@@ -306,12 +309,12 @@ export class RejectHunkAction extends AcceptRejectHunkAction {
+@@ -306,12 +309,13 @@ export class RejectHunkAction extends AcceptRejectHunkAction {
  	}
  }
  
@@ -662,10 +692,11 @@ index 01fe8016..13568ccd 100644
 -			category: CHAT_CATEGORY,
 +			title: localize2('agentReview.diff', 'Toggle Diff Editor for Agent Changes'),
 +			category: AGENT_REVIEW_CATEGORY,
++			f1: true, // agent review: also in the command palette
  			toggled: {
  				condition: ContextKeyExpr.or(EditorContextKeys.inDiffEditor, ActiveEditorContext.isEqualTo(TEXT_DIFF_EDITOR_ID))!,
  				icon: Codicon.goToFile,
-@@ -340,11 +343,11 @@ class ToggleDiffAction extends ChatEditingEditorAction {
+@@ -340,11 +344,11 @@ class ToggleDiffAction extends ChatEditingEditorAction {
  	}
  }
  
@@ -679,7 +710,7 @@ index 01fe8016..13568ccd 100644
  			f1: true,
  			precondition: ContextKeyExpr.and(ctxHasEditorModification, ctxIsCurrentlyBeingModified.negate()),
  			keybinding: {
-@@ -388,8 +391,8 @@ export class AcceptAllEditsAction extends ChatEditingEditorAction {
+@@ -388,8 +392,8 @@ export class AcceptAllEditsAction extends ChatEditingEditorAction {
  	constructor() {
  		super({
  			id: AcceptAllEditsAction.ID,

@@ -117,10 +117,10 @@ index 00000000..0362ae67
 +registerWorkbenchContribution2(AgentReviewOrphanedMerges.ID, AgentReviewOrphanedMerges, WorkbenchPhase.AfterRestored);
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
 new file mode 100644
-index 00000000..16491fb7
+index 00000000..6388f4bd
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
-@@ -0,0 +1,463 @@
+@@ -0,0 +1,481 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -160,7 +160,7 @@ index 00000000..16491fb7
 +import { EndOfLinePreference, ITextModel } from '../../../../editor/common/model.js';
 +import { createTextBufferFactory } from '../../../../editor/common/model/textModel.js';
 +import { IModelService } from '../../../../editor/common/services/model.js';
-+import { IResolvedTextEditorModel } from '../../../../editor/common/services/resolverService.js';
++import { IResolvedTextEditorModel, ITextModelService } from '../../../../editor/common/services/resolverService.js';
 +import { IModelContentChangedEvent } from '../../../../editor/common/textModelEvents.js';
 +import { localize } from '../../../../nls.js';
 +import { IFileService } from '../../../../platform/files/common/files.js';
@@ -273,6 +273,8 @@ index 00000000..16491fb7
 +
 +	private readonly _changeService: ChatEditingTextModelChangeService;
 +	private readonly _integrations = this._register(new DisposableMap<IEditorPane, IModifiedFileEntryEditorIntegration>());
++	/** Per pane: drops its integration when the pane's code editor goes (its group or window was closed). */
++	private readonly _integrationEditorListeners = this._register(new DisposableMap<IEditorPane>());
 +
 +	/** The save of the last Undo, while it runs, and the buffer version it writes. */
 +	private _undoSave: { readonly versionId: number; readonly done: Promise<void> } | undefined;
@@ -296,6 +298,7 @@ index 00000000..16491fb7
 +		@ITextFileService private readonly _textFileService: ITextFileService,
 +		@ILogService private readonly _logService: ILogService,
 +		@INotificationService private readonly _notificationService: INotificationService,
++		@ITextModelService textModelService: ITextModelService,
 +	) {
 +		super();
 +		this._kind = kind;
@@ -308,6 +311,17 @@ index 00000000..16491fb7
 +			this.originalURI,
 +			false
 +		));
++		// The side-by-side diff (Toggle Diff) resolves the baseline through ITextModelService, and when the diff closes
++		// and drops the last reference, the resolver disposes the model it resolved: this entry's baseline. The inline
++		// review then lost its original side (no highlights, no Keep/Undo) while the file stayed pending, and the diff
++		// could not be opened again. Hold a reference for the entry's lifetime, as chat's entries do.
++		textModelService.createModelReference(this.originalURI).then(ref => {
++			if (this._store.isDisposed) {
++				ref.dispose();
++			} else {
++				this._register(ref);
++			}
++		}, err => this._logService.error('[agentReview] could not hold the baseline model', err));
 +
 +		this._changeService = this._register(this._instantiationService.createInstance(
 +			ChatEditingTextModelChangeService,
@@ -506,6 +520,10 @@ index 00000000..16491fb7
 +			}
 +			value = this.createEditorIntegration(codeEditor);
 +			this._integrations.set(pane, value);
++			this._integrationEditorListeners.set(pane, codeEditor.onDidDispose(() => {
++				this._integrationEditorListeners.deleteAndDispose(pane);
++				this._integrations.deleteAndDispose(pane);
++			}));
 +		}
 +		return value;
 +	}
@@ -831,10 +849,10 @@ index 00000000..71987493
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts
 new file mode 100644
-index 00000000..12e40480
+index 00000000..b9867bdb
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts
-@@ -0,0 +1,260 @@
+@@ -0,0 +1,285 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -847,7 +865,7 @@ index 00000000..12e40480
 +// keybindings, and explorer decorations.
 +
 +import { Emitter, Event } from '../../../../base/common/event.js';
-+import { Disposable, DisposableMap, IDisposable } from '../../../../base/common/lifecycle.js';
++import { combinedDisposable, Disposable, DisposableMap, IDisposable } from '../../../../base/common/lifecycle.js';
 +import { ResourceMap } from '../../../../base/common/map.js';
 +import { IObservable, IReader, observableValue } from '../../../../base/common/observable.js';
 +import { isEqual } from '../../../../base/common/resources.js';
@@ -857,6 +875,7 @@ index 00000000..12e40480
 +import { IModelService } from '../../../../editor/common/services/model.js';
 +import { ITextModelContentProvider, ITextModelService } from '../../../../editor/common/services/resolverService.js';
 +import { createDecorator, IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
++import { ILogService } from '../../../../platform/log/common/log.js';
 +import { IUndoRedoService, UndoRedoElementType } from '../../../../platform/undoRedo/common/undoRedo.js';
 +import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntry } from '../../chat/common/editing/chatEditingService.js';
 +import { SaveReason } from '../../../common/editor.js';
@@ -954,6 +973,7 @@ index 00000000..12e40480
 +		@IInstantiationService private readonly _instantiationService: IInstantiationService,
 +		@IUndoRedoService private readonly _undoRedoService: IUndoRedoService,
 +		@ITextFileService private readonly _textFileService: ITextFileService,
++		@ILogService private readonly _logService: ILogService,
 +	) {
 +		super();
 +		this._register(this._undoHistory);
@@ -1010,13 +1030,36 @@ index 00000000..12e40480
 +			return this._store.isDisposed || !this._latest.get(uri) ? undefined : this._createEntry(uri);
 +		}
 +		const entry = this._instantiationService.createInstance(AgentReviewEntry, ref, baseline, latest.kind, this._undoHistory);
-+		const listener = entry.onDidHunkAction(e => {
-+			this._onDidHunkAction.fire(e);
-+			this._pushUndoForKeep(e);
-+		});
++		const listener = combinedDisposable(
++			entry.onDidHunkAction(e => {
++				this._onDidHunkAction.fire(e);
++				this._pushUndoForKeep(e);
++			}),
++			entry.originalModel.onWillDispose(() => this._recreateEntry(uri, entry)),
++		);
 +		this._entries.set(uri, { entry, listener });
 +		this._session.entriesObs.set([...this._session.entriesObs.get(), entry], undefined);
 +		return entry;
++	}
++
++	/**
++	 * The entry holds its baseline model, so nothing else should dispose it. If something does anyway, the review would
++	 * lose its original side while the file is still pending: rebuild the entry from the same baseline instead.
++	 */
++	private _recreateEntry(uri: URI, entry: AgentReviewEntry): void {
++		if (this._entries.get(uri)?.entry !== entry) {
++			return; // removed or replaced: the entry disposes its own baseline
++		}
++		const baseline = entry.originalModel.getValue();
++		const kind = entry.kind;
++		this._logService.warn('[agentReview] baseline model disposed while the file is pending; recreating the review', uri.toString());
++		setTimeout(() => { // not while the model is being disposed
++			if (this._entries.get(uri)?.entry !== entry) {
++				return;
++			}
++			this.remove(uri);
++			this.setBaseline(uri, baseline, kind);
++		}, 0);
 +	}
 +
 +	/**
@@ -1226,10 +1269,10 @@ index 00000000..aad60b47
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
 new file mode 100644
-index 00000000..fa96b7ec
+index 00000000..c7727931
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
-@@ -0,0 +1,651 @@
+@@ -0,0 +1,769 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -1244,7 +1287,7 @@ index 00000000..fa96b7ec
 +
 +import assert from 'assert';
 +import { timeout } from '../../../../../base/common/async.js';
-+import { Event } from '../../../../../base/common/event.js';
++import { Emitter, Event } from '../../../../../base/common/event.js';
 +import { Disposable, DisposableStore, IDisposable, IReference } from '../../../../../base/common/lifecycle.js';
 +import { ResourceMap } from '../../../../../base/common/map.js';
 +import { constObservable, waitForState } from '../../../../../base/common/observable.js';
@@ -1252,7 +1295,7 @@ index 00000000..fa96b7ec
 +import { mock } from '../../../../../base/test/common/mock.js';
 +import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 +import { IOverlayWidget, IViewZone, IViewZoneChangeAccessor } from '../../../../../editor/browser/editorBrowser.js';
-+import { EditorOption } from '../../../../../editor/common/config/editorOptions.js';
++import { EditorLayoutInfo, EditorOption } from '../../../../../editor/common/config/editorOptions.js';
 +import { EditOperation } from '../../../../../editor/common/core/editOperation.js';
 +import { Range } from '../../../../../editor/common/core/range.js';
 +import { ITextModel } from '../../../../../editor/common/model.js';
@@ -1280,7 +1323,7 @@ index 00000000..fa96b7ec
 +import { ContextKeyService } from '../../../../../platform/contextkey/browser/contextKeyService.js';
 +import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 +import { AcceptAction, AcceptAllEditsAction, AcceptHunkAction, NavigateAction, RejectAction, RejectHunkAction, ToggleAccessibleDiffViewAction, ToggleDiffAction } from '../../../chat/browser/chatEditing/chatEditingEditorActions.js';
-+import { AgentReviewKind, foldUnsavedEdits, IAgentReviewHunkEvent } from '../../browser/agentReviewEntry.js';
++import { AGENT_REVIEW_BASELINE_SCHEME, AgentReviewKind, foldUnsavedEdits, IAgentReviewHunkEvent } from '../../browser/agentReviewEntry.js';
 +import { IFileContent, IFileService } from '../../../../../platform/files/common/files.js';
 +import { VSBuffer } from '../../../../../base/common/buffer.js';
 +import { AgentReviewService } from '../../browser/agentReviewService.js';
@@ -1326,14 +1369,21 @@ index 00000000..fa96b7ec
 +		saveOutcome = 'ok';
 +		notifications = [];
 +
++		const workbench = store.add(workbenchInstantiationService(undefined, store));
++		// The real resolver for the baseline models: reference counted, and it disposes a model it resolved when the
++		// last reference goes (as when a side-by-side diff closes). The file itself is a plain model here.
++		const resolver = workbench.get(ITextModelService);
 +		const collection = new ServiceCollection();
 +		collection.set(IEditorWorkerService, new SyncDescriptor(TestWorkerService));
 +		collection.set(ITextModelService, new class extends mock<ITextModelService>() {
 +			override async createModelReference(resource: URI): Promise<IReference<IResolvedTextEditorModel>> {
++				if (resource.scheme === AGENT_REVIEW_BASELINE_SCHEME) {
++					return resolver.createModelReference(resource);
++				}
 +				return { dispose: () => { }, object: { textEditorModel: modelService.getModel(resource) ?? model, getLanguageId: () => 'latex' } as IResolvedTextEditorModel };
 +			}
-+			override registerTextModelContentProvider(_scheme: string, _provider: ITextModelContentProvider): IDisposable {
-+				return Disposable.None;
++			override registerTextModelContentProvider(scheme: string, provider: ITextModelContentProvider): IDisposable {
++				return resolver.registerTextModelContentProvider(scheme, provider);
 +			}
 +		}());
 +		collection.set(IChatEditingService, new class extends mock<IChatEditingService>() {
@@ -1382,7 +1432,7 @@ index 00000000..fa96b7ec
 +			override readonly onDidChangeViewVisibility = Event.None;
 +		}());
 +
-+		insta = store.add(store.add(workbenchInstantiationService(undefined, store)).createChild(collection));
++		insta = store.add(workbench.createChild(collection));
 +		store.add(insta.get(IEditorWorkerService) as TestWorkerService);
 +		modelService = insta.get(IModelService);
 +		model = store.add(modelService.createModel(DISK, null, uri, false));
@@ -1395,12 +1445,13 @@ index 00000000..fa96b7ec
 +
 +	teardown(() => store.clear());
 +
++	let zoneIds = 0;
++
 +	/** A code editor without a DOM view: records view zones and overlay widgets instead. */
 +	function createEditor(instantiationService: TestInstantiationService): ITestCodeEditor {
 +		const e = store.add(instantiateTestCodeEditor(instantiationService, model));
-+		let zoneIds = 0;
 +		const accessor: IViewZoneChangeAccessor = {
-+			addZone: zone => { const id = String(++zoneIds); zones.set(id, zone); return id; },
++			addZone: zone => { const id = String(++zoneIds); zones.set(id, zone); return id; }, // unique across editors
 +			removeZone: id => { zones.delete(id); },
 +			layoutZone: () => { },
 +		};
@@ -1543,6 +1594,28 @@ index 00000000..fa96b7ec
 +		assert.ok(position && typeof position === 'object');
 +		assert.ok(position.left > 50 + 'b TWO'.length * 7, 'right of the text');
 +		assert.ok(position.top < editor.getTopForLineNumber(3), 'on line 2, not below it');
++	});
++
++	test('when the editor gets narrower (a split), a toolbar that no longer fits at the end of its line gets its own row', async () => {
++		const getOption = editor.getOption.bind(editor);
++		editor.getOption = (id => id === EditorOption.fontInfo ? { ...getOption(EditorOption.fontInfo), typicalHalfwidthCharacterWidth: 7 } : getOption(id)) as typeof editor.getOption;
++		let contentWidth = 800;
++		editor.getLayoutInfo = () => ({ ...getOption(EditorOption.layoutInfo), contentLeft: 50, contentWidth, verticalScrollbarWidth: 14 });
++		const line = 'y'.repeat(60);
++		model.setValue(`a one\n${line} TWO\nc three\n`);
++		await showPending(`a one\n${line} two\nc three\n`);
++		const toolbarRows = () => [...zones.values()].filter(z => z.domNode.classList.contains('agent-review-hunk-toolbar-row')).map(z => z.afterLineNumber);
++		assert.deepStrictEqual(toolbarRows(), [], '64 columns: room at the end of the line');
++
++		// The test editor ignores its container's size: report the new layout as the real editor does on a resize.
++		const relayout = (width: number) => { contentWidth = width; (editor as unknown as { _onDidLayoutChange: Emitter<EditorLayoutInfo> })._onDidLayoutChange.fire(editor.getLayoutInfo()); };
++		const keepUndoShown = () => hunkWidgets().length === 1 && hunkWidgets().every(w => w.getDomNode().querySelector('.monaco-toolbar'));
++		relayout(400); // about 55 columns
++		assert.deepStrictEqual(toolbarRows(), [2], 'no room any more: a row of its own, not over the text');
++		assert.ok(keepUndoShown(), 'Keep/Undo still there (not disposed by the previous rendering\'s layout listener)');
++		relayout(800);
++		assert.deepStrictEqual(toolbarRows(), [], 'wide again: back at the end of the line');
++		assert.ok(keepUndoShown());
 +	});
 +
 +	test('unsaved user edits in the buffer when the entry is created (restored after a restart) are not agent changes', async () => {
@@ -1834,6 +1907,93 @@ index 00000000..fa96b7ec
 +		assert.deepStrictEqual(opened.map(i => i.label), ['paper.tex (agent changes)']);
 +	});
 +
++	function deletedRows() {
++		return [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
++	}
++
++	function textEditorPane(codeEditor: ITestCodeEditor): IEditorPane {
++		return new class extends mock<IEditorPane>() {
++			override getId() { return 'workbench.editors.files.textFileEditor'; }
++			override getControl() { return codeEditor; }
++		}();
++	}
++
++	test('closing the side-by-side diff leaves the review alone: red rows, Keep/Undo and the baseline stay', async () => {
++		// The diff resolves the baseline through ITextModelService and lets go of it when it closes. That was the last
++		// reference, so the resolver disposed the entry's baseline model: no highlights, and the diff couldn't reopen.
++		const entry = (await service.setBaseline(uri, BASELINE))!;
++		await waitForState(entry.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
++		const integration = entry.getEditorIntegration(textEditorPane(editor));
++		const textModelService = insta.get(ITextModelService);
++		for (let i = 0; i < 2; i++) { // open and close it, twice
++			const diffSide = await textModelService.createModelReference(entry.originalURI);
++			assert.strictEqual(diffSide.object.textEditorModel, entry.originalModel, 'the diff shows the entry\'s baseline');
++			diffSide.dispose();
++			await timeout(0); // the resolver disposes unreferenced models asynchronously
++		}
++		assert.strictEqual(entry.originalModel.isDisposed(), false);
++		assert.strictEqual(service.getEntry(uri), entry);
++		assert.strictEqual(entry.originalModel.getValue(), BASELINE, 'baseline unchanged');
++		assert.strictEqual(model.getValue(), DISK, 'buffer unchanged');
++		assert.strictEqual(entry.changesCount.get(), 1);
++		assert.strictEqual(deletedRows().length, 1, 'red rows still shown');
++		assert.strictEqual(hunkWidgets().length, 1, 'Keep/Undo still shown');
++		assert.strictEqual(hunkEvents.length, 0, 'nothing kept or undone');
++		assert.strictEqual(saves.length, 0, 'nothing saved');
++
++		// Keep and new baselines from the engine still work.
++		await service.setBaseline(uri, BASELINE + 'Appendix.\n');
++		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 ? d : undefined));
++		await integration.acceptNearestChange(hunkWidgets()[0]);
++		assert.deepStrictEqual(hunkEvents.map(e => e.kind), ['accepted']);
++	});
++
++	test('if the baseline model is disposed anyway, the review is rebuilt from the same baseline', async () => {
++		const entry = (await service.setBaseline(uri, BASELINE))!;
++		await waitForState(entry.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
++		entry.getEditorIntegration(textEditorPane(editor));
++		modelService.destroyModel(entry.originalURI);
++		const again = await waitForState(service.entries.map(entries => entries.length === 1 && entries[0] !== entry ? entries[0] : undefined));
++		await waitForState(again.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
++		assert.strictEqual(again.originalModel.getValue(), BASELINE);
++		assert.strictEqual(hunkWidgets().length, 0, 'the old entry\'s widgets are gone');
++		again.getEditorIntegration(textEditorPane(editor)); // the overlay asks the new entry when the entries change
++		assert.strictEqual(deletedRows().length, 1);
++		assert.strictEqual(hunkWidgets().length, 1);
++		assert.strictEqual(hunkEvents.length, 0);
++	});
++
++	test('another editor on the file (split, other group or window) reviews it too; closing it leaves the first alone', async () => {
++		const entry = (await service.setBaseline(uri, BASELINE))!;
++		await waitForState(entry.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
++		const first = entry.getEditorIntegration(textEditorPane(editor));
++		const second = createEditor(insta);
++		const secondPane = textEditorPane(second);
++		const split = entry.getEditorIntegration(secondPane);
++		assert.notStrictEqual(split, first);
++		assert.strictEqual(entry.getEditorIntegration(secondPane), split, 'one integration per pane');
++		assert.strictEqual(deletedRows().length, 2);
++		assert.strictEqual(hunkWidgets().length, 2);
++
++		second.dispose(); // its group or window closed: its integration goes with it
++		assert.strictEqual(hunkWidgets().length, 1);
++		assert.strictEqual(deletedRows().length, 1);
++		assert.strictEqual(first.currentIndex.get(), 0, 'the first editor still reviews the file');
++	});
++
++	test('switching the editor to another file and back shows the review again', async () => {
++		const entry = (await service.setBaseline(uri, BASELINE))!;
++		await waitForState(entry.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
++		entry.getEditorIntegration(textEditorPane(editor));
++		const other = store.add(modelService.createModel('Other file.\n', null, URI.parse('test:/other.tex'), false));
++		editor.setModel(other);
++		assert.strictEqual(deletedRows().length, 0);
++		assert.strictEqual(hunkWidgets().length, 0);
++		editor.setModel(model);
++		assert.strictEqual(deletedRows().length, 1);
++		assert.strictEqual(hunkWidgets().length, 1);
++	});
++
 +	test('review commands use agent-review wording and the Agent Review category; Keep/Undo labels and keybindings are unchanged', () => {
 +		const desc = (action: { desc: Readonly<IAction2Options> }) => {
 +			const kb = action.desc.keybinding;
@@ -1865,6 +2025,7 @@ index 00000000..fa96b7ec
 +				{ title: 'Toggle Diff Editor for Agent Changes', short: undefined, key: KeyMod.Alt | KeyMod.Shift | KeyCode.F7 },
 +				{ title: 'Show Accessible Diff View for Agent Changes', short: undefined, key: KeyCode.F7 },
 +			]);
++		assert.strictEqual(new ToggleDiffAction().desc.f1, true, 'Toggle Diff is in the command palette');
 +	});
 +
 +	test('a reload from disk (agent write) stays pending; a user keystroke outside hunks folds in', async () => {

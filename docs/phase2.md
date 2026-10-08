@@ -57,6 +57,17 @@ All screenshots come from the packaged `VSCode-linux-x64/editor` built by `fork/
 
 **Stress harness** (`packages/engine/test/stress/sim.ts`, in both suites with fixed seeds): agent writes, typing, saves with and without formatters (JSON, LaTeX reflow and indentation), Keep/Undo, editor undo, restarts and git, checking after every step that no agent text reaches the baseline without a Keep, a HEAD move or staging, and that no base text leaves it while on disk.
 
+### fix-diffview (packaged build; `/workspace/cc/fix-diffview-smoke`)
+
+| Screenshot | What it shows |
+|---|---|
+| [`before-diff-closed.png`](img/fix-diffview/before-diff-closed.png) / [`after-diff-closed.png`](img/fix-diffview/after-diff-closed.png) | Toggle Diff from the file bar, then Ctrl+W. **Before:** the file is still pending (file bar "1 of 3", engine) but the editor shows no rows and no Keep/Undo, also after reopening the file, and the diff can't be opened again. **After:** the review is back as it was |
+| [`before-split.png`](img/fix-diffview/before-split.png) / [`after-split.png`](img/fix-diffview/after-split.png) | Split the editor (word wrap off). **Before:** in the narrowed left editor, Keep/Undo sit over the end of the text. **After:** they move to their own row |
+
+**The review that disappeared after closing the diff, root cause.** The side-by-side diff resolves the baseline through `ITextModelService`; when it closed it released the last reference, and the resolver disposed the model it had resolved, which was the entry's baseline (`Model is disposed!`, then `Unable to resolve text model content for resource agent-review-baseline:…` in the log). Upstream's chat entries hold a reference for exactly this; ours didn't. Only the core Toggle Diff routes (file bar, hunk toolbar, Alt+Shift+F7) were affected; the list's Open Diff, Open All Changes and git's Open Changes use their own documents. Fixes: the entry holds a reference to its baseline; if the baseline is disposed anyway the service rebuilds the entry from it; an editor integration goes with its editor (closed split or window); Toggle Diff is in the command palette. Checked in the packaged app: 15 diff routes × ways to close (file bar, hunk toolbar, Alt+Shift+F7, palette, list row, list Open Diff, Open All Changes, git Open Changes; Ctrl+W, middle-click, toggle back; one or two files; file open or not; focus elsewhere) and split, move to another group or window, switching tabs, close/reopen, reload: rows and Keep/Undo stay, the file stays pending, the baseline and disk are untouched.
+
+**Keep/Undo over the text after a split.** The toolbar placement (end of the row, or a row of its own) is chosen from the editor's width, but was only recomputed on wrapping changes, so with word wrap off a split left the toolbars over the narrower editor's text. It's recomputed on width changes now. That exposed an upstream ordering bug: clearing a rendering's decorations fired editor events into its own scroll/layout listener, which disposed the (pooled) hunk widgets, and the next rendering showed them empty.
+
 Also checked by hand in the packaged app:
 
 - The ↑/↓ overlay arrows move between hunks and files with chat disabled.
@@ -141,8 +152,8 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 | Patch | Lines | Upstream files touched |
 |---|---|---|
 | `90-diff-preserve-short-matching-lines.patch` | +468 −2 (2 diff options; new `alignSimilarLines.ts` + 8 tests; 2 more unit tests) | `linesDiffComputer.ts`, `documentDiffProvider.ts`, `defaultLinesDiffComputer.ts`, the diff test file |
-| `91-chat-editing-review-hooks.patch` | +412 −41 | `chatEditingTextModelChangeService.ts` (C3 predicate gets the event; public `extendToSubwords` / `preserveShortMatchingLines`), `chatEditingEditorActions.ts` (C5 precondition; agent-review titles and the "Agent Review" category; 3 classes exported for tests), `chatEditingCodeEditorIntegration.ts` (hunk toolbar at the end of the last row or in its own row, opt-in via `hunkToolbarRows`; track changes, opt-in via `trackChanges`; deleted lines wrap), `chatEditingCodeEditorIntegration.ts` / `chatEditingNotebookEditorIntegration.ts` (diff title; the cursor-in-change context key per editor), `chatEditingServiceImpl.ts` (explorer tooltip), `chatEditingEditorOverlay.ts` (agent review: the file bar at the bottom center with the file's name; none in the merge editor) |
-| `92-agent-review.patch` | +2107 (incl. blank lines): new `contrib/agentReview/` (entry, service, contribution, save-attribution participants, 3-way merge, CSS, 34 tests in 3 files) + 1 import line in `workbench.common.main.ts` | `workbench.common.main.ts` (1 line) |
+| `91-chat-editing-review-hooks.patch` | +428 −41 | `chatEditingTextModelChangeService.ts` (C3 predicate gets the event; public `extendToSubwords` / `preserveShortMatchingLines`), `chatEditingEditorActions.ts` (C5 precondition; agent-review titles and the "Agent Review" category; Toggle Diff in the palette; 3 classes exported for tests), `chatEditingCodeEditorIntegration.ts` (hunk toolbar at the end of the last row or in its own row, placed again when the width changes, opt-in via `hunkToolbarRows`; a replaced rendering's scroll/layout listener no longer disposes the new rendering's widgets; track changes, opt-in via `trackChanges`; deleted lines wrap), `chatEditingCodeEditorIntegration.ts` / `chatEditingNotebookEditorIntegration.ts` (diff title; the cursor-in-change context key per editor), `chatEditingServiceImpl.ts` (explorer tooltip), `chatEditingEditorOverlay.ts` (agent review: the file bar at the bottom center with the file's name; none in the merge editor) |
+| `92-agent-review.patch` | +2268 (incl. blank lines): new `contrib/agentReview/` (entry, service, contribution, save-attribution participants, 3-way merge, CSS, 40 tests in 3 files) + 1 import line in `workbench.common.main.ts` | `workbench.common.main.ts` (1 line) |
 | `93-default-layout.patch` | +2 −2 | Secondary side bar hidden by default (`workbench.contribution.ts`, `themeMainServiceImpl.ts`) |
 
 ## Engine additions
@@ -176,8 +187,8 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 | Suite | Count | Command |
 |---|---|---|
 | Engine (vitest; incl. the stress harness: 40 + 10 seeds) | 176 (17 files) | `npm test -w @editor/engine` (`STRESS_SEED=<n>` replays a seed) |
-| Extension integration (vitest, real engine on temp dirs, fake core / fake terminal; incl. the stress harness through the controller: 25 + 7 seeds) | 42 | `npm test -w agent-review` |
-| Core `contrib/agentReview` (Electron) | 35 | `fork/scripts/test-core.sh` |
+| Extension integration (vitest, real engine on temp dirs, fake core / fake terminal; incl. the stress harness through the controller: 25 + 7 seeds) | 43 | `npm test -w agent-review` |
+| Core `contrib/agentReview` (Electron) | 40 | `fork/scripts/test-core.sh` |
 | Upstream chat-editing regression (Electron) | 49 | `fork/scripts/test-core.sh` |
 | Upstream diff + fixtures (node, incl. 2 new) + similar-line alignment (8) | 133 | `fork/scripts/test-core.sh` |
 | Core typecheck of the patched tree (tsgo) | 0 errors | `npm run typecheck-client` (CI `patches` job) |
