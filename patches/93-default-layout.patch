@@ -24,3 +24,25 @@ index 601d104b..1d1a1c95 100644
  				'description': localize('secondarySideBarDefaultVisibility', "Controls the default visibility of the secondary side bar in workspaces or empty windows that are opened for the first time. Can be overridden by the agent sessions startup editor setting."),
  				'enumDescriptions': [
  					localize('workbench.secondarySideBar.defaultVisibility.hidden', "The secondary side bar is hidden by default."),
+diff --git a/src/vs/workbench/browser/layout.ts b/src/vs/workbench/browser/layout.ts
+index 575291cb..e15f7728 100644
+--- a/src/vs/workbench/browser/layout.ts
++++ b/src/vs/workbench/browser/layout.ts
+@@ -3018,7 +3018,7 @@ class LayoutStateModel extends Disposable {
+ 		const mainContainerDimension = configuration.mainContainerDimension;
+ 		LayoutStateKeys.SIDEBAR_SIZE.defaultValue = Math.min(300, mainContainerDimension.width / 4);
+ 		LayoutStateKeys.SIDEBAR_HIDDEN.defaultValue = workbenchState === WorkbenchState.EMPTY || auxiliaryBarForceMaximized === true;
+-		LayoutStateKeys.AUXILIARYBAR_SIZE.defaultValue = auxiliaryBarForceMaximized ? Math.max(300, mainContainerDimension.width / 2) : Math.min(300, mainContainerDimension.width / 4);
++		LayoutStateKeys.AUXILIARYBAR_SIZE.defaultValue = auxiliaryBarForceMaximized ? Math.max(300, mainContainerDimension.width / 2) : Math.min(420, mainContainerDimension.width / 3); // agent review: room for the agent chat and its pickers
+ 		LayoutStateKeys.AUXILIARYBAR_HIDDEN.defaultValue = (() => {
+ 			if (isWeb && !this.environmentService.remoteAuthority) {
+ 				return true; // not required in web if unsupported
+@@ -3116,7 +3116,7 @@ class LayoutStateModel extends Disposable {
+ 		// Restrict auxiliary bar size in case of small window dimensions
+ 		if (this.isNew[StorageScope.WORKSPACE] && configuration.mainContainerDimension.width <= DEFAULT_WORKSPACE_WINDOW_DIMENSIONS.width) {
+ 			this.setInitializationValue(LayoutStateKeys.SIDEBAR_SIZE, Math.min(300, configuration.mainContainerDimension.width / 4));
+-			this.setInitializationValue(LayoutStateKeys.AUXILIARYBAR_SIZE, Math.min(300, configuration.mainContainerDimension.width / 4));
++			this.setInitializationValue(LayoutStateKeys.AUXILIARYBAR_SIZE, Math.min(420, configuration.mainContainerDimension.width / 3)); // agent review: as the default above
+ 		}
+ 	}
+ 
