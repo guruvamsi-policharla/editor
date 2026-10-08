@@ -52,6 +52,6 @@ describe('pickers from config controls', () => {
 		const g = signInGroup(CODEX);
 		expect(g.id).toBe(SIGN_IN_GROUP);
 		expect(g.selected!.name).toBe('Not signed in to Codex');
-		expect(g.commands!.map(c => [c.command, c.arguments])).toEqual([['agentChat.login', ['codex']], ['agentChat.restart', ['codex']]]);
+		expect(g.commands!.map(c => c.command)).toEqual(['agentChat.login.codex', 'agentChat.restart.codex']);
 	});
 });

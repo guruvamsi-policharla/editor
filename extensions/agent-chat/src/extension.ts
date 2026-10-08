@@ -29,7 +29,11 @@ export function activate(context: vscode.ExtensionContext): void {
 	for (const profile of BUILTIN_PROFILES) {
 		const chat = new HarnessChat(profile, env);
 		chats.set(profile.id, chat);
-		context.subscriptions.push(chat.register());
+		context.subscriptions.push(
+			chat.register(),
+			vscode.commands.registerCommand(`agentChat.login.${profile.id}`, () => chat.login()),
+			vscode.commands.registerCommand(`agentChat.restart.${profile.id}`, () => chat.restart()),
+		);
 	}
 
 	// The default participant: required for core to show chat (chatPanelParticipantRegistered) and enable it (chatIsEnabled).

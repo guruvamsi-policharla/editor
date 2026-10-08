@@ -49,9 +49,10 @@ export function signInGroup(profile: HarnessProfile, icon?: IconFactory): vscode
 		items: [item],
 		selected: item,
 		...(icon ? { icon: icon('account') } : {}),
+		// Per-harness command ids: core passes option-group commands a context object, not our arguments.
 		commands: [
-			{ command: 'agentChat.login', title: `Sign in to ${profile.label}…`, arguments: [profile.id] },
-			{ command: 'agentChat.restart', title: 'I\'ve signed in: try again', arguments: [profile.id] },
+			{ command: `agentChat.login.${profile.id}`, title: `Sign in to ${profile.label}…` },
+			{ command: `agentChat.restart.${profile.id}`, title: 'I\'ve signed in: try again' },
 		],
 	};
 }

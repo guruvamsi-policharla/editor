@@ -159,6 +159,26 @@
         "command": "agentChat.showLog",
         "title": "Show Log",
         "category": "Agent Chat"
+      },
+      {
+        "command": "agentChat.login.claude",
+        "title": "Sign In to Claude Code",
+        "category": "Agent Chat"
+      },
+      {
+        "command": "agentChat.restart.claude",
+        "title": "Restart Claude Code",
+        "category": "Agent Chat"
+      },
+      {
+        "command": "agentChat.login.codex",
+        "title": "Sign In to Codex",
+        "category": "Agent Chat"
+      },
+      {
+        "command": "agentChat.restart.codex",
+        "title": "Restart Codex",
+        "category": "Agent Chat"
       }
     ],
     "configuration": {
