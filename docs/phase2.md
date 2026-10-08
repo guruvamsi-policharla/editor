@@ -31,6 +31,16 @@ All screenshots come from the packaged `VSCode-linux-x64/editor` built by `fork/
 | [`after-narrow-agent-terminal.png`](img/polish-1/after-narrow-agent-terminal.png) | Narrow editor next to the Agent Terminal after **Ctrl+L** (`@sections/prelims.tex:L20`) |
 | [`after-ctrlz-undo.png`](img/polish-1/after-ctrlz-undo.png) | **Ctrl+Z** after Undo on the equation: the agent's text is back, pending, and on disk (clean tab) |
 
+### polish-2 (packaged build, same generated paper; `/workspace/cc/polish-2-smoke`)
+
+| Screenshot | What it shows |
+|---|---|
+| [`before-adjacent.png`](img/polish-2/before-adjacent.png) | **Before** (polish-1 build): one word added to a paragraph whose neighbour was deleted, and two words added to a paragraph before a new one. Both show as whole paragraphs in red and again in green |
+| [`after-adjacent.png`](img/polish-2/after-adjacent.png) | **After**, same edits: the two edits are track changes ("first", ", in particular,"), the deleted paragraph has its own red rows and Keep/Undo, the new paragraph is its own green change. The edited lines are tinted lighter than the inserted words. The file bar is at the bottom center and starts with the file's name |
+| [`after-adjacent-dark.png`](img/polish-2/after-adjacent-dark.png), [`after-overlay.png`](img/polish-2/after-overlay.png) | The same in the dark theme; the file bar close up ("intro.tex \| Keep Undo \| 1 of 4 ↑ ↓") |
+| [`before-merge.png`](img/polish-2/before-merge.png) / [`after-merge.png`](img/polish-2/after-merge.png) | The 3-way merge editor (agent write under unsaved edits): before, the Result pane also had red rows, Keep/Undo and the file bar; after, only the merge |
+| [`after-figure-cite.png`](img/polish-2/after-figure-cite.png) | A figure caption reworded with a `\cite{...,...}` added: track changes in the caption line |
+
 Also checked by hand in the packaged app:
 
 - The ↑/↓ overlay arrows move between hunks and files with chat disabled.
@@ -98,6 +108,7 @@ If the save after an Undo fails or is cancelled (disk full, permissions, a newer
 | **C4** word-level highlights | Done. `extendToSubwords` is passed to the diff, so inner changes are word/subword ranges. A hunk that changes only a few words within its lines (at most 30% of their text, every change within one line) is shown as track changes: the deleted words struck through in red right before the new ones, in the line itself, instead of the whole lines again in red above. Larger rewrites keep the red rows. Opt-in per entry (`trackChanges`) |
 | **C5** nav without chat, `agentReview.isActive` | Done. The ↑/↓ navigate actions are enabled when `chatIsEnabled` **or** `agentReview.isActive` is set; the latter tracks the active editor having pending changes. Keep/Undo labels and keybindings are unchanged; the chat wording around them is agent-review wording: "Go to Next/Previous Agent Change", "Keep/Undo Agent Changes (in this File)", "Keep All Agent Changes", "Toggle Diff Editor / Show Accessible Diff View for Agent Changes", the diff title "file (agent changes)" and the explorer tooltip "Pending agent changes". All of them are in the **Agent Review** palette category (upstream: "Chat"), next to the extension's commands |
 | **C6** always-visible hunk buttons | Done. Each hunk's Keep/Undo toolbar is always visible and never covers text. It sits at the right end of the hunk's last row when that row leaves room for it (the short last row of a wrapped paragraph, an equation, the last red row of a deletion), and otherwise gets its own row (a view zone) directly below the hunk, aligned with the start of the text. Upstream floats it over the hunk's first line, at the right edge, on hover only, which covered text in narrow editors. The room is estimated from the editor's own line breaks and the font's character width (exact for monospace fonts). Plain buttons (Keep primary, Undo secondary), opacity 0.85, and 1 on hover or with the cursor in the hunk. Opt-in per entry (`hunkToolbarRows`), so chat sessions keep the upstream placement |
+| Edits next to inserted/deleted paragraphs | Done (polish-2). New diff option `alignSimilarLines`: each run of changes is aligned again with the blank lines around it, pairing similar lines (≥50% shared word pairs), so an edited paragraph always pairs with its old version; inserted or deleted whole lines become a change of their own when they can be moved over an equal (blank) line. Where they can't (one sentence per line), track changes also covers inserted lines (green) and deleted lines (red rows inside the hunk) |
 | Hunk merging | Done. New diff option `preserveShortMatchingLines` skips the heuristic that joins hunks separated by short unchanged lines (≤4 non-whitespace chars, e.g. a lone `}`), so each hunk can be kept or undone on its own. The default diff behavior is unchanged (all upstream diff fixtures pass) |
 | **C8** created / deleted files | Done. Created files inline; deleted (and renamed/binary) in the list with a diff and Keep/Undo |
 | **C7** multi-file review | Done, extension-side. The **Agent Changes** view (explorer) lists every file with kind and +/− and has Keep/Undo per file plus Keep All / Undo All. **Open All Changes** opens a multi-file diff (`vscode.changes`). An activity badge shows the file count |
@@ -113,9 +124,9 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 
 | Patch | Lines | Upstream files touched |
 |---|---|---|
-| `90-diff-preserve-short-matching-lines.patch` | +32 −1 (diff option + 2 unit tests) | `linesDiffComputer.ts`, `documentDiffProvider.ts`, `defaultLinesDiffComputer.ts`, the diff test file |
-| `91-chat-editing-review-hooks.patch` | +310 −36 | `chatEditingTextModelChangeService.ts` (C3 predicate gets the event; public `extendToSubwords` / `preserveShortMatchingLines`), `chatEditingEditorActions.ts` (C5 precondition; agent-review titles and the "Agent Review" category; 3 classes exported for tests), `chatEditingCodeEditorIntegration.ts` (hunk toolbar at the end of the last row or in its own row, opt-in via `hunkToolbarRows`; track changes, opt-in via `trackChanges`; deleted lines wrap), `chatEditingCodeEditorIntegration.ts` / `chatEditingNotebookEditorIntegration.ts` (diff title; the cursor-in-change context key per editor), `chatEditingServiceImpl.ts` (explorer tooltip) |
-| `92-agent-review.patch` | +1812 (incl. blank lines): new `contrib/agentReview/` (entry, service, contribution, save-attribution participants, 3-way merge, CSS, 28 tests in 3 files) + 1 import line in `workbench.common.main.ts` | `workbench.common.main.ts` (1 line) |
+| `90-diff-preserve-short-matching-lines.patch` | +468 −2 (2 diff options; new `alignSimilarLines.ts` + 8 tests; 2 more unit tests) | `linesDiffComputer.ts`, `documentDiffProvider.ts`, `defaultLinesDiffComputer.ts`, the diff test file |
+| `91-chat-editing-review-hooks.patch` | +412 −41 | `chatEditingTextModelChangeService.ts` (C3 predicate gets the event; public `extendToSubwords` / `preserveShortMatchingLines`), `chatEditingEditorActions.ts` (C5 precondition; agent-review titles and the "Agent Review" category; 3 classes exported for tests), `chatEditingCodeEditorIntegration.ts` (hunk toolbar at the end of the last row or in its own row, opt-in via `hunkToolbarRows`; track changes, opt-in via `trackChanges`; deleted lines wrap), `chatEditingCodeEditorIntegration.ts` / `chatEditingNotebookEditorIntegration.ts` (diff title; the cursor-in-change context key per editor), `chatEditingServiceImpl.ts` (explorer tooltip), `chatEditingEditorOverlay.ts` (agent review: the file bar at the bottom center with the file's name; none in the merge editor) |
+| `92-agent-review.patch` | +2091 (incl. blank lines): new `contrib/agentReview/` (entry, service, contribution, save-attribution participants, 3-way merge, CSS, 34 tests in 3 files) + 1 import line in `workbench.common.main.ts` | `workbench.common.main.ts` (1 line) |
 | `93-default-layout.patch` | +2 −2 | Secondary side bar hidden by default (`workbench.contribution.ts`, `themeMainServiceImpl.ts`) |
 
 ## Engine additions
@@ -150,9 +161,9 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 |---|---|---|
 | Engine (vitest) | 162 (14 files) | `npm test -w @editor/engine` |
 | Extension integration (vitest, real engine on temp dirs, fake core / fake terminal) | 36 | `npm test -w agent-review` |
-| Core `contrib/agentReview` (Electron) | 28 | `fork/scripts/test-core.sh` |
+| Core `contrib/agentReview` (Electron) | 34 | `fork/scripts/test-core.sh` |
 | Upstream chat-editing regression (Electron) | 49 | `fork/scripts/test-core.sh` |
-| Upstream diff + fixtures (node, incl. 2 new) | 125 | `fork/scripts/test-core.sh` |
+| Upstream diff + fixtures (node, incl. 2 new) + similar-line alignment (8) | 133 | `fork/scripts/test-core.sh` |
 | Core typecheck of the patched tree (tsgo) | 0 errors | `npm run typecheck-client` (CI `patches` job) |
 | Packaged build + smoke (`editor --version`) | ok | `fork/scripts/build.sh` |
 | Lint: repo TypeScript (VS Code's generic rules) / core files (VS Code's own config) | 0 problems / 0 warnings | `npm run lint` / `fork/scripts/lint-core.sh` |
