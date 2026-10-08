@@ -112,7 +112,7 @@ For agents that speak [ACP](https://agentclientprotocol.com) (Claude Code via [c
   - prompts show the exact command or paths and whether "always" writes a persistent rule;
   - dangerous modes (Claude Bypass, Codex Full access) need confirmation and show a badge; Claude Bypass is hidden by default;
   - adapter versions are pinned, and agents don't start in Restricted Mode.
-- `.claude/settings.local.json` joins the built-in ignores, so "always allow" clicks don't show up as agent edits. A `tact acp` subcommand remains a separate upstream contribution.
+- `.claude/settings.local.json` joins the built-in ignores, so "always allow" clicks don't show up as agent edits. tact has no ACP: our adapter (`packages/tact-acp`) bridges to the web API of a tact UI run in a hidden pty; a `tact acp` subcommand remains a separate upstream contribution.
 
 ## 6. Phases
 
@@ -151,11 +151,12 @@ For agents that speak [ACP](https://agentclientprotocol.com) (Claude Code via [c
 
 - **A0. Spike (2–3 days).** Run both adapters headless without fs/terminal: record their capabilities and config options, and confirm an edit lands on disk through the harness's own tools and shows as pending. In the packaged build, show a chat-session provider with 5 option groups and a confirmation prompt while Copilot stays disabled. **Exit criteria:** native chat or webview decided, list of required core patches, fixtures checked in.
 - **Status (Oct 8, 2026):** A0 done (native chat, no core patch). A and B done as an MVP on branch `acp-mvp`: Claude Code works end to end in the packaged app (edit → inline Keep/Undo, permission prompts, pickers, Stop, Cmd+L, crash restart); Codex runs through the same profile up to its sign-in (no Codex login on the build machine, so its turns are untested). Left for B: the Codex exit criteria after a login, a fake-agent extension-host test. C–E unchanged.
+- **Status (Oct 8, 2026, branch `chat-polish`):** D mostly done: chat history (saved transcripts plus the agent's `session/list`, core's sessions list, Search Chats over titles and content), reopening after a restart and continuing (`session/resume`, else `session/load`), several chats at once, and one agent at a time (a second chat's turn waits, with Run now). Cmd/Ctrl+L inserts inline references at the cursor. E: tact runs through our own adapter (`packages/tact-acp`: tact's UI in a hidden pty, bridged to its web API, since tact has no ACP; see docs/acp-design.md §11). Stop no longer leaves a command card spinning. Left: C, an adapter update command, Codex and tact turns with real logins.
 - **A. `packages/acp-client`.** Process manager (process-group kill, restart with backoff), connection, v1 reducer for every `session/update` kind, config options, permission broker, profiles, pinned adapter installer. **Exit criteria:** reducer property tests and fake-agent tests pass in CI; an opt-in contract test against the real Claude and Codex adapters passes, including "the agent never calls `fs/*` or `terminal/*`".
 - **B. Chat panel MVP.** Sessions per harness, streaming text and thinking, tool cards, plan, slash commands, Stop, permission prompts, config-option pickers, Cmd+L to chat. **Exit criteria:** Claude Code and Codex run from the panel on a LaTeX paper; mode, model and effort can be changed; prompts can be answered; edits review inline; no Copilot UI appears; packaged-app smoke test passes.
 - **C. Permissions UX.** Rules editor (Claude settings, Codex exec-policy rules) with restart-and-resume, dangerous-mode confirmation, persistent-option labels, audit log. **Exit criteria:** every button in the capability table is reachable from the panel.
 - **D. Sessions and robustness.** History, reopening with replay, multiple sessions, crash recovery, login flows, an adapter update command. **Exit criteria:** a chat survives a restart and an adapter crash with its transcript.
-- **E. More harnesses.** Gemini CLI by profile only; `tact acp` when available; ACP v2 behind a flag once it's stable. **Exit criteria:** a third harness passes the same contract and UI tests without UI code.
+- **E. More harnesses.** Gemini CLI by profile only; tact through our adapter now, `tact acp` (or a headless `tact serve`) upstream later; ACP v2 behind a flag once it's stable. **Exit criteria:** a third harness passes the same contract and UI tests without UI code.
 
 ### Phase 5: Polish and extend
 
