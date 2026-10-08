@@ -179,6 +179,15 @@ export class AgentConnection {
 		return this.connection.agent.request(acp.methods.agent.session.resume, params);
 	}
 
+	/** `session/load`: the agent replays the conversation as `session/update`s before it answers. */
+	loadSession(params: acp.LoadSessionRequest): Promise<acp.LoadSessionResponse> {
+		return this.connection.agent.request(acp.methods.agent.session.load, params);
+	}
+
+	listSessions(params: acp.ListSessionsRequest): Promise<acp.ListSessionsResponse> {
+		return this.connection.agent.request(acp.methods.agent.session.list, params);
+	}
+
 	closeSession(sessionId: string): Promise<acp.CloseSessionResponse> {
 		return this.connection.agent.request(acp.methods.agent.session.close, { sessionId });
 	}

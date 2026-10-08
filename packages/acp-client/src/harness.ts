@@ -32,10 +32,16 @@ export function errorMessage(e: unknown): string {
 	return String(e);
 }
 
-export type Recovery = 'live' | 'resumed' | 'new';
+/**
+ * How `ensureLive` got the session onto the running adapter: it was there (`live`), it was reconnected without
+ * replay (`resumed`), it was reloaded with a replay (`loaded`), or it had to start over (`new`).
+ */
+export type Recovery = 'live' | 'resumed' | 'loaded' | 'new';
 
 export class AcpSession {
 	readonly view = new SessionView();
+	/** True while `session/load` replays the conversation (listeners that render live turns ignore those). */
+	replaying = false;
 	private readonly listeners = new Set<(c: Change) => void>();
 
 	constructor(private readonly harness: HarnessClient, public id: string, public generation: number, configOptions: readonly acp.SessionConfigOption[] | null | undefined) {
@@ -54,7 +60,10 @@ export class AcpSession {
 		}
 	}
 
-	/** Make sure the session lives on the running adapter. After a crash: resume it, or start a new one. */
+	/**
+	 * Make sure the session lives on the running adapter. After a crash, or for a chat reopened from history:
+	 * resume it (no replay), else load it (replayed into the view), else start a new one.
+	 */
 	async ensureLive(): Promise<{ ready: Ready; recovery: Recovery }> {
 		const ready = await this.harness.supervisor.get();
 		if (ready.generation === this.generation) {
@@ -67,6 +76,14 @@ export class AcpSession {
 				this.generation = ready.generation;
 				this.emit(this.view.setConfigOptions(res.configOptions ?? this.view.state.configOptions));
 				return { ready, recovery: 'resumed' };
+			} catch {
+				// fall through
+			}
+		}
+		if (ready.init.agentCapabilities?.loadSession) {
+			try {
+				await this.harness.loadInto(this, ready);
+				return { ready, recovery: 'loaded' };
 			} catch {
 				// fall through to a new session
 			}
@@ -154,6 +171,65 @@ export class HarnessClient {
 			}
 		}
 		return { ...res, configOptions: options };
+	}
+
+	/**
+	 * A session from an earlier run (a chat reopened from history), not yet on any adapter. Nothing starts here:
+	 * the first `ensureLive` (a prompt) resumes or loads it.
+	 */
+	restore(sessionId: string, configOptions?: readonly acp.SessionConfigOption[] | null): AcpSession {
+		const existing = this.sessions.get(sessionId);
+		if (existing) {
+			return existing;
+		}
+		const session = new AcpSession(this, sessionId, 0, configOptions);
+		this.sessions.set(sessionId, session);
+		return session;
+	}
+
+	/** `session/load`: the session with its conversation replayed into the view. Needs `loadSession`. */
+	async load(sessionId: string): Promise<AcpSession> {
+		const ready = await this.supervisor.get();
+		if (!ready.init.agentCapabilities?.loadSession) {
+			throw new Error(`${this.profile.label} can't reopen earlier sessions (no loadSession capability)`);
+		}
+		const session = this.restore(sessionId);
+		if (session.generation !== ready.generation) {
+			await this.loadInto(session, ready);
+		}
+		return session;
+	}
+
+	/** @internal */
+	async loadInto(session: AcpSession, ready: Ready): Promise<void> {
+		this.sessions.set(session.id, session);
+		session.replaying = true;
+		try {
+			const res = await ready.connection.loadSession({ sessionId: session.id, cwd: this.cwd, mcpServers: [], ...this.meta() });
+			session.generation = ready.generation;
+			session.emit(session.view.setConfigOptions(res.configOptions ?? session.view.state.configOptions));
+		} finally {
+			session.replaying = false;
+		}
+	}
+
+	/** The agent's sessions for this workspace (`session/list`, all pages), newest first; empty if unsupported. */
+	async list(maxPages = 10): Promise<acp.SessionInfo[]> {
+		const ready = await this.supervisor.get();
+		if (!ready.init.agentCapabilities?.sessionCapabilities?.list) {
+			return [];
+		}
+		const out: acp.SessionInfo[] = [];
+		let cursor: string | null | undefined;
+		for (let page = 0; page < maxPages; page++) {
+			const res = await ready.connection.listSessions({ cwd: this.cwd, ...(cursor ? { cursor } : {}) });
+			out.push(...res.sessions);
+			cursor = res.nextCursor;
+			if (!cursor) {
+				break;
+			}
+		}
+		return out.sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
 	}
 
 	async newSession(): Promise<AcpSession> {

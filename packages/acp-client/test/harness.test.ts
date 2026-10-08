@@ -1,5 +1,8 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
 	AgentSupervisor, CLAUDE, HarnessClient, isAuthRequired, PermissionBroker, textOf,
 	type AgentStatus, type Change, type HarnessProfile, type PermissionPrompt,
@@ -146,8 +149,8 @@ describe('HarnessClient on a fake agent', () => {
 		expect(statuses).toEqual(expect.arrayContaining(['starting', 'ready', 'exited']));
 	});
 
-	it('without resume support, recovery starts a new session (re-keyed)', async () => {
-		const { client } = harness({ FAKE_NO_RESUME: '1' });
+	it('without resume or load support, recovery starts a new session (re-keyed)', async () => {
+		const { client } = harness({ FAKE_NO_RESUME: '1', FAKE_NO_LOAD: '1' });
 		const session = await client.newSession();
 		const old = session.id;
 		await expect(session.prompt('crash')).rejects.toThrow();
@@ -156,6 +159,74 @@ describe('HarnessClient on a fake agent', () => {
 		expect(session.id).not.toBe(old);
 		expect(client.get(session.id)).toBe(session);
 		expect(client.get(old)).toBeUndefined();
+	});
+
+	describe('history (session/list, session/load, restore) across adapter restarts', () => {
+		let store: string;
+		beforeEach(() => { store = mkdtempSync(join(tmpdir(), 'fake-store-')); });
+		afterEach(() => rmSync(store, { recursive: true, force: true }));
+
+		async function earlier(): Promise<string> {
+			const first = harness({ FAKE_STORE: store });
+			const s = await first.client.newSession();
+			await s.prompt('hello there');
+			await first.client.dispose();
+			return s.id;
+		}
+
+		it('session/list returns this workspace\'s sessions; session/load replays the conversation', async () => {
+			const id = await earlier();
+			const { client } = harness({ FAKE_STORE: store });
+			const listed = await client.list();
+			expect(listed.map(s => s.sessionId)).toEqual([id]);
+			expect(listed[0]!.title).toBe('hello there');
+			const session = await client.load(id);
+			expect(textOf(session.view.state, 'user')).toBe('hello there');
+			expect(textOf(session.view.state, 'agent')).toBe('echo: hello there');
+			expect(session.view.state.configOptions.length).toBeGreaterThan(0);
+		});
+
+		it('a restored session starts nothing; its first prompt resumes it and continues', async () => {
+			const id = await earlier();
+			const { client, launches } = harness({ FAKE_STORE: store });
+			const session = client.restore(id);
+			expect(launches()).toBe(0);
+			const changes: Change[] = [];
+			session.onChange(c => changes.push(c));
+			await session.prompt('again');
+			expect(launches()).toBe(1);
+			expect(session.id).toBe(id);
+			expect(lastText(changes)).toBe('echo: again');
+		});
+
+		it('without resume, a restored session is loaded on its first prompt', async () => {
+			const id = await earlier();
+			const { client } = harness({ FAKE_STORE: store, FAKE_NO_RESUME: '1' });
+			const session = client.restore(id);
+			expect((await session.ensureLive()).recovery).toBe('loaded');
+			expect(textOf(session.view.state, 'agent')).toBe('echo: hello there');
+		});
+
+		it('without resume but with load support, recovery reloads the session (replayed, flagged as replaying)', async () => {
+			const { client } = harness({ FAKE_STORE: store, FAKE_NO_RESUME: '1' });
+			const session = await client.newSession();
+			const id = session.id;
+			await expect(session.prompt('crash')).rejects.toThrow();
+			const replayed: boolean[] = [];
+			session.onChange(c => { if (c.kind === 'text') { replayed.push(session.replaying); } });
+			const { recovery } = await session.ensureLive();
+			expect(recovery).toBe('loaded');
+			expect(session.id).toBe(id);
+			expect(replayed.length).toBeGreaterThan(0);
+			expect(replayed.every(Boolean)).toBe(true);
+			expect(session.replaying).toBe(false);
+		});
+
+		it('an agent without list support lists nothing; load says why', async () => {
+			const { client } = harness({ FAKE_NO_LOAD: '1' });
+			expect(await client.list()).toEqual([]);
+			await expect(client.load('x')).rejects.toThrow(/loadSession/);
+		});
 	});
 
 	it('gives up after repeated crashes until restart()', async () => {
