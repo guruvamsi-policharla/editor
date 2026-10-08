@@ -19,7 +19,7 @@ import { join } from 'node:path';
 import * as vscode from 'vscode';
 import {
 	AdapterInstaller, AgentSupervisor, claudePersistence, codexPersistence, configControls, errorMessage, HarnessClient,
-	isAuthRequired, isDangerous, PermissionBroker,
+	isAuthRequired, isDangerous, PermissionBroker, withOverride,
 	type AcpSession, type acp, type AgentStatus, type ConfigControl, type HarnessProfile, type PermissionPrompt, type ProfileOverride,
 } from '@editor/acp-client';
 import { changedSelections, groupsFromControls, signInGroup, SIGN_IN_GROUP } from './groups.js';
@@ -130,13 +130,14 @@ export class HarnessChat implements vscode.Disposable {
 	private harness(): HarnessClient {
 		if (!this.client) {
 			const supervisor = new AgentSupervisor({
-				launch: progress => resolveLaunch(this.profile, this.override(), this.env.installer, this.cwd(), progress, join(this.env.context.extensionPath, 'dist', 'adapters')),
+				// The user's overrides (env, defaults) are read at every start, so a restart applies changed settings.
+				launch: progress => resolveLaunch(withOverride(this.profile, this.override()), this.override(), this.env.installer, this.cwd(), progress, join(this.env.context.extensionPath, 'dist', 'adapters')),
 				clientInfo: { name: 'editor', title: vscode.env.appName, version: this.env.version },
 			});
 			const broker = new PermissionBroker(this.profile.id === 'codex' ? codexPersistence : claudePersistence);
 			broker.onAudit(a => this.env.log.info(`[${this.profile.id}] permission ${a.toolCallId}: ${a.outcome}${a.optionId ? ` ${a.optionKind} (${a.optionId})` : ''}${a.reason ? ` [${a.reason}]` : ''} — ${a.command ?? a.title}`));
 			supervisor.onStatus(s => this.onStatus(s));
-			this.client = new HarnessClient(this.profile, supervisor, this.cwd(), broker);
+			this.client = new HarnessClient(withOverride(this.profile, this.override()), supervisor, this.cwd(), broker);
 		}
 		return this.client;
 	}
