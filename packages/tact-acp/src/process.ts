@@ -53,11 +53,16 @@ function quote(arg: string): string {
 	return /^[\w@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
 }
 
-/** `script` with a pty for the command and no transcript file (util-linux on Linux, BSD on macOS). */
-export function ptyCommand(argv: readonly string[], platform = process.platform): { command: string; args: string[] } {
+/**
+ * `script` with a pty for the command and no transcript file (util-linux on Linux, BSD on macOS).
+ * `stdin` is what `script` itself gets: BSD `script` calls tcgetattr on its stdin and only tolerates ENOTTY, so a
+ * Node pipe (a socket) makes it exit with "tcgetattr/ioctl: Operation not supported on socket"; /dev/null is fine.
+ * tact is driven through its web API, so nothing is ever typed into the pty.
+ */
+export function ptyCommand(argv: readonly string[], platform = process.platform): { command: string; args: string[]; stdin: 'ignore' | 'pipe' } {
 	return platform === 'darwin'
-		? { command: 'script', args: ['-q', '/dev/null', ...argv] }
-		: { command: 'script', args: ['-qfec', argv.map(quote).join(' '), '/dev/null'] };
+		? { command: 'script', args: ['-q', '/dev/null', ...argv], stdin: 'ignore' }
+		: { command: 'script', args: ['-qfec', argv.map(quote).join(' '), '/dev/null'], stdin: 'pipe' };
 }
 
 const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][\w]|\x1b[=>78]|[\x00-\x08\x0b-\x1f]/g;
@@ -121,7 +126,7 @@ async function start(o: TactLaunch): Promise<TactInstance> {
 	try {
 		// In the adapter's process group: when the editor ends the adapter's group, `script` goes too, and tact exits
 		// on the pty's hangup.
-		child = spawn(pty.command, pty.args, { cwd: o.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+		child = spawn(pty.command, pty.args, { cwd: o.cwd, env, stdio: [pty.stdin, 'pipe', 'pipe'] });
 	} catch (e) {
 		throw new TactStartError(`couldn't start tact: ${e instanceof Error ? e.message : String(e)}`, 'spawn');
 	}

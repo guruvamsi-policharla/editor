@@ -63,8 +63,8 @@ describe('entries → updates', () => {
 
 describe('process helpers', () => {
 	it('runs tact under script(1) with a pty', () => {
-		expect(ptyCommand(['tact', '--workspace', '/a b'], 'linux')).toEqual({ command: 'script', args: ['-qfec', `tact --workspace '/a b'`, '/dev/null'] });
-		expect(ptyCommand(['tact'], 'darwin')).toEqual({ command: 'script', args: ['-q', '/dev/null', 'tact'] });
+		expect(ptyCommand(['tact', '--workspace', '/a b'], 'linux')).toEqual({ command: 'script', args: ['-qfec', `tact --workspace '/a b'`, '/dev/null'], stdin: 'pipe' });
+		expect(ptyCommand(['tact'], 'darwin')).toEqual({ command: 'script', args: ['-q', '/dev/null', 'tact'], stdin: 'ignore' });
 	});
 
 	it('recognizes tact\'s "not signed in" exit, from its terminal output', () => {

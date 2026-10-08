@@ -9,6 +9,7 @@
     "node": ">=22.12"
   },
   "scripts": {
+    "build": "node -e \"console.log('tact-acp is source-only: bundled into agent-chat by extensions/agent-chat/build.mjs')\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
