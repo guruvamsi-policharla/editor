@@ -28,6 +28,7 @@ import {
   type HeadState,
   type IndexStat,
 } from './git/repo.js';
+import { convertEol, restoreLineEndings, uniformEol } from './eol.js';
 import { IgnoreRules, type IgnoreOptions } from './ignore.js';
 import { stagedRegions } from './staging.js';
 import { gitBlobId, ObjectStore } from './store/objectStore.js';
@@ -40,6 +41,12 @@ export const DEFAULT_LARGE_FILE_THRESHOLD = 1024 * 1024;
 /** Stat-cache entries recorded less than this long after the file's mtime are not trusted (racy-git rule). */
 const RACY_MS = 2000;
 const GIT_RETRY_MS = 200;
+/**
+ * How long a reported save may take to reach the disk. Until then (or until the disk changes to anything else),
+ * the old content on disk is the save not having landed yet, not an external change. A save that never lands
+ * (the write failed) stops counting after this.
+ */
+const SAVE_IN_FLIGHT_MS = 10_000;
 
 export interface ReviewEngineOptions {
   /** Workspace root. Symlinks are resolved; all paths are reported relative to the real root. */
@@ -154,6 +161,15 @@ interface ReadResult {
   data: Uint8Array;
 }
 
+/** A save reported with `reportUserSave` that may not be on disk yet. */
+interface InFlightSave {
+  data: Uint8Array;
+  oid: string;
+  /** The file when the save was reported (null: no file). Same content and stat = the write hasn't landed. */
+  before: Pick<DiskEntry, 'oid' | 'size' | 'mtimeMs' | 'ctimeMs'> | null;
+  until: number;
+}
+
 export class ReviewEngine {
   readonly root: string;
   readonly storageDir: string;
@@ -172,6 +188,7 @@ export class ReviewEngine {
   private disk = new Map<string, DiskEntry>();
   private pending = new Set<string>();
   private expectedWrites = new Map<string, string | null>();
+  private inFlightSaves = new Map<string, InFlightSave>();
 
   private repo: GitRepoInfo | undefined;
   private gitHead: HeadState | undefined;
@@ -336,7 +353,10 @@ export class ReviewEngine {
       this.expectedWrites.set(rel, savedOid);
       if (await this.rules.isIgnored(rel)) return { attribution: 'file' as const };
 
-      const diskBytes = options.base !== undefined ? toBytes(options.base) : (await this.readDisk(rel))?.data;
+      const diskNow = await this.readDisk(rel);
+      const diskBytes = options.base !== undefined ? toBytes(options.base) : diskNow?.data;
+      if (diskNow?.entry.oid !== savedOid) this.inFlightSaves.set(rel, { data: saved, oid: savedOid, before: diskNow?.entry ?? null, until: this.now() + SAVE_IN_FLIGHT_MS });
+      else this.inFlightSaves.delete(rel);
       const baseEntry = this.baseline.get(rel);
       const baseBytes = baseEntry ? await this.store.read(baseEntry.oid) : undefined;
 
@@ -347,15 +367,25 @@ export class ReviewEngine {
         newBaseline = saved;
         attribution = 'file';
       } else {
-        const diskText = diskBytes ? decodeText(diskBytes)! : '';
+        let diskText = diskBytes ? decodeText(diskBytes)! : '';
         const savedText = decodeText(saved)!;
+        let baseText = baseBytes ? decodeText(baseBytes)! : '';
+        // Editors that keep one EOL per buffer (VS Code) write a file with mixed or other line endings back with
+        // that EOL, and report edits in its coordinates. That conversion is the editor's, not a change to any
+        // line: attribute against the converted disk and baseline, so it folds in everywhere and agent lines
+        // aren't mistaken for user rewrites.
+        const savedEol = uniformEol(savedText);
+        if (savedEol && convertEol(diskText, savedEol) !== diskText) {
+          diskText = convertEol(diskText, savedEol);
+          baseText = convertEol(baseText, savedEol);
+        }
         let prov = options.edits ? trackEdits(diskText, options.edits) : undefined;
         attribution = 'edits';
         if (!prov || joinLines(prov.lines.map((l) => l.text)) !== savedText) {
           prov = provenanceFromDiff(diskText, savedText, 'user');
           attribution = options.edits ? 'fallback' : 'diff';
         }
-        const baseLines = baseBytes ? splitLines(decodeText(baseBytes)!) : [];
+        const baseLines = splitLines(baseText);
         const folded = foldUserSave(baseLines, splitLines(diskText), prov);
         // An agent-created file the user saved without folding anything stays a pending creation.
         if (!baseEntry && folded.length === 0 && saved.length > 0) newBaseline = undefined;
@@ -499,8 +529,16 @@ export class ReviewEngine {
    * diff): the host sends the full new baseline text instead of an engine hunk id. `null` drops the file from
    * the baseline (it then shows as created if it exists on disk). If `expectedBaseline` is given and the
    * current baseline differs, throws `StaleChangeError` so the host re-reads and retries.
+   *
+   * `restoreLineEndings`: the content comes from an editor buffer that normalized line endings (VS Code keeps
+   * one EOL per model). Each line gets the ending of the matching line on disk, else in the current baseline,
+   * so a file with mixed CRLF/LF endings doesn't turn into a change on every line.
    */
-  setBaselineContent(file: string, content: string | Uint8Array | null, options: { expectedBaseline?: string | Uint8Array | null } = {}): Promise<void> {
+  setBaselineContent(
+    file: string,
+    content: string | Uint8Array | null,
+    options: { expectedBaseline?: string | Uint8Array | null; restoreLineEndings?: boolean } = {},
+  ): Promise<void> {
     return this.run(async () => {
       const rel = await this.relOrThrow(file);
       if (await this.rules.isIgnored(rel)) throw new Error(`${rel} is ignored; it has no baseline`);
@@ -512,7 +550,19 @@ export class ReviewEngine {
       if (content === null) {
         if (this.baseline.delete(rel)) this.dirty = true;
       } else {
-        await this.setBaseline(rel, toBytes(content));
+        let bytes = toBytes(content);
+        const text = options.restoreLineEndings ? decodeText(bytes) : undefined;
+        if (text !== undefined) {
+          const sources: string[] = [];
+          const disk = await this.readDisk(rel);
+          const diskText = disk ? decodeText(disk.data) : undefined;
+          if (diskText !== undefined) sources.push(diskText);
+          const base = this.baseline.get(rel);
+          const baseText = base ? decodeText(await this.store.read(base.oid)) : undefined;
+          if (baseText !== undefined) sources.push(baseText);
+          bytes = encodeText(restoreLineEndings(text, sources));
+        }
+        await this.setBaseline(rel, bytes);
       }
       this.updatePending(rel);
       this.emit('accept', [rel]);
@@ -748,6 +798,7 @@ export class ReviewEngine {
   private async isFresh(rel: string): Promise<boolean> {
     const known = this.disk.get(rel);
     const now = await this.readDisk(rel);
+    if (this.saveInFlight(rel, now)) return true; // the reported save just hasn't landed yet
     if ((now?.entry.oid ?? null) === (known?.oid ?? null)) {
       if (now) this.disk.set(rel, now.entry);
       return true;
@@ -755,6 +806,22 @@ export class ReviewEngine {
     const changed = await this.refreshPath(rel);
     this.emit('external', changed);
     return false;
+  }
+
+  /**
+   * The save reported for `rel`, if it hasn't reached the disk yet: the file (`now`, as just read) is exactly
+   * as it was when the save was reported, same content and same stat. Forgotten once the disk shows anything
+   * else, when a watcher event for the path is handled, or after SAVE_IN_FLIGHT_MS.
+   */
+  private saveInFlight(rel: string, now: ReadResult | undefined): InFlightSave | undefined {
+    const f = this.inFlightSaves.get(rel);
+    if (!f) return undefined;
+    const b = f.before;
+    const e = now?.entry;
+    const unchanged = b && e ? b.oid === e.oid && b.size === e.size && b.mtimeMs === e.mtimeMs && b.ctimeMs === e.ctimeMs : !b && !e;
+    if (unchanged && this.now() <= f.until) return f;
+    this.inFlightSaves.delete(rel);
+    return undefined;
   }
 
   private async allFresh(paths: readonly string[]): Promise<boolean> {
@@ -781,6 +848,8 @@ export class ReviewEngine {
       this.updatePending(p);
     };
 
+    // Watcher events are what actually happened on disk: they end any in-flight save of these paths.
+    for (const p of [...this.inFlightSaves.keys()]) if (p === rel || p.startsWith(`${rel}/`)) this.inFlightSaves.delete(p);
     if (!st || (st.type !== 'file' && st.type !== 'directory')) {
       for (const p of this.trackedUnder(rel)) drop(p);
       return changed;
@@ -988,7 +1057,8 @@ export class ReviewEngine {
     const b = this.baseline.get(rel);
     const baseText = b ? decodeText(await this.store.read(b.oid))! : '';
     const diskRead = this.disk.has(rel) ? await this.readDisk(rel) : undefined;
-    const diskText = diskRead ? decodeText(diskRead.data)! : '';
+    const diskData = this.saveInFlight(rel, diskRead)?.data ?? diskRead?.data;
+    const diskText = diskData ? decodeText(diskData)! : '';
     const baseLines = splitLines(baseText);
     const diskLines = splitLines(diskText);
     return { change: { ...summary, hunks: computeHunks(baseLines, diskLines) }, baseLines, diskLines };
@@ -997,7 +1067,10 @@ export class ReviewEngine {
   private async acceptPath(rel: string, checkFresh: boolean): Promise<void> {
     if (checkFresh && !(await this.isFresh(rel))) throw new StaleChangeError(`${rel} changed on disk`);
     const r = this.disk.has(rel) ? await this.readDisk(rel) : undefined;
-    if (r) {
+    const saving = this.saveInFlight(rel, r);
+    if (saving) {
+      await this.setBaseline(rel, saving.data); // accept what is being saved, not the old disk
+    } else if (r) {
       this.disk.set(rel, r.entry);
       await this.setBaseline(rel, r.data);
     } else if (this.baseline.delete(rel)) {

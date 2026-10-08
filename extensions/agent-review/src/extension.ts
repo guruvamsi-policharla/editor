@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { MultiRootReview } from '@editor/engine';
 import { AgentTerminal } from './agentTerminal';
+import { ConflictMerger } from './conflicts';
 import { ReviewController, type CoreBridge, type ReviewAction } from './controller';
 import { EditLogs } from './editLog';
 import { BASELINE_SCHEME, BaselineContentProvider, baselineUri, ReviewTree, type FileItem } from './reviewTree';
@@ -73,36 +74,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     isDirty: (abs: string) => vscode.workspace.textDocuments.some((d) => d.uri.scheme === 'file' && samePath(d.uri.fsPath, abs) && d.isDirty),
   };
 
-  const conflictsShown = new Set<string>();
+  let conflicts: ConflictMerger | undefined;
   controller = new ReviewController(review, bridge, docs, {
     info: (m) => log.info(m),
     warn: (m) => log.warn(m),
     error: (m, e) => log.error(m, e instanceof Error ? e : String(e ?? '')),
-  }, (abs) => {
-    if (conflictsShown.has(abs)) return;
-    conflictsShown.add(abs);
-    const name = path.basename(abs);
-    void vscode.window
-      .showWarningMessage(`${name} changed on disk while you have unsaved edits. Nothing was overwritten.`, 'Compare', 'Revert to Disk')
-      .then(async (choice) => {
-        conflictsShown.delete(abs);
-        const uri = vscode.Uri.file(abs);
-        if (choice === 'Compare') {
-          await vscode.window.showTextDocument(uri);
-          await vscode.commands.executeCommand('workbench.files.action.compareWithSaved', uri);
-        } else if (choice === 'Revert to Disk') {
-          await vscode.window.showTextDocument(uri);
-          await vscode.commands.executeCommand('workbench.action.files.revert', uri);
-        }
-      });
-  });
+  }, (abs) => void conflicts?.onConflict(abs));
   const ctl = controller;
   context.subscriptions.push({ dispose: () => ctl.dispose() });
 
   // core -> extension
   context.subscriptions.push(
-    vscode.commands.registerCommand('agentReview.ext.onDidHunkAction', async (e: { uri: vscode.Uri | { path: string; scheme: string }; kind: ReviewAction['kind']; baseline?: string }) => {
-      const uri = e.uri instanceof vscode.Uri ? e.uri : vscode.Uri.from(e.uri as vscode.Uri);
+    vscode.commands.registerCommand('agentReview.ext.onDidHunkAction', async (e: { uri: CoreUri; kind: ReviewAction['kind']; baseline?: string }) => {
+      const uri = toUri(e.uri);
       if (uri.scheme !== 'file') return;
       const action = (e.kind === 'accepted' ? { kind: 'accepted', path: uri.fsPath, baseline: e.baseline ?? '' } : { kind: e.kind, path: uri.fsPath }) as ReviewAction;
       try {
@@ -116,10 +100,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // Edit logs for user-save attribution.
   const logs = new EditLogs();
-  for (const d of vscode.workspace.textDocuments) if (d.uri.scheme === 'file' && !d.isDirty) logs.markClean(d.uri.toString());
+  for (const d of vscode.workspace.textDocuments) if (d.uri.scheme === 'file' && !d.isDirty) logs.markClean(d.uri.toString(), d.getText());
+  // Agent writes under unsaved edits: 3-way merge.
+  conflicts = new ConflictMerger(ctl, logs, path.join((context.storageUri ?? context.globalStorageUri).fsPath, 'conflicts'), hasCore, log);
+  const merger = conflicts;
   context.subscriptions.push(
+    merger,
+    vscode.commands.registerCommand('agentReview.mergeWithDisk', (uri?: vscode.Uri) => {
+      const target = uri ?? vscode.window.activeTextEditor?.document.uri;
+      if (target?.scheme === 'file') return merger.merge(target.fsPath);
+    }),
     vscode.workspace.onDidOpenTextDocument((d) => {
-      if (d.uri.scheme === 'file' && !d.isDirty) logs.markClean(d.uri.toString());
+      if (d.uri.scheme === 'file' && !d.isDirty) logs.markClean(d.uri.toString(), d.getText());
     }),
     vscode.workspace.onDidCloseTextDocument((d) => {
       logs.forget(d.uri.toString());
@@ -127,16 +119,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.workspace.onDidChangeTextDocument((e) => {
       if (e.document.uri.scheme !== 'file' || e.contentChanges.length === 0) return;
-      logs.onChange(e.document.uri.toString(), e.contentChanges, e.document.isDirty);
+      logs.onChange(e.document.uri.toString(), e.contentChanges, e.document.isDirty, e.document.version, e.document.isDirty ? undefined : e.document.getText());
       if (!e.document.isDirty) void ctl.onBufferSettled(e.document.uri.fsPath); // reverted or reloaded
-    }),
-    vscode.workspace.onWillSaveTextDocument((e) => {
-      if (e.document.uri.scheme !== 'file') return;
-      e.waitUntil(ctl.onWillSave(e.document.uri.fsPath, e.document.getText(), logs.get(e.document.uri.toString())));
     }),
     vscode.workspace.onDidSaveTextDocument((d) => {
       if (d.uri.scheme !== 'file') return;
-      logs.markClean(d.uri.toString());
+      logs.markClean(d.uri.toString(), d.getText());
       void ctl.onBufferSettled(d.uri.fsPath);
     }),
     vscode.workspace.onDidDeleteFiles((e) => {
@@ -148,6 +136,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
   );
+  // Saves. In the fork, core reports each save right before the write, after every save participant, with
+  // the buffer version the user's own edits ended at: later edits (format on save, code actions on save)
+  // are attributed to the formatter. Without core, onWillSaveTextDocument is the best we get, and it may
+  // run after formatters, so their edits count as the user's.
+  if (hasCore) {
+    context.subscriptions.push(
+      vscode.commands.registerCommand('agentReview.ext.onWillWrite', async (e: { uri: CoreUri; userVersion: number; version: number }) => {
+        const uri = toUri(e.uri);
+        if (uri.scheme !== 'file') return;
+        const doc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
+        if (!doc) return;
+        // The document has seen every edit core made (events arrive in order); if not, don't trust the versions.
+        const inSync = doc.version === e.version;
+        if (!inSync) log.warn(`save of ${uri.fsPath}: document version ${doc.version}, core ${e.version}; attributing all edits to the user`);
+        await ctl.onWillSave(uri.fsPath, doc.getText(), logs.get(uri.toString(), inSync ? e.userVersion : undefined));
+      }),
+    );
+  } else {
+    context.subscriptions.push(
+      vscode.workspace.onWillSaveTextDocument((e) => {
+        if (e.document.uri.scheme !== 'file') return;
+        e.waitUntil(ctl.onWillSave(e.document.uri.fsPath, e.document.getText(), logs.get(e.document.uri.toString())));
+      }),
+    );
+  }
   async function reviewFor(abs: string) {
     return review?.engineFor(abs);
   }
@@ -269,6 +282,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 export async function deactivate(): Promise<void> {
   controller?.dispose();
   await review?.close();
+}
+
+/** A URI passed by core in a command argument (revived or plain components). */
+type CoreUri = vscode.Uri | { scheme: string; path: string };
+
+function toUri(u: CoreUri): vscode.Uri {
+  return u instanceof vscode.Uri ? u : vscode.Uri.from(u as vscode.Uri);
 }
 
 function samePath(a: string, b: string): boolean {

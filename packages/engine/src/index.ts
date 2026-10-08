@@ -26,3 +26,4 @@ export { type FileSystem, type FileStat, type FileType, type DirEntry, NodeFileS
 export { type GitObjectReader, type GitRepoInfo, type HeadState, gitCliObjectReader, parseIndex } from './git/repo.js';
 export { gitBlobId } from './store/objectStore.js';
 export { splitLines, joinLines, isBinary } from './text.js';
+export { restoreLineEndings, equalIgnoringEol } from './eol.js';

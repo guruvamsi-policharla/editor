@@ -110,6 +110,12 @@
         "icon": "$(diff)"
       },
       {
+        "command": "agentReview.mergeWithDisk",
+        "title": "Merge Agent's Version with Unsaved Edits",
+        "category": "Agent Review",
+        "icon": "$(git-merge)"
+      },
+      {
         "command": "agentReview.refresh",
         "title": "Rescan Workspace",
         "category": "Agent Review",

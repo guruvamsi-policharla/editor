@@ -21,6 +21,7 @@ import { ITextModelContentProvider, ITextModelService } from '../../../../editor
 import { createDecorator, IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntry } from '../../chat/common/editing/chatEditingService.js';
 import { AGENT_REVIEW_BASELINE_SCHEME, AgentReviewEntry, AgentReviewKind, IAgentReviewHunkEvent } from './agentReviewEntry.js';
+import { openAgentReviewMerge } from './agentReviewMerge.js';
 
 export const IAgentReviewService = createDecorator<IAgentReviewService>('agentReviewService');
 
@@ -36,6 +37,11 @@ export interface IAgentReviewService {
 	remove(uri: URI): void;
 	/** Remove every entry (the extension re-pushes everything it knows when it starts). */
 	clear(): void;
+	/**
+	 * Resolve an agent write that hit unsaved edits in the 3-way merge editor (base, agent's version on disk,
+	 * the user's buffer). False if there is nothing to merge (no unsaved edits).
+	 */
+	openMerge(uri: URI, base: string): Promise<boolean>;
 	getEntry(uri: URI): AgentReviewEntry | undefined;
 }
 
@@ -113,6 +119,11 @@ export class AgentReviewService extends Disposable implements IAgentReviewServic
 				return modelService.getModel(resource);
 			}
 		}));
+	}
+
+	async openMerge(uri: URI, base: string): Promise<boolean> {
+		const merge = await this._instantiationService.invokeFunction(openAgentReviewMerge, uri, { base });
+		return !!merge;
 	}
 
 	getEntry(uri: URI): AgentReviewEntry | undefined {

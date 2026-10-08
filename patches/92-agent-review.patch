@@ -1,9 +1,9 @@
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts b/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts
 new file mode 100644
-index 00000000..dc83368d
+index 00000000..e5626a30
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,119 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -11,8 +11,10 @@ index 00000000..dc83368d
 +
 +// Agent review wiring. The built-in agent-review extension (which hosts the review engine) talks to
 +// this contribution through internal commands, so no extension-host protocol changes are needed:
-+//   extension -> core: `_agentReview.setBaseline(uri, baselineText, kind)`, `_agentReview.remove(uri)`, `_agentReview.clear()`
-+//   core -> extension: `agentReview.ext.onDidHunkAction({ uri, kind, baseline? })`
++//   extension -> core: `_agentReview.setBaseline(uri, baselineText, kind)`, `_agentReview.remove(uri)`, `_agentReview.clear()`,
++//                      `_agentReview.openMerge(uri, baseText)` (agent write vs. unsaved edits, see agentReviewMerge.ts)
++//   core -> extension: `agentReview.ext.onDidHunkAction({ uri, kind, baseline? })`,
++//                      `agentReview.ext.onWillWrite({ uri, userVersion, version })` (see agentReviewSaveParticipant.ts)
 +// A typed proposed API can replace the commands later.
 +
 +import './media/agentReview.css';
@@ -30,6 +32,7 @@ index 00000000..dc83368d
 +import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 +import { IEditorService } from '../../../services/editor/common/editorService.js';
 +import { AgentReviewKind } from './agentReviewEntry.js';
++import { AgentReviewSaveParticipants } from './agentReviewSaveParticipant.js';
 +import { AgentReviewService, IAgentReviewService } from './agentReviewService.js';
 +
 +registerSingleton(IAgentReviewService, AgentReviewService, InstantiationType.Delayed);
@@ -49,6 +52,10 @@ index 00000000..dc83368d
 +	accessor.get(IAgentReviewService).clear();
 +});
 +
++CommandsRegistry.registerCommand('_agentReview.openMerge', (accessor: ServicesAccessor, uri: UriComponents, base: string): Promise<boolean> => {
++	return accessor.get(IAgentReviewService).openMerge(URI.revive(uri), base);
++});
++
 +class AgentReviewBridge extends Disposable implements IWorkbenchContribution {
 +	static readonly ID = 'workbench.contrib.agentReviewBridge';
 +	constructor(
@@ -64,6 +71,9 @@ index 00000000..dc83368d
 +	}
 +}
 +registerWorkbenchContribution2(AgentReviewBridge.ID, AgentReviewBridge, WorkbenchPhase.AfterRestored);
++
++// Tells the extension which buffer edits of a save were made by save participants (formatters), not the user.
++registerWorkbenchContribution2(AgentReviewSaveParticipants.ID, AgentReviewSaveParticipants, WorkbenchPhase.BlockRestore);
 +
 +/**
 + * Keeps `agentReview.isActive` in sync with the active editor, and marks code editors that show a
@@ -115,10 +125,10 @@ index 00000000..dc83368d
 +registerWorkbenchContribution2(AgentReviewEditorState.ID, AgentReviewEditorState, WorkbenchPhase.AfterRestored);
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
 new file mode 100644
-index 00000000..2e161091
+index 00000000..77436ac5
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
-@@ -0,0 +1,242 @@
+@@ -0,0 +1,243 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -143,7 +153,7 @@ index 00000000..2e161091
 +import { IDocumentDiff } from '../../../../editor/common/diff/documentDiffProvider.js';
 +import { DetailedLineRangeMapping } from '../../../../editor/common/diff/rangeMapping.js';
 +import { ILanguageService } from '../../../../editor/common/languages/language.js';
-+import { ITextModel } from '../../../../editor/common/model.js';
++import { EndOfLinePreference, ITextModel } from '../../../../editor/common/model.js';
 +import { createTextBufferFactory } from '../../../../editor/common/model/textModel.js';
 +import { IModelService } from '../../../../editor/common/services/model.js';
 +import { IResolvedTextEditorModel } from '../../../../editor/common/services/resolverService.js';
@@ -312,7 +322,8 @@ index 00000000..2e161091
 +		this._kind = kind;
 +		const stateChanged = this._stateObs.get() !== ModifiedFileEntryState.Modified;
 +		this._stateObs.set(ModifiedFileEntryState.Modified, undefined);
-+		if (!stateChanged && this.originalModel.getValue() === baseline) {
++		// Models keep one EOL, so a baseline that differs only in line endings (mixed CRLF/LF files) is the same here.
++		if (!stateChanged && this.originalModel.getValue(EndOfLinePreference.LF) === baseline.replace(/\r\n/g, '\n')) {
 +			return; // e.g. the echo of a Keep that this entry reported itself
 +		}
 +		await this._changeService.resetDocumentValues(baseline, undefined);
@@ -361,12 +372,223 @@ index 00000000..2e161091
 +		return this._instantiationService.createInstance(ChatEditingCodeEditorIntegration, this, codeEditor, this.diffInfo, true);
 +	}
 +}
+diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewMerge.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewMerge.ts
+new file mode 100644
+index 00000000..c82f759f
+--- /dev/null
++++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewMerge.ts
+@@ -0,0 +1,117 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++// Agent review: an agent wrote a file while the user has unsaved edits in it. Resolve the conflict in
++// VS Code's 3-way merge editor:
++//   base   = the text both sides started from (the extension passes it: the last text the buffer and the
++//            disk agreed on, or the accepted baseline)
++//   input1 = the agent's version (the file on disk)
++//   input2 = the user's unsaved buffer
++//   result = the file itself
++// Neither side is lost: both are snapshotted into read-only models before anything changes. The merge
++// editor saves its result file before it starts, so the file model is first reloaded from disk (the
++// user's text lives on in input2); nothing is written until the user completes the merge. The result
++// then starts as the merge editor's own auto-merge (non-conflicting changes from both sides applied,
++// conflicts left to the user).
++
++import { DisposableStore } from '../../../../base/common/lifecycle.js';
++import { waitForState } from '../../../../base/common/observable.js';
++import { URI } from '../../../../base/common/uri.js';
++import { ILanguageService } from '../../../../editor/common/languages/language.js';
++import { IModelService } from '../../../../editor/common/services/model.js';
++import { createTextBufferFactory } from '../../../../editor/common/model/textModel.js';
++import { ITextModelService } from '../../../../editor/common/services/resolverService.js';
++import { localize } from '../../../../nls.js';
++import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
++import { IEditorService } from '../../../services/editor/common/editorService.js';
++import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
++import { MergeEditorInput, MergeEditorInputData } from '../../mergeEditor/browser/mergeEditorInput.js';
++
++export const AGENT_REVIEW_MERGE_SCHEME = 'agent-review-merge';
++
++export interface IAgentReviewMergeOptions {
++	/** The common ancestor of the disk and buffer versions. */
++	readonly base: string;
++	/** Do not open the editor, only prepare the merge (tests). */
++	readonly noOpen?: boolean;
++}
++
++export interface IAgentReviewMerge {
++	readonly input: MergeEditorInput;
++	/** The agent's version, as it was on disk. */
++	readonly theirs: string;
++	/** The user's unsaved buffer, as it was. */
++	readonly yours: string;
++}
++
++let mergeIds = 0;
++
++/**
++ * Open the 3-way merge editor for a file with unsaved edits that changed on disk. Returns undefined
++ * if there is nothing to merge (the file has no unsaved edits, or isn't a text file model).
++ */
++export async function openAgentReviewMerge(accessor: ServicesAccessor, uri: URI, options: IAgentReviewMergeOptions): Promise<IAgentReviewMerge | undefined> {
++	const textFileService = accessor.get(ITextFileService);
++	const modelService = accessor.get(IModelService);
++	const languageService = accessor.get(ILanguageService);
++	const editorService = accessor.get(IEditorService);
++	const instantiationService = accessor.get(IInstantiationService);
++	const textModelService = accessor.get(ITextModelService);
++
++	const fileModel = textFileService.files.get(uri);
++	if (!fileModel?.textEditorModel || !fileModel.isDirty()) {
++		return undefined;
++	}
++	const textModel = fileModel.textEditorModel;
++	const store = new DisposableStore();
++	// The merge editor resolves its inputs through the text model service.
++	store.add(textModelService.registerTextModelContentProvider(AGENT_REVIEW_MERGE_SCHEME, {
++		provideTextContent: async resource => modelService.getModel(resource),
++	}));
++	const id = ++mergeIds;
++	const snapshot = (side: string, text: string) => {
++		const resource = URI.from({ scheme: AGENT_REVIEW_MERGE_SCHEME, path: uri.path, query: `${side}-${id}` });
++		return store.add(modelService.createModel(createTextBufferFactory(text), languageService.createById(textModel.getLanguageId()), resource, false)).uri;
++	};
++
++	const yours = textModel.getValue();
++	let reverted = false;
++	try {
++		const yoursUri = snapshot('yours', yours);
++		// Reload from disk. The merge editor saves its result before it starts: it must not save the buffer.
++		await fileModel.revert();
++		reverted = true;
++		if (fileModel.isDirty()) {
++			throw new Error(`could not reload ${uri.toString()} from disk`);
++		}
++		const theirs = textModel.getValue();
++		const theirsUri = snapshot('theirs', theirs);
++		const baseUri = snapshot('base', options.base);
++
++		const input = instantiationService.createInstance(
++			MergeEditorInput,
++			baseUri,
++			new MergeEditorInputData(theirsUri, localize('agentReview.merge.theirs', "Agent"), undefined, localize('agentReview.merge.theirsDescription', "on disk")),
++			new MergeEditorInputData(yoursUri, localize('agentReview.merge.yours', "Yours"), undefined, localize('agentReview.merge.yoursDescription', "unsaved edits")),
++			uri,
++		);
++		// After the merge model lets go of them (the input disposes it right after this event, synchronously).
++		store.add(input.onWillDispose(() => queueMicrotask(() => store.dispose())));
++		const inputModel = await input.resolve();
++		await inputModel.model.reset(); // start from the auto-merge, not from the agent's version
++		await waitForState(inputModel.model.isUpToDate, upToDate => upToDate); // open with the result diffed: no flicker
++		if (!options.noOpen) {
++			await editorService.openEditor(input, { pinned: true });
++		}
++		return { input, theirs, yours };
++	} catch (err) {
++		if (reverted) {
++			// Put the user's text back (undoable) rather than losing it with the snapshot.
++			textModel.pushEditOperations(null, [{ range: textModel.getFullModelRange(), text: yours }], () => null);
++		}
++		store.dispose();
++		throw err;
++	}
++}
+diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewSaveParticipant.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewSaveParticipant.ts
+new file mode 100644
+index 00000000..341604e2
+--- /dev/null
++++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewSaveParticipant.ts
+@@ -0,0 +1,82 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++// Agent review: attribution of edits made while a file is being saved. Save participants (format on
++// save, code actions on save, trim whitespace, other extensions' onWillSave edits) run in registration
++// order, and the extension host's participant usually runs after the core ones. So by the time the
++// agent-review extension hears about a save, formatter edits are already in the buffer and look like
++// the user's typing.
++//
++// Two participants bracket all others: the first records the model's version before any participant
++// runs; the last tells the extension `agentReview.ext.onWillWrite({ uri, userVersion, version })`
++// right before the write. Buffer edits after `userVersion` were made by the editor during the save,
++// not by the user: the engine keeps them pending inside agent hunks and folds them in elsewhere.
++
++import { raceTimeout } from '../../../../base/common/async.js';
++import { Disposable } from '../../../../base/common/lifecycle.js';
++import { ResourceMap } from '../../../../base/common/map.js';
++import { URI } from '../../../../base/common/uri.js';
++import { ICommandService } from '../../../../platform/commands/common/commands.js';
++import { ILogService } from '../../../../platform/log/common/log.js';
++import { IWorkbenchContribution } from '../../../common/contributions.js';
++import { ITextFileEditorModel, ITextFileService } from '../../../services/textfile/common/textfiles.js';
++
++/** Payload of `agentReview.ext.onWillWrite`. */
++export interface IAgentReviewWillWriteEvent {
++	readonly uri: URI;
++	/** Model version before save participants ran: edits up to here are the user's. */
++	readonly userVersion: number;
++	/** Model version about to be written. */
++	readonly version: number;
++}
++
++/** Same budget the extension host gets for onWillSaveTextDocument. */
++const WILL_WRITE_TIMEOUT_MS = 1750;
++
++export class AgentReviewSaveParticipants extends Disposable implements IWorkbenchContribution {
++
++	static readonly ID = 'workbench.contrib.agentReviewSaveParticipants';
++	static readonly FIRST = -1_000_000;
++	static readonly LAST = 1_000_000;
++
++	private readonly _userVersions = new ResourceMap<number>();
++
++	constructor(
++		@ITextFileService textFileService: ITextFileService,
++		@ICommandService private readonly _commandService: ICommandService,
++		@ILogService private readonly _logService: ILogService,
++	) {
++		super();
++		this._register(textFileService.files.addSaveParticipant({
++			ordinal: AgentReviewSaveParticipants.FIRST,
++			participate: async model => this._willParticipate(model),
++		}));
++		this._register(textFileService.files.addSaveParticipant({
++			ordinal: AgentReviewSaveParticipants.LAST,
++			participate: model => this._willWrite(model),
++		}));
++	}
++
++	private _willParticipate(model: ITextFileEditorModel): void {
++		if (model.textEditorModel) {
++			this._userVersions.set(model.resource, model.textEditorModel.getVersionId());
++		}
++	}
++
++	private async _willWrite(model: ITextFileEditorModel): Promise<void> {
++		const userVersion = this._userVersions.get(model.resource);
++		this._userVersions.delete(model.resource);
++		if (userVersion === undefined || !model.textEditorModel) {
++			return;
++		}
++		const event: IAgentReviewWillWriteEvent = { uri: model.resource, userVersion, version: model.textEditorModel.getVersionId() };
++		try {
++			// Bounded: a slow or missing extension must never block saving.
++			await raceTimeout(this._commandService.executeCommand('agentReview.ext.onWillWrite', event), WILL_WRITE_TIMEOUT_MS);
++		} catch (err) {
++			this._logService.trace('[agentReview] onWillWrite not delivered', err);
++		}
++	}
++}
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts
 new file mode 100644
-index 00000000..b06dd674
+index 00000000..ac216fba
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewService.ts
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,190 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -390,6 +612,7 @@ index 00000000..b06dd674
 +import { createDecorator, IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 +import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntry } from '../../chat/common/editing/chatEditingService.js';
 +import { AGENT_REVIEW_BASELINE_SCHEME, AgentReviewEntry, AgentReviewKind, IAgentReviewHunkEvent } from './agentReviewEntry.js';
++import { openAgentReviewMerge } from './agentReviewMerge.js';
 +
 +export const IAgentReviewService = createDecorator<IAgentReviewService>('agentReviewService');
 +
@@ -405,6 +628,11 @@ index 00000000..b06dd674
 +	remove(uri: URI): void;
 +	/** Remove every entry (the extension re-pushes everything it knows when it starts). */
 +	clear(): void;
++	/**
++	 * Resolve an agent write that hit unsaved edits in the 3-way merge editor (base, agent's version on disk,
++	 * the user's buffer). False if there is nothing to merge (no unsaved edits).
++	 */
++	openMerge(uri: URI, base: string): Promise<boolean>;
 +	getEntry(uri: URI): AgentReviewEntry | undefined;
 +}
 +
@@ -482,6 +710,11 @@ index 00000000..b06dd674
 +				return modelService.getModel(resource);
 +			}
 +		}));
++	}
++
++	async openMerge(uri: URI, base: string): Promise<boolean> {
++		const merge = await this._instantiationService.invokeFunction(openAgentReviewMerge, uri, { base });
++		return !!merge;
 +	}
 +
 +	getEntry(uri: URI): AgentReviewEntry | undefined {
@@ -571,10 +804,10 @@ index 00000000..8d72ddc8
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
 new file mode 100644
-index 00000000..dd2fe95b
+index 00000000..69fa9437
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
-@@ -0,0 +1,260 @@
+@@ -0,0 +1,305 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -605,6 +838,7 @@ index 00000000..dd2fe95b
 +import { EditSources } from '../../../../../editor/common/textModelEditSource.js';
 +import { instantiateTestCodeEditor, ITestCodeEditor } from '../../../../../editor/test/browser/testCodeEditor.js';
 +import { SyncDescriptor } from '../../../../../platform/instantiation/common/descriptors.js';
++import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
 +import { ServiceCollection } from '../../../../../platform/instantiation/common/serviceCollection.js';
 +import { IViewsService } from '../../../../services/views/common/viewsService.js';
 +import { ITextFileSaveOptions, ITextFileService } from '../../../../services/textfile/common/textfiles.js';
@@ -613,6 +847,11 @@ index 00000000..dd2fe95b
 +import { IChatEditingExplanationModelManager } from '../../../chat/browser/chatEditing/chatEditingExplanationModelManager.js';
 +import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntryChangeHunk } from '../../../chat/common/editing/chatEditingService.js';
 +import { TestWorkerService } from '../../../inlineChat/test/browser/testWorkerService.js';
++import { IEditorService } from '../../../../services/editor/common/editorService.js';
++import { IResourceDiffEditorInput } from '../../../../common/editor.js';
++import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
++import { IAction2Options } from '../../../../../platform/actions/common/actions.js';
++import { AcceptAction, AcceptAllEditsAction, AcceptHunkAction, NavigateAction, RejectAction, RejectHunkAction, ToggleAccessibleDiffViewAction, ToggleDiffAction } from '../../../chat/browser/chatEditing/chatEditingEditorActions.js';
 +import { AgentReviewKind, IAgentReviewHunkEvent } from '../../browser/agentReviewEntry.js';
 +import { AgentReviewService } from '../../browser/agentReviewService.js';
 +
@@ -633,6 +872,7 @@ index 00000000..dd2fe95b
 +	let hunkEvents: IAgentReviewHunkEvent[];
 +	let dirty: boolean;
 +	let saves: (ITextFileSaveOptions | undefined)[];
++	let insta: TestInstantiationService;
 +
 +	setup(() => {
 +		zones = new Map();
@@ -675,7 +915,7 @@ index 00000000..dd2fe95b
 +			override readonly onDidChangeViewVisibility = Event.None;
 +		}());
 +
-+		const insta = store.add(store.add(workbenchInstantiationService(undefined, store)).createChild(collection));
++		insta = store.add(store.add(workbenchInstantiationService(undefined, store)).createChild(collection));
 +		store.add(insta.get(IEditorWorkerService) as TestWorkerService);
 +		modelService = insta.get(IModelService);
 +		model = store.add(modelService.createModel(DISK, null, uri, false));
@@ -798,11 +1038,13 @@ index 00000000..dd2fe95b
 +		assert.strictEqual(model.getValue(), DISK, 'file-level Undo of a created file leaves deletion to the engine');
 +	});
 +
-+	test('setBaseline with an unchanged baseline is a no-op; remove and clear drop entries', async () => {
++	test('setBaseline with an unchanged baseline (line endings aside) is a no-op; remove and clear drop entries', async () => {
 +		const { entry } = await showPending();
 +		const version = entry.originalModel.getVersionId();
 +		await service.setBaseline(uri, BASELINE);
 +		assert.strictEqual(entry.originalModel.getVersionId(), version);
++		await service.setBaseline(uri, BASELINE.replace(/\n/g, '\r\n'), 'modified');
++		assert.strictEqual(entry.originalModel.getVersionId(), version, 'a baseline that differs only in line endings is the same');
 +		service.remove(uri);
 +		assert.strictEqual(service.getEntry(uri), undefined);
 +		assert.strictEqual(registeredSessions[0].entries.get().length, 0);
@@ -821,6 +1063,42 @@ index 00000000..dd2fe95b
 +		assert.deepStrictEqual(inner.map(c => model.getValueInRange(c.modifiedRange)), ['red']);
 +	});
 +
++	test('the side-by-side diff is titled with agent-review wording', async () => {
++		const { integration } = await showPending();
++		const opened: IResourceDiffEditorInput[] = [];
++		const editorService = insta.get(IEditorService);
++		editorService.openEditor = (async (input: IResourceDiffEditorInput) => { opened.push(input); return undefined; }) as typeof editorService.openEditor;
++		await integration.toggleDiff(undefined, true);
++		assert.deepStrictEqual(opened.map(i => i.label), ['paper.tex (agent changes)']);
++	});
++
++	test('review commands use agent-review wording; Keep/Undo labels and keybindings are unchanged', () => {
++		const desc = (action: { desc: Readonly<IAction2Options> }) => {
++			const kb = action.desc.keybinding;
++			const title = action.desc.title;
++			return {
++				title: typeof title === 'string' ? title : title.value,
++				short: action.desc.shortTitle && (typeof action.desc.shortTitle === 'string' ? action.desc.shortTitle : action.desc.shortTitle.value),
++				key: (Array.isArray(kb) ? kb[0] : kb)?.primary,
++			};
++		};
++		const next = new (class extends NavigateAction { constructor() { super(true); } })();
++		const prev = new (class extends NavigateAction { constructor() { super(false); } })();
++		assert.deepStrictEqual(
++			[next, prev, new AcceptAction(), new RejectAction(), new AcceptAllEditsAction(), new AcceptHunkAction(), new RejectHunkAction(), new ToggleDiffAction(), new ToggleAccessibleDiffViewAction()].map(desc),
++			[
++				{ title: 'Go to Next Agent Change', short: undefined, key: KeyMod.Alt | KeyCode.F5 },
++				{ title: 'Go to Previous Agent Change', short: undefined, key: KeyMod.Alt | KeyMod.Shift | KeyCode.F5 },
++				{ title: 'Keep Agent Changes', short: 'Keep', key: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyY },
++				{ title: 'Undo Agent Changes', short: 'Undo', key: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyN },
++				{ title: 'Keep All Agent Changes', short: undefined, key: KeyMod.CtrlCmd | KeyMod.Alt | KeyCode.KeyY },
++				{ title: 'Keep this Change', short: 'Keep', key: KeyMod.CtrlCmd | KeyCode.KeyY },
++				{ title: 'Undo this Change', short: 'Undo', key: KeyMod.CtrlCmd | KeyCode.KeyN },
++				{ title: 'Toggle Diff Editor for Agent Changes', short: undefined, key: KeyMod.Alt | KeyMod.Shift | KeyCode.F7 },
++				{ title: 'Show Accessible Diff View for Agent Changes', short: undefined, key: KeyCode.F7 },
++			]);
++	});
++
 +	test('a reload from disk (agent write) stays pending; a user keystroke outside hunks folds in', async () => {
 +		const { entry } = await showPending();
 +
@@ -833,6 +1111,245 @@ index 00000000..dd2fe95b
 +		model.applyEdits([EditOperation.replace(new Range(1, 1, 1, 6), 'Opening')]);
 +		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 && entry.originalModel.getValue().startsWith('Opening') ? d : undefined));
 +		assert.ok(entry.originalModel.getValue().startsWith('Opening sentence.'));
++	});
++});
+diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReviewMerge.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReviewMerge.test.ts
+new file mode 100644
+index 00000000..589f6950
+--- /dev/null
++++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReviewMerge.test.ts
+@@ -0,0 +1,104 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++// Agent write vs. unsaved edits: the 3-way merge (base, agent's version on disk, the user's buffer)
++// runs in VS Code's merge editor. Neither side is lost or written, and the result starts as the
++// auto-merge with only the true conflict left to resolve.
++
++import assert from 'assert';
++import { DisposableStore } from '../../../../../base/common/lifecycle.js';
++import { URI } from '../../../../../base/common/uri.js';
++import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
++import { IEditorWorkerService } from '../../../../../editor/common/services/editorWorker.js';
++import { IModelService } from '../../../../../editor/common/services/model.js';
++import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
++import { SyncDescriptor } from '../../../../../platform/instantiation/common/descriptors.js';
++import { ServiceCollection } from '../../../../../platform/instantiation/common/serviceCollection.js';
++import { TextFileEditorModelManager } from '../../../../services/textfile/common/textFileEditorModelManager.js';
++import { ITextFileEditorModel } from '../../../../services/textfile/common/textfiles.js';
++import { TestServiceAccessor, workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
++import { TestWorkerService } from '../../../inlineChat/test/browser/testWorkerService.js';
++import { MergeEditorInput } from '../../../mergeEditor/browser/mergeEditorInput.js';
++import { AGENT_REVIEW_MERGE_SCHEME, openAgentReviewMerge } from '../../browser/agentReviewMerge.js';
++
++suite('AgentReview: 3-way merge for agent writes under unsaved edits', () => {
++
++	const disposables = new DisposableStore();
++	const uri = URI.file('/ws/paper.tex');
++	const BASE = 'Title.\n\nIntro.\n\nMethods.\n\nResults.\n';
++	// The agent rewrote Intro and Results; the user, with unsaved edits, rewrote Title and Results.
++	const AGENT = 'Title.\n\nA better intro.\n\nMethods.\n\nAgent results.\n';
++	const YOURS = 'My title.\n\nIntro.\n\nMethods.\n\nMy results.\n';
++
++	let insta: IInstantiationService;
++	let accessor: TestServiceAccessor;
++	let model: ITextFileEditorModel;
++
++	setup(async () => {
++		const base = workbenchInstantiationService(undefined, disposables);
++		insta = disposables.add(base.createChild(new ServiceCollection([IEditorWorkerService, new SyncDescriptor(TestWorkerService)])));
++		disposables.add(insta.invokeFunction(a => a.get(IEditorWorkerService)) as TestWorkerService);
++		accessor = insta.createInstance(TestServiceAccessor);
++		disposables.add(<TextFileEditorModelManager>accessor.textFileService.files);
++
++		accessor.fileService.setContent(BASE);
++		model = await accessor.textFileService.files.resolve(uri);
++		model.textEditorModel!.setValue(YOURS); // unsaved edits
++		accessor.fileService.setContent(AGENT); // the agent writes the file; the dirty buffer is not reloaded
++	});
++
++	teardown(() => disposables.clear());
++
++	ensureNoDisposablesAreLeakedInTestSuite();
++
++	const models = () => insta.invokeFunction(a => a.get(IModelService));
++
++	/** Closing the merge editor disposes its input; the snapshots go right after. */
++	async function close(input: MergeEditorInput) {
++		input.dispose();
++		await Promise.resolve();
++	}
++
++	function open(base = BASE) {
++		return insta.invokeFunction(openAgentReviewMerge, uri, { base, noOpen: true });
++	}
++
++	test('both sides are snapshotted, nothing is written, and the result is the auto-merge with one conflict', async () => {
++		const writesBefore = accessor.fileService.writeOperations.length;
++		const merge = (await open())!;
++
++		assert.strictEqual(merge.yours, YOURS, 'the user\'s buffer is kept as input 2');
++		assert.strictEqual(merge.theirs, AGENT, 'the agent\'s version is input 1');
++		assert.strictEqual(merge.input.input1.uri.scheme, AGENT_REVIEW_MERGE_SCHEME);
++		assert.strictEqual(models().getModel(merge.input.input2.uri)?.getValue(), YOURS);
++		assert.strictEqual(models().getModel(merge.input.base)?.getValue(), BASE);
++		assert.strictEqual(merge.input.result.toString(), uri.toString(), 'the result is the file itself');
++		assert.strictEqual(accessor.fileService.writeOperations.length, writesBefore, 'nothing is written before the merge is completed');
++
++		// Auto-merge: the user's title and the agent's intro are both in; Results (changed by both) is a conflict at base.
++		const inputModel = await merge.input.resolve();
++		assert.strictEqual(model.textEditorModel!.getValue(), 'My title.\n\nA better intro.\n\nMethods.\n\nResults.\n');
++		assert.strictEqual(inputModel.model.unhandledConflictsCount.get(), 1);
++		assert.ok(model.isDirty(), 'the merge result is unsaved until the user completes the merge');
++		await close(merge.input);
++		await model.revert(); // "Don't Save"
++	});
++
++	test('nothing to merge without unsaved edits', async () => {
++		await model.revert();
++		assert.strictEqual(await open(), undefined);
++		assert.strictEqual(model.textEditorModel!.getValue(), AGENT);
++	});
++
++	test('the merge models go away with the merge editor', async () => {
++		const merge = (await open())!;
++		const resources = [merge.input.base, merge.input.input1.uri, merge.input.input2.uri];
++		await close(merge.input);
++		await model.revert();
++		for (const r of resources) {
++			assert.strictEqual(models().getModel(r), null);
++		}
++	});
++});
+diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReviewSaveParticipant.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReviewSaveParticipant.test.ts
+new file mode 100644
+index 00000000..5c7bac64
+--- /dev/null
++++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReviewSaveParticipant.test.ts
+@@ -0,0 +1,123 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++// Agent review save attribution with format on save enabled: the real save participants (including
++// FormatOnSaveParticipant and a registered formatter) run between our first and last participants, so
++// the extension learns which buffer versions were the user's and which were made by the formatter.
++
++import assert from 'assert';
++import { DisposableStore } from '../../../../../base/common/lifecycle.js';
++import { URI } from '../../../../../base/common/uri.js';
++import { ensureNoDisposablesAreLeakedInTestSuite, toResource } from '../../../../../base/test/common/utils.js';
++import { EditOperation } from '../../../../../editor/common/core/editOperation.js';
++import { Range } from '../../../../../editor/common/core/range.js';
++import { TextEdit } from '../../../../../editor/common/languages.js';
++import { IEditorWorkerService } from '../../../../../editor/common/services/editorWorker.js';
++import { ILanguageFeaturesService } from '../../../../../editor/common/services/languageFeatures.js';
++import { FormattingConflicts } from '../../../../../editor/contrib/format/browser/format.js';
++import { TestCommandService } from '../../../../../editor/test/browser/editorTestServices.js';
++import { TestEditorWorkerService } from '../../../../../editor/test/common/services/testEditorWorkerService.js';
++import { CommandsRegistry, ICommandService } from '../../../../../platform/commands/common/commands.js';
++import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
++import { SaveReason } from '../../../../common/editor.js';
++import { TextFileEditorModel } from '../../../../services/textfile/common/textFileEditorModel.js';
++import { TextFileEditorModelManager } from '../../../../services/textfile/common/textFileEditorModelManager.js';
++import { IResolvedTextFileEditorModel, ITextFileSaveParticipant } from '../../../../services/textfile/common/textfiles.js';
++import { TestServiceAccessor, workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
++import { SaveParticipantsContribution } from '../../../codeEditor/browser/saveParticipants.js';
++import { AgentReviewSaveParticipants, IAgentReviewWillWriteEvent } from '../../browser/agentReviewSaveParticipant.js';
++
++suite('AgentReview: save attribution with format on save', () => {
++
++	const disposables = new DisposableStore();
++	let instantiationService: TestInstantiationService;
++	let accessor: TestServiceAccessor;
++	let events: { event: IAgentReviewWillWriteEvent; text: string }[];
++	let model: IResolvedTextFileEditorModel;
++
++	setup(async function () {
++		events = [];
++		instantiationService = workbenchInstantiationService(undefined, disposables);
++		accessor = instantiationService.createInstance(TestServiceAccessor);
++		instantiationService.stub(ICommandService, new TestCommandService(instantiationService));
++		instantiationService.stub(IEditorWorkerService, new class extends TestEditorWorkerService {
++			override async computeMoreMinimalEdits(_resource: URI, edits: TextEdit[] | null | undefined) { return edits ?? undefined; }
++		});
++		disposables.add(<TextFileEditorModelManager>accessor.textFileService.files);
++
++		// Format on save: on, whole file, with a formatter that normalizes `a=b` to `a = b`.
++		accessor.testConfigurationService.setUserConfiguration('editor', { formatOnSave: true, formatOnSaveMode: 'file' });
++		disposables.add(instantiationService.invokeFunction(a => a.get(ILanguageFeaturesService)).documentFormattingEditProvider.register('*', {
++			provideDocumentFormattingEdits: m => {
++				const edits = [];
++				for (let line = 1; line <= m.getLineCount(); line++) {
++					const text = m.getLineContent(line);
++					const formatted = text.replace(/\s*=\s*/, ' = ');
++					if (formatted !== text) {
++						edits.push({ range: new Range(line, 1, line, text.length + 1), text: formatted });
++					}
++				}
++				return edits;
++			}
++		}));
++
++		// The workbench installs a selector that picks the default formatter; take the only one.
++		disposables.add(FormattingConflicts.setFormatterSelector(async formatters => formatters[0]));
++
++		// The real core save participants (format on save, trim whitespace, ...), then ours.
++		disposables.add(instantiationService.createInstance(SaveParticipantsContribution));
++		disposables.add(instantiationService.createInstance(AgentReviewSaveParticipants));
++
++		disposables.add(CommandsRegistry.registerCommand('agentReview.ext.onWillWrite', (_accessor, event: IAgentReviewWillWriteEvent) => {
++			events.push({ event, text: model.textEditorModel.getValue() });
++		}));
++
++		model = disposables.add(instantiationService.createInstance(TextFileEditorModel, toResource.call(this, '/path/settings.ini'), 'utf8', undefined) as IResolvedTextFileEditorModel);
++		await model.resolve();
++		model.textEditorModel.setValue('alpha=1\nbeta = 2\n');
++		await model.save({ reason: SaveReason.EXPLICIT });
++		events.length = 0;
++	});
++
++	teardown(() => disposables.clear());
++
++	ensureNoDisposablesAreLeakedInTestSuite();
++
++	test('the formatter runs between the user version and the written version', async () => {
++		// The user edits line 2 by hand (unformatted); format on save then rewrites it.
++		model.textEditorModel.applyEdits([EditOperation.replace(new Range(2, 1, 2, 9), 'gamma=3')]);
++		const userVersion = model.textEditorModel.getVersionId();
++		await model.save({ reason: SaveReason.EXPLICIT });
++
++		assert.strictEqual(events.length, 1);
++		const [{ event, text }] = events;
++		assert.strictEqual(event.uri.toString(), model.resource.toString());
++		assert.strictEqual(event.userVersion, userVersion, 'the version before save participants is the last user edit');
++		assert.ok(event.version > userVersion, 'the formatter edit comes after the user version');
++		assert.strictEqual(event.version, model.textEditorModel.getVersionId(), 'nothing changes after the report');
++		assert.strictEqual(text, 'alpha = 1\ngamma = 3\n', 'reported right before the write, with the formatter edits applied');
++	});
++
++	test('runs after participants added later, so their edits are reported too', async () => {
++		const late: ITextFileSaveParticipant = {
++			participate: async m => { m.textEditorModel?.applyEdits([EditOperation.insert(m.textEditorModel.getFullModelRange().getEndPosition(), '# end\n')]); }
++		};
++		disposables.add(accessor.textFileService.files.addSaveParticipant(late));
++		model.textEditorModel.applyEdits([EditOperation.insert(model.textEditorModel.getFullModelRange().getEndPosition(), 'delta = 4\n')]);
++		const userVersion = model.textEditorModel.getVersionId();
++		await model.save({ reason: SaveReason.EXPLICIT });
++
++		assert.strictEqual(events.length, 1);
++		assert.strictEqual(events[0].event.userVersion, userVersion);
++		assert.strictEqual(events[0].text, 'alpha = 1\nbeta = 2\ndelta = 4\n# end\n');
++	});
++
++	test('saves that skip participants (an Undo in the review UI) are not reported', async () => {
++		model.textEditorModel.setValue('alpha=1\n');
++		await model.save({ reason: SaveReason.EXPLICIT, skipSaveParticipants: true });
++		assert.deepStrictEqual(events, []);
++		assert.strictEqual(model.textEditorModel.getValue(), 'alpha=1\n');
 +	});
 +});
 diff --git a/src/vs/workbench/workbench.common.main.ts b/src/vs/workbench/workbench.common.main.ts

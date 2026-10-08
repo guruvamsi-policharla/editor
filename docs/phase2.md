@@ -56,8 +56,8 @@ The engine is authoritative. Core only renders what the extension pushes and rep
 | **Undo** a hunk | Restores the hunk in the buffer, then **saves** if the buffer was clean (save participants skipped, so formatters can't rewrite other agent lines). Emits `rejected` | Nothing to do: the engine sees disk == baseline in that region |
 | Undo a hunk with unsaved edits | Restores in the buffer, no save | Folded with the user's next save through the edit log (attributed as user edits that touch an agent hunk, so the baseline doesn't move) |
 | **Keep** / **Undo** a file (overlay or list) | Keep emits `acceptFile`; Undo restores and saves (modified files) or emits `rejectFile` (created files) | `engine.acceptFile` / `engine.rejectFile` (reject deletes a created file, restores a deleted one) |
-| Typing + save | Typing outside hunks folds into the baseline model immediately (upstream behavior) | `onWillSaveTextDocument` → `reportUserSave(content, edits)`. User lines fold into the baseline; agent lines stay pending |
-| Agent writes while the buffer is dirty | The buffer is never overwritten | Pushes for that file are deferred until save or revert. A notification offers **Compare** / **Revert to Disk** |
+| Typing + save | Typing outside hunks folds into the baseline model immediately (upstream behavior). Two save participants bracket all others (format on save, code actions, other extensions): the first records the buffer version, the last calls `agentReview.ext.onWillWrite({ uri, userVersion, version })` right before the write | `reportUserSave(content, edits)`, with edits after `userVersion` tagged `formatter`. User lines fold into the baseline; agent lines stay pending; formatter edits stay pending inside agent hunks and fold in elsewhere (line by line) |
+| Agent writes while the buffer is dirty | The buffer is never overwritten. **Merge…** (notification, or *Agent Review: Merge Agent's Version with Unsaved Edits*) runs `_agentReview.openMerge`: both versions are snapshotted, the buffer reloads from disk, and VS Code's 3-way merge editor opens on its own auto-merge (base = the text both sides started from, Agent = disk, Yours = the buffer, result = the file). Nothing is written until **Complete Merge** | Pushes for that file are deferred until save or revert. A save of the stale buffer isn't attributed. The merge result is attributed by diffing against the disk (agent lines stay pending, the user's fold in). Both versions are also copied to `conflicts/` in workspace storage (kept 7 days), and closing the merge without saving points to the user's copy |
 | Git commit / checkout / stage | Nothing | The engine's `checkGit` moves baselines (HEAD move = accept). Entries update or disappear |
 | Restart | `_agentReview.clear` at activation | The engine reopens its persisted state, rescans (stat cache), and re-pushes everything pending |
 
@@ -70,15 +70,15 @@ Created files are reviewed inline (baseline `''`). Deleted and renamed files, an
 | **C1** agentReview contribution wired to the real engine | Done. File watching, folding user edits on save, persistence, and git ops all go through the engine |
 | **C3** disk reload vs. user edit | Done. `ChatEditingTextModelChangeService`'s external-edit predicate now gets the content-change event, and the entry tests `detailedReasons` for `reloadFromDisk`. This replaces the spike's listener-order trick |
 | **C4** word-level highlights | Done. `extendToSubwords` is passed to the diff, so inner changes are word/subword ranges |
-| **C5** nav without chat, `agentReview.isActive` | Done. The ↑/↓ navigate actions are enabled when `chatIsEnabled` **or** `agentReview.isActive` is set; the latter tracks the active editor having pending changes. Keep/Undo labels are unchanged |
+| **C5** nav without chat, `agentReview.isActive` | Done. The ↑/↓ navigate actions are enabled when `chatIsEnabled` **or** `agentReview.isActive` is set; the latter tracks the active editor having pending changes. Keep/Undo labels and keybindings are unchanged; the chat wording around them is agent-review wording: "Go to Next/Previous Agent Change", "Keep/Undo Agent Changes (in this File)", "Keep All Agent Changes", "Toggle Diff Editor / Show Accessible Diff View for Agent Changes", the diff title "file (agent changes)" and the explorer tooltip "Pending agent changes" |
 | **C6** always-visible hunk buttons | Done. Editors showing a file under review get an `agent-review-editor` class; the hunk toolbar is opacity 0.8, and 1 on hover or with the cursor in the hunk (upstream: hidden until hover) |
 | Hunk merging | Done. New diff option `preserveShortMatchingLines` skips the heuristic that joins hunks separated by short unchanged lines (≤4 non-whitespace chars, e.g. a lone `}`), so each hunk can be kept or undone on its own. The default diff behavior is unchanged (all upstream diff fixtures pass) |
 | **C8** created / deleted files | Done. Created files inline; deleted (and renamed/binary) in the list with a diff and Keep/Undo |
 | **C7** multi-file review | Done, extension-side. The **Agent Changes** view (explorer) lists every file with kind and +/− and has Keep/Undo per file plus Keep All / Undo All. **Open All Changes** opens a multi-file diff (`vscode.changes`). An activity badge shows the file count |
 | Agent terminal | Done. **Agent: Open Agent Terminal** starts `agentReview.agent.command` (default `tact`) in a terminal docked right (editor area, beside), or in the panel (`agentReview.agent.location`) |
-| Ctrl/Cmd+L | Done. Sends `@relative/path:L42-58` (format: `agentReview.agent.referenceFormat`) to the agent terminal; optionally also the selected text as a bracketed paste (`agentReview.agent.includeSelectedText`) |
+| Ctrl/Cmd+L | Done. Sends `@relative/path:L42-58` (format: `agentReview.agent.referenceFormat`) to the agent terminal; optionally also the selected text as a bracketed paste (`agentReview.agent.includeSelectedText`). In a new terminal the agent command runs through shell integration, and the text waits until the shell reports the command started (timeouts: 3 s for shell integration, then the command is typed and the text follows 1 s later; 5 s for the start report) |
 | Hide built-in AI chat | Done. `chat.disableAIFeatures` is already true in VSCodium (we also set it as a configuration default), and patch 93 hides the empty secondary side bar by default |
-| Dirty-buffer merge view | Not done. A notification with Compare (buffer vs. disk diff) / Revert to Disk replaces it for now |
+| Dirty-buffer merge view | Done. VS Code's 3-way merge editor (see the table above); no side is ever written over without the user completing the merge |
 
 ## Core patches (`patches/`)
 
@@ -87,15 +87,16 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 | Patch | Lines | Upstream files touched |
 |---|---|---|
 | `90-diff-preserve-short-matching-lines.patch` | +27 −1 (diff option + 2 unit tests) | `linesDiffComputer.ts`, `documentDiffProvider.ts`, `defaultLinesDiffComputer.ts`, the diff test file |
-| `91-chat-editing-review-hooks.patch` | +14 −5 | `chatEditingTextModelChangeService.ts` (C3 predicate gets the event; public `extendToSubwords` / `preserveShortMatchingLines`), `chatEditingEditorActions.ts` (C5 precondition) |
-| `92-agent-review.patch` | +701: new `contrib/agentReview/` (entry, service, contribution, CSS, 10 tests) + 1 import line in `workbench.common.main.ts` | `workbench.common.main.ts` (1 line) |
+| `91-chat-editing-review-hooks.patch` | +31 −21 | `chatEditingTextModelChangeService.ts` (C3 predicate gets the event; public `extendToSubwords` / `preserveShortMatchingLines`), `chatEditingEditorActions.ts` (C5 precondition; agent-review titles; 3 classes exported for tests), `chatEditingCodeEditorIntegration.ts` / `chatEditingNotebookEditorIntegration.ts` (diff title), `chatEditingServiceImpl.ts` (explorer tooltip) |
+| `92-agent-review.patch` | +1301 (incl. blank lines): new `contrib/agentReview/` (entry, service, contribution, save-attribution participants, 3-way merge, CSS, 18 tests in 3 files) + 1 import line in `workbench.common.main.ts` | `workbench.common.main.ts` (1 line) |
 | `93-default-layout.patch` | +2 −2 | Secondary side bar hidden by default (`workbench.contribution.ts`, `themeMainServiceImpl.ts`) |
 
 ## Engine additions
 
 - **E1 `setBaselineContent(file, content, { expectedBaseline? })`.** It sets the accepted baseline to exact content, as the editor computed it when one hunk was kept. It never touches the disk, `null` makes the file a pending creation, and it persists. There are 5 tests. Because the protocol passes the full baseline, hunk boundaries never have to match between core's diff and the engine's diff.
+- **`setBaselineContent(..., { restoreLineEndings: true })`.** VS Code's models keep one EOL per file, so the baseline a Keep sends back has lost a mixed CRLF/LF file's per-line endings. With this option each line takes its ending from the matching line on disk, else in the old baseline. Likewise `reportUserSave` attributes a save that VS Code wrote back with one EOL against the EOL-converted disk and baseline: the conversion folds in, and agent lines aren't mistaken for user rewrites (before, the edit log failed to replay and the agent's hunks were folded in).
 - **E2 was not needed.** A hunk Undo is a normal buffer edit that core saves. The engine then sees disk == baseline in that region; with unsaved edits, the edit log attributes the restore as user edits overlapping an agent hunk, which leaves the baseline alone. Both paths have tests.
-- No other engine changes. The engine's `isFresh` reads the disk between `reportUserSave` and the actual write, which made the save look external. The extension works around this by not querying the engine about a file while its save is in flight (test included). See *Remaining work*.
+- **Saves in flight.** Between `reportUserSave` and the editor's write, the disk still has the old content. The engine now remembers the reported save: while the file is exactly as it was when the save was reported (same content and stat, within 10 s), freshness checks, `getFileChange` and `acceptFile` use the saved content instead of calling the old disk an external change. A watcher event for the path, any other disk content, or the timeout ends it. The extension's workaround (not querying the engine about a file while its save was in flight) is gone.
 
 ## Decisions I made
 
@@ -113,22 +114,17 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 
 ## Remaining work (not in this PR)
 
-- **Engine (Phase 1 follow-up):** make `isFresh` aware of an in-flight `reportUserSave`, so hosts don't need the workaround.
-- **Formatter-on-save attribution:** the ext-host will-save participant may run after other participants (format on save), so formatter edits are attributed as user edits. Formatting inside an agent hunk stays pending; elsewhere it folds in.
-- **Merge view for dirty-buffer conflicts:** a notification with Compare / Revert to Disk stands in for it today.
 - **Symlinked workspace roots:** the engine normalizes real paths, but editor URIs can use the link path, so an entry might not match the open editor.
-- **Mixed line endings:** the baseline model normalizes EOLs, so a file with mixed CRLF/LF can show a spurious change on Keep.
 - **The macOS packaged build hasn't been run.** The workflow exists but wasn't triggered, because macOS minutes bill at 10x on private repos (see CI).
-- **Agent terminal race:** Ctrl+L right after the terminal is created can type the reference before the agent command has started, so it lands at the shell prompt. Wait for the command to start, or send only to an existing terminal.
 - **Not in the MVP:** a proposed API instead of commands, icons, signing, installers, and auto-update.
 
 ## Tests
 
 | Suite | Count | Command |
 |---|---|---|
-| Engine (vitest) | 144 (11 files, incl. 5 for E1) | `npm test -w @editor/engine` |
-| Extension integration (vitest, real engine on temp dirs, fake core) | 16 | `npm test -w agent-review` |
-| Core `contrib/agentReview` (Electron) | 10 | `fork/scripts/test-core.sh` |
+| Engine (vitest) | 160 (13 files) | `npm test -w @editor/engine` |
+| Extension integration (vitest, real engine on temp dirs, fake core / fake terminal) | 27 | `npm test -w agent-review` |
+| Core `contrib/agentReview` (Electron) | 18 | `fork/scripts/test-core.sh` |
 | Upstream chat-editing regression (Electron) | 49 | `fork/scripts/test-core.sh` |
 | Upstream diff + fixtures (node, incl. 2 new) | 125 | `fork/scripts/test-core.sh` |
 | Core typecheck of the patched tree (tsgo) | 0 errors | `npm run typecheck-client` (CI `patches` job) |

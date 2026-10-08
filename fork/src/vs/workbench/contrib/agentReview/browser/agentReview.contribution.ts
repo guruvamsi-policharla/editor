@@ -5,8 +5,10 @@
 
 // Agent review wiring. The built-in agent-review extension (which hosts the review engine) talks to
 // this contribution through internal commands, so no extension-host protocol changes are needed:
-//   extension -> core: `_agentReview.setBaseline(uri, baselineText, kind)`, `_agentReview.remove(uri)`, `_agentReview.clear()`
-//   core -> extension: `agentReview.ext.onDidHunkAction({ uri, kind, baseline? })`
+//   extension -> core: `_agentReview.setBaseline(uri, baselineText, kind)`, `_agentReview.remove(uri)`, `_agentReview.clear()`,
+//                      `_agentReview.openMerge(uri, baseText)` (agent write vs. unsaved edits, see agentReviewMerge.ts)
+//   core -> extension: `agentReview.ext.onDidHunkAction({ uri, kind, baseline? })`,
+//                      `agentReview.ext.onWillWrite({ uri, userVersion, version })` (see agentReviewSaveParticipant.ts)
 // A typed proposed API can replace the commands later.
 
 import './media/agentReview.css';
@@ -24,6 +26,7 @@ import { ILogService } from '../../../../platform/log/common/log.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { AgentReviewKind } from './agentReviewEntry.js';
+import { AgentReviewSaveParticipants } from './agentReviewSaveParticipant.js';
 import { AgentReviewService, IAgentReviewService } from './agentReviewService.js';
 
 registerSingleton(IAgentReviewService, AgentReviewService, InstantiationType.Delayed);
@@ -43,6 +46,10 @@ CommandsRegistry.registerCommand('_agentReview.clear', (accessor: ServicesAccess
 	accessor.get(IAgentReviewService).clear();
 });
 
+CommandsRegistry.registerCommand('_agentReview.openMerge', (accessor: ServicesAccessor, uri: UriComponents, base: string): Promise<boolean> => {
+	return accessor.get(IAgentReviewService).openMerge(URI.revive(uri), base);
+});
+
 class AgentReviewBridge extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.agentReviewBridge';
 	constructor(
@@ -58,6 +65,9 @@ class AgentReviewBridge extends Disposable implements IWorkbenchContribution {
 	}
 }
 registerWorkbenchContribution2(AgentReviewBridge.ID, AgentReviewBridge, WorkbenchPhase.AfterRestored);
+
+// Tells the extension which buffer edits of a save were made by save participants (formatters), not the user.
+registerWorkbenchContribution2(AgentReviewSaveParticipants.ID, AgentReviewSaveParticipants, WorkbenchPhase.BlockRestore);
 
 /**
  * Keeps `agentReview.isActive` in sync with the active editor, and marks code editors that show a

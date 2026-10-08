@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MultiRootReview, type TrackedEdit } from '@editor/engine';
 import { ReviewController, type CoreBridge, type InlineKind } from '../src/controller';
+import { EditLogs } from '../src/editLog';
 
 class FakeCore implements CoreBridge {
   readonly shown = new Map<string, { baseline: string; kind: InlineKind }>();
@@ -106,6 +107,25 @@ describe('ReviewController', () => {
     expect(ctl.pendingFiles).toEqual([]);
   });
 
+  it('Keep on a file with mixed CRLF/LF line endings leaves nothing spurious pending', async () => {
+    fs.writeFileSync(path.join(root, 'mixed.txt'), 'one\r\ntwo\nthree\r\nfour\n');
+    await open();
+    const abs = await agentWrite('mixed.txt', 'one\r\nTWO\nthree\r\nfour\nfive\r\n');
+    const calls = core.calls.length;
+    // The core UI's models normalize line endings: the baseline it reports after keeping the TWO hunk uses one EOL.
+    await ctl.onReviewAction({ kind: 'accepted', path: abs, baseline: 'one\nTWO\nthree\nfour\n' });
+    await ctl.idle();
+    expect(await ctl.baselineText(abs)).toBe('one\r\nTWO\nthree\r\nfour\n'); // each line keeps its own ending
+    expect(await ctl.lineCounts(ctl.pendingFiles[0]!)).toEqual({ added: 1, removed: 0 }); // only "five"
+    expect(core.calls.length).toBe(calls); // an EOL-only difference is no reason to push again
+    // Keeping the last hunk leaves nothing pending.
+    await ctl.onReviewAction({ kind: 'accepted', path: abs, baseline: 'one\nTWO\nthree\nfour\nfive\n' });
+    await ctl.idle();
+    expect(ctl.pendingFiles).toEqual([]);
+    expect(core.shown.has(abs)).toBe(false);
+    expect(read(abs)).toBe('one\r\nTWO\nthree\r\nfour\nfive\r\n'); // the file is untouched
+  });
+
   it('Undo on a hunk: the buffer restore is saved like a user save and leaves the baseline alone', async () => {
     await open();
     const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\nDiscussion.\n');
@@ -145,6 +165,31 @@ describe('ReviewController', () => {
     expect(core.shown.get(abs)?.baseline).toBe('Intro.\nMethods.\nResults.\n');
   });
 
+  it('agent write under unsaved edits: the stale save is not attributed; the merged result keeps agent lines pending', async () => {
+    await open();
+    const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\n');
+    dirty.add(abs); // the user types "Intro!" in the buffer...
+    const theirs = 'Intro.\nNew methods.\nResults.\nAgent conclusion.\n';
+    await agentWrite('paper.tex', theirs); // ...and the agent writes again
+    expect(conflicts).toEqual([abs]);
+    expect(ctl.hasConflict(abs)).toBe(true);
+
+    // Saving the stale buffer: the editor refuses ("file is newer"); nothing reaches the engine.
+    await ctl.onWillSave(abs, 'Intro!\nNew methods.\nResults.\n', [{ offset: 5, length: 1, text: '!', origin: 'user' }]);
+    expect(await ctl.baselineText(abs)).toBe('Intro.\nMethods.\nResults.\n');
+    expect(read(abs)).toBe(theirs);
+
+    // Merge: core reloads the buffer from disk (clean), then the merge editor writes the auto-merge into it.
+    dirty.delete(abs);
+    await ctl.onBufferSettled(abs);
+    expect(ctl.hasConflict(abs)).toBe(false);
+    dirty.add(abs);
+    // Completing the merge saves the result; the edit log is held, so attribution diffs against the disk.
+    await userSave(abs, 'Intro!\nNew methods.\nResults.\nAgent conclusion.\n', undefined);
+    expect(await ctl.baselineText(abs)).toBe('Intro!\nMethods.\nResults.\n'); // only the user's line folded in
+    expect(await ctl.lineCounts(ctl.pendingFiles[0]!)).toEqual({ added: 2, removed: 1 }); // the agent's work is still pending
+  });
+
   it('a save in flight is not an external change, even if the list asks for line counts before the write', async () => {
     await open();
     const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\n');
@@ -162,6 +207,44 @@ describe('ReviewController', () => {
     expect(conflicts).toEqual([]);
     expect(await ctl.baselineText(abs)).toBe('Intro!\nMethods.\nResults.\n');
     expect(core.shown.get(abs)?.baseline).toBe('Intro!\nMethods.\nResults.\n');
+  });
+
+  it('format on save: formatter edits stay pending inside agent hunks and fold in elsewhere', async () => {
+    fs.writeFileSync(path.join(root, 'conf.ini'), 'a=1\nb=2\nc=3\n');
+    await open();
+    const abs = await agentWrite('conf.ini', 'a=1\nb=20\nc=3\nd=4\n');
+    // The buffer, its edit log, and the document version, as the extension tracks them.
+    const logs = new EditLogs();
+    const key = 'file://' + abs;
+    logs.markClean(key);
+    let text = read(abs);
+    let version = 1;
+    const change = (from: string, to: string) => {
+      const offset = text.indexOf(from);
+      text = text.slice(0, offset) + to + text.slice(offset + from.length);
+      logs.onChange(key, [{ rangeOffset: offset, rangeLength: from.length, text: to }], true, ++version);
+    };
+    change('a=1', 'a=10'); // the user types
+    const userVersion = version; // core: save participants start here
+    for (const [from, to] of [['a=10', 'a = 10'], ['b=20', 'b = 20'], ['c=3', 'c = 3'], ['d=4', 'd = 4']]) change(from!, to!); // format on save
+    dirty.add(abs);
+    await userSave(abs, text, [...logs.get(key, userVersion)!]);
+    expect(read(abs)).toBe('a = 10\nb = 20\nc = 3\nd = 4\n');
+    expect(await ctl.baselineText(abs)).toBe('a = 10\nb=2\nc = 3\n');
+    expect(core.shown.get(abs)?.baseline).toBe('a = 10\nb=2\nc = 3\n');
+    expect(await ctl.lineCounts(ctl.pendingFiles[0]!)).toEqual({ added: 2, removed: 1 }); // b = 20 and d = 4: still the agent's
+  });
+
+  it('without the save-participant version, the same save counts the formatter as the user (stock VS Code)', async () => {
+    fs.writeFileSync(path.join(root, 'conf.ini'), 'a=1\nb=2\n');
+    await open();
+    const abs = await agentWrite('conf.ini', 'a=1\nb=20\n');
+    const logs = new EditLogs();
+    logs.markClean('k');
+    logs.onChange('k', [{ rangeOffset: 4, rangeLength: 4, text: 'b = 20' }], true, 2);
+    dirty.add(abs);
+    await userSave(abs, 'a=1\nb = 20\n', [...logs.get('k')!]);
+    expect(ctl.pendingFiles).toEqual([]); // the agent line was "rewritten by the user": folded
   });
 
   it('created files show with an empty baseline; Undo deletes them', async () => {

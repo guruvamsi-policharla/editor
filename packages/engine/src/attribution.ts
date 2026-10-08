@@ -229,11 +229,23 @@ export function foldUserSave(baseline: readonly string[], disk: readonly string[
     let j = i;
     while (j < S.length && S[j]!.src < 0) j++;
     const nextD = j < S.length ? S[j]!.src : nD;
-    // Agent deletions sitting before or inside the gap come first; the one right after it, last.
-    emitDeletions(p);
-    for (let q = p + 1; q < nextD; q++) emitDeletions(q);
-    handleGap(p, nextD, S.slice(i, j));
-    if (nextD > p) emitDeletions(nextD);
+    const gap = S.slice(i, j);
+    if (gap.length > 0 && gap.length === nextD - p && gap.some((l) => l.origin === 'formatter')) {
+      // A line-for-line rewrite that a formatter took part in (format on save touches runs of adjacent lines,
+      // often next to or across agent hunks): pair each new line with the disk line it replaced and decide per
+      // line. A rewritten agent line stays pending unless the user wrote it; any other line folds in.
+      for (let k = 0; k < gap.length; k++) {
+        emitDeletions(p + k);
+        if (dCommon[p + k] !== -1 || gap[k]!.origin === 'user') out.push(gap[k]!.text);
+      }
+      emitDeletions(nextD);
+    } else {
+      // Agent deletions sitting before or inside the gap come first; the one right after it, last.
+      emitDeletions(p);
+      for (let q = p + 1; q < nextD; q++) emitDeletions(q);
+      handleGap(p, nextD, gap);
+      if (nextD > p) emitDeletions(nextD);
+    }
     if (j >= S.length) break;
     if (dCommon[nextD] !== -1) out.push(disk[nextD]!); // common line: stays in the baseline
     // agent-added and untouched: not in the baseline, so it stays pending
