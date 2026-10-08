@@ -56,7 +56,8 @@ Multi-root workspaces: `MultiRootReview.open({ roots, storageBase })` makes one 
 | Delete + create, identical content | one rename unit; reject moves it back |
 | Binary (NUL byte or invalid UTF-8) or larger than 1 MiB | file-level accept/reject only |
 | `git add` (index-only change) | accepts pending changes in the staged files only (with `git add -p`, only the hunks the index agrees with) |
-| HEAD moves (commit, checkout, pull, merge, rebase, reset) or `refs/stash` moves | accepts everything workspace-wide |
+| HEAD moves (commit, checkout, pull, merge, rebase, reset) | accepts everything workspace-wide |
+| `git stash` / `git stash pop` (only `refs/stash` moves) | accepts nothing: plain disk changes, so pending changes come back with pop |
 | Editor closed while the agent edits | changes are pending on the next open |
 | Ignored | `.gitignore` (nested), `.git/info/exclude`, defaults (`node_modules/`, `dist/`, `build/`, `out/`, `target/`, `.next/`, `__pycache__/`, `coverage/`, LaTeX aux files, and `X.pdf` only when `X.tex` sits next to it), plus user patterns (highest precedence, `!` re-includes) |
 
