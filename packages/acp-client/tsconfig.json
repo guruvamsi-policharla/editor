@@ -18,7 +18,8 @@
     "declaration": true,
     "sourceMap": true,
     "outDir": "dist",
-    "rootDir": "."
+    "rootDir": "..",
+    "paths": { "@editor/engine": ["../engine/src/index.ts"] }
   },
   "include": ["src", "test", "vitest.config.ts"]
 }
