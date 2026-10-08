@@ -575,6 +575,7 @@ export class HarnessChat implements vscode.Disposable {
 		});
 		if (item) {
 			item.status = vscode.ChatSessionStatus.InProgress;
+			this.controller.items.add(item);
 		}
 		try {
 			const { recovery } = await session.ensureLive();
@@ -660,6 +661,8 @@ export class HarnessChat implements vscode.Disposable {
 			if (item) {
 				item.timing = { ...item.timing, created: item.timing?.created ?? Date.now(), lastRequestEnded: Date.now() };
 				item.status = vscode.ChatSessionStatus.Completed;
+				// Re-adding is what tells core's sessions list that the item changed.
+				this.controller.items.add(item);
 			}
 			this.saveChat(key, session);
 		}
@@ -669,8 +672,9 @@ export class HarnessChat implements vscode.Disposable {
 	private attach(key: string, session: AcpSession, item: vscode.ChatSessionItem | undefined): void {
 		this.sessions.set(key, session);
 		session.onChange(c => {
-			if (c.kind === 'info' && c.title && item) {
+			if (c.kind === 'info' && c.title && item && item.label !== c.title) {
 				item.label = c.title;
+				this.controller.items.add(item);
 			}
 			if ((c.kind === 'config' || c.kind === 'mode') && !session.replaying) {
 				this.remember(session);
