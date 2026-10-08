@@ -2,7 +2,7 @@
   "name": "@editor/acp-client",
   "version": "0.0.1",
   "private": true,
-  "description": "Editor-independent ACP client (spike, phase A0): launch an ACP adapter without fs/terminal client capabilities and talk to it.",
+  "description": "Editor-independent ACP client: adapter process supervision, session reducer, permission broker, harness profiles, pinned adapter installer. No fs/terminal client capabilities.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -13,7 +13,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "adapters"
   ],
   "engines": {
     "node": ">=22.12"

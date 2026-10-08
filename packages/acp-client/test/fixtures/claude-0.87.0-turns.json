@@ -1,0 +1,1333 @@
+{
+ "_note": "session/update payloads of one claude-agent-acp 0.87.0 contract run (edit, permission-allowed Bash, cancelled Bash). Paths scrubbed to /work.",
+ "updates": [
+  {
+   "availableCommands": [
+    {
+     "name": "deep-research",
+     "description": "Deep research harness \u2014 fan-out web searches, fetch sources,",
+     "input": null
+    },
+    {
+     "name": "design",
+     "description": "Grant or revoke Claude agent access to your Design projects",
+     "input": {
+      "hint": "consent | revoke"
+     }
+    },
+    {
+     "name": "design-sync",
+     "description": "Push a React design system to claude.ai/design. This runs a ",
+     "input": {
+      "hint": "[<project hint, e.g. \"Acme DS\">]"
+     }
+    },
+    {
+     "name": "dataviz",
+     "description": "Use this skill whenever you are about to create ANY chart, g",
+     "input": null
+    },
+    {
+     "name": "update-config",
+     "description": "Use this skill to configure the Claude Code harness via sett",
+     "input": null
+    },
+    {
+     "name": "verify",
+     "description": "Verify that a code change actually does what it's supposed t",
+     "input": null
+    },
+    {
+     "name": "debug",
+     "description": "Enable debug logging for this session and help diagnose issu",
+     "input": {
+      "hint": "[issue description]"
+     }
+    },
+    {
+     "name": "code-review",
+     "description": "Review the current diff, or a PR number/branch/path target, ",
+     "input": {
+      "hint": "[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [<pr#>|<branch>|<path>] [--max-findings <n>|all]"
+     }
+    },
+    {
+     "name": "simplify",
+     "description": "Review the changed code for reuse, simplification, efficienc",
+     "input": {
+      "hint": "[<target>]"
+     }
+    },
+    {
+     "name": "batch",
+     "description": "Research and plan a large-scale change, then execute it in p",
+     "input": {
+      "hint": "<instruction>"
+     }
+    },
+    {
+     "name": "fewer-permission-prompts",
+     "description": "Scan your transcripts for common read-only Bash and MCP tool",
+     "input": null
+    },
+    {
+     "name": "doctor",
+     "description": "Health-check the user's Claude Code setup and fix issues: di",
+     "input": {
+      "hint": "[prompt-audit [<path>]]"
+     }
+    },
+    {
+     "name": "loop",
+     "description": "Run a prompt or slash command on a recurring interval (e.g. ",
+     "input": {
+      "hint": "[interval] [prompt]"
+     }
+    },
+    {
+     "name": "schedule",
+     "description": "Create, update, list, or run scheduled cloud agents (routine",
+     "input": null
+    },
+    {
+     "name": "claude-api",
+     "description": "Reference for the Claude API / Anthropic SDK \u2014 model ids, pr",
+     "input": null
+    },
+    {
+     "name": "workflow-authoring",
+     "description": "Reference for writing a Workflow tool script (script API and",
+     "input": null
+    },
+    {
+     "name": "run",
+     "description": "Launch and drive this project's app to see a change working.",
+     "input": null
+    },
+    {
+     "name": "run-skill-generator",
+     "description": "Author or improve the run-<unit> skill - a per-project skill",
+     "input": null
+    },
+    {
+     "name": "plugin-authoring",
+     "description": "Make a mod: a live pane, band, status line, toast or hook in",
+     "input": null
+    },
+    {
+     "name": "advisor",
+     "description": "Let Claude consult a stronger model at key moments",
+     "input": {
+      "hint": "[fable|opus|sonnet|off]"
+     }
+    },
+    {
+     "name": "agents",
+     "description": "(removed) Ask Claude to create/manage subagents, or edit .cl",
+     "input": null
+    },
+    {
+     "name": "auto-mode-setup",
+     "description": "Teach auto mode about your environment, plus optional rule t",
+     "input": {
+      "hint": "[--request-id <uuid>] (--wizard posture=\u2026 scope=\u2026 depth=\u2026 --propose | --expect-sha256 <64-hex> --apply-file <path>)"
+     }
+    },
+    {
+     "name": "autocompact",
+     "description": "Configure the auto-compact window size",
+     "input": {
+      "hint": "[auto|<tokens>]"
+     }
+    },
+    {
+     "name": "color",
+     "description": "Set the prompt bar color for this session",
+     "input": {
+      "hint": "[red|blue|green|yellow|purple|orange|pink|cyan|default]"
+     }
+    },
+    {
+     "name": "compact",
+     "description": "Free up context by summarizing the conversation so far",
+     "input": {
+      "hint": "<optional custom summarization instructions>"
+     }
+    },
+    {
+     "name": "config",
+     "description": "Set a setting by key",
+     "input": {
+      "hint": "key=value"
+     }
+    },
+    {
+     "name": "output-style",
+     "description": "List output styles or switch to one",
+     "input": {
+      "hint": "[style]"
+     }
+    },
+    {
+     "name": "context",
+     "description": "Show current context usage",
+     "input": null
+    },
+    {
+     "name": "effort",
+     "description": "Set effort level for model usage",
+     "input": {
+      "hint": "<low|medium|high|xhigh|max|auto|ultracode [on|off]>"
+     }
+    },
+    {
+     "name": "fast",
+     "description": "Toggle fast mode (Opus 5.5)",
+     "input": {
+      "hint": "[on|off]"
+     }
+    },
+    {
+     "name": "focus",
+     "description": "Toggle focus view: just your prompt, summary, and response",
+     "input": {
+      "hint": "[on|off]"
+     }
+    },
+    {
+     "name": "heapdump",
+     "description": "Dump the JS heap to the Desktop; on Linux with no Desktop fo",
+     "input": null
+    },
+    {
+     "name": "init",
+     "description": "Initialize a new CLAUDE.md file with codebase documentation",
+     "input": null
+    },
+    {
+     "name": "import",
+     "description": "Import config from another AI coding agent",
+     "input": null
+    },
+    {
+     "name": "model",
+     "description": "Set the AI model for Claude Code",
+     "input": {
+      "hint": "<model>"
+     }
+    },
+    {
+     "name": "__remote-workflow",
+     "description": "Run the workflow script delivered in this session environmen",
+     "input": null
+    },
+    {
+     "name": "workflow-launch-exec",
+     "description": "Execute a server-launched workflow handoff (workflow_launch ",
+     "input": null
+    },
+    {
+     "name": "reload-plugins",
+     "description": "Activate pending plugin changes in the current session",
+     "input": {
+      "hint": "[--force]"
+     }
+    },
+    {
+     "name": "reload-skills",
+     "description": "Pick up skills added or changed on disk during this session",
+     "input": null
+    },
+    {
+     "name": "rename",
+     "description": "Rename the current conversation",
+     "input": {
+      "hint": "[name]"
+     }
+    },
+    {
+     "name": "ultrareview",
+     "description": "Start a cloud agent that finds and verifies bugs in your bra",
+     "input": null
+    },
+    {
+     "name": "security-review",
+     "description": "Complete a security review of the pending changes on the cur",
+     "input": null
+    },
+    {
+     "name": "usage-credits",
+     "description": "Configure usage credits or request them from your admin when",
+     "input": null
+    },
+    {
+     "name": "extra-usage",
+     "description": "Renamed to /usage-credits",
+     "input": null
+    },
+    {
+     "name": "usage",
+     "description": "Show session cost, plan usage, and what's contributing to yo",
+     "input": null
+    },
+    {
+     "name": "insights",
+     "description": "Generate a report analyzing your Claude Code sessions",
+     "input": null
+    },
+    {
+     "name": "recap",
+     "description": "Generate a one-line session recap now",
+     "input": null
+    },
+    {
+     "name": "skill-doctor",
+     "description": "Show which loaded skills are unused and costing context",
+     "input": null
+    },
+    {
+     "name": "goal",
+     "description": "Set a goal \u2014 keep working until the condition is met",
+     "input": null
+    },
+    {
+     "name": "design-consent",
+     "description": "Grant Claude agent access to your Design projects",
+     "input": null
+    },
+    {
+     "name": "design-revoke",
+     "description": "Revoke Claude agent access to your Design projects",
+     "input": null
+    },
+    {
+     "name": "list-agents",
+     "description": "List subagents, teammates, and other Claude sessions you can",
+     "input": null
+    },
+    {
+     "name": "team-onboarding",
+     "description": "Help teammates ramp on Claude Code with a guide from your us",
+     "input": null
+    },
+    {
+     "name": "built-in-browser",
+     "description": "Read this skill before the first step that uses the built-in",
+     "input": null
+    },
+    {
+     "name": "chrome-browser",
+     "description": "Read this skill before the first step that uses Claude in Ch",
+     "input": null
+    },
+    {
+     "name": "computer-use",
+     "description": "Read this skill before the first step of any request to do s",
+     "input": null
+    },
+    {
+     "name": "anthropic-skills:deep-research",
+     "description": "Use this skill when the user's prompt requires (1) researchi",
+     "input": null
+    },
+    {
+     "name": "docs",
+     "description": "docs (editable docs people share and comment on; the default",
+     "input": null
+    },
+    {
+     "name": "docx",
+     "description": "Use this skill whenever the user wants to create, read, edit",
+     "input": null
+    },
+    {
+     "name": "google-workspace",
+     "description": "Read this before the first Google Drive, Docs, Sheets or Sli",
+     "input": null
+    },
+    {
+     "name": "import-memory",
+     "description": "Import a memory export from another AI assistant into Claude",
+     "input": null
+    },
+    {
+     "name": "morning",
+     "description": "Render the user's morning brief as a styled HTML artifact, o",
+     "input": null
+    },
+    {
+     "name": "pdf",
+     "description": "Use this skill whenever the user wants to do anything with P",
+     "input": null
+    },
+    {
+     "name": "pptx",
+     "description": "Use this skill any time a .pptx or .potx file is involved in",
+     "input": null
+    },
+    {
+     "name": "skill-creator",
+     "description": "Create new skills, modify and improve existing skills, and m",
+     "input": null
+    },
+    {
+     "name": "xlsx",
+     "description": "Use this skill any time a spreadsheet file is the primary in",
+     "input": null
+    },
+    {
+     "name": "mcp",
+     "description": "Show the MCP servers and their status, or reconnect, enable,",
+     "input": {
+      "hint": "[reconnect|enable|disable [<server>|all]]"
+     }
+    }
+   ],
+   "sessionUpdate": "available_commands_update"
+  },
+  {
+   "currentModeId": "acceptEdits",
+   "sessionUpdate": "current_mode_update"
+  },
+  {
+   "availableCommands": [
+    {
+     "name": "deep-research",
+     "description": "Deep research harness \u2014 fan-out web searches, fetch sources,",
+     "input": null
+    },
+    {
+     "name": "design",
+     "description": "Grant or revoke Claude agent access to your Design projects",
+     "input": {
+      "hint": "consent | revoke"
+     }
+    },
+    {
+     "name": "design-sync",
+     "description": "Push a React design system to claude.ai/design. This runs a ",
+     "input": {
+      "hint": "[<project hint, e.g. \"Acme DS\">]"
+     }
+    },
+    {
+     "name": "dataviz",
+     "description": "Use this skill whenever you are about to create ANY chart, g",
+     "input": null
+    },
+    {
+     "name": "update-config",
+     "description": "Use this skill to configure the Claude Code harness via sett",
+     "input": null
+    },
+    {
+     "name": "verify",
+     "description": "Verify that a code change actually does what it's supposed t",
+     "input": null
+    },
+    {
+     "name": "debug",
+     "description": "Enable debug logging for this session and help diagnose issu",
+     "input": {
+      "hint": "[issue description]"
+     }
+    },
+    {
+     "name": "code-review",
+     "description": "Review the current diff, or a PR number/branch/path target, ",
+     "input": {
+      "hint": "[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [<pr#>|<branch>|<path>] [--max-findings <n>|all]"
+     }
+    },
+    {
+     "name": "simplify",
+     "description": "Review the changed code for reuse, simplification, efficienc",
+     "input": {
+      "hint": "[<target>]"
+     }
+    },
+    {
+     "name": "batch",
+     "description": "Research and plan a large-scale change, then execute it in p",
+     "input": {
+      "hint": "<instruction>"
+     }
+    },
+    {
+     "name": "fewer-permission-prompts",
+     "description": "Scan your transcripts for common read-only Bash and MCP tool",
+     "input": null
+    },
+    {
+     "name": "loop",
+     "description": "Run a prompt or slash command on a recurring interval (e.g. ",
+     "input": {
+      "hint": "[interval] [prompt]"
+     }
+    },
+    {
+     "name": "schedule",
+     "description": "Create, update, list, or run scheduled cloud agents (routine",
+     "input": null
+    },
+    {
+     "name": "claude-api",
+     "description": "Reference for the Claude API / Anthropic SDK \u2014 model ids, pr",
+     "input": null
+    },
+    {
+     "name": "workflow-authoring",
+     "description": "Reference for writing a Workflow tool script (script API and",
+     "input": null
+    },
+    {
+     "name": "run",
+     "description": "Launch and drive this project's app to see a change working.",
+     "input": null
+    },
+    {
+     "name": "run-skill-generator",
+     "description": "Author or improve the run-<unit> skill - a per-project skill",
+     "input": null
+    },
+    {
+     "name": "plugin-authoring",
+     "description": "Make a mod: a live pane, band, status line, toast or hook in",
+     "input": null
+    },
+    {
+     "name": "advisor",
+     "description": "Let Claude consult a stronger model at key moments",
+     "input": {
+      "hint": "[fable|opus|sonnet|off]"
+     }
+    },
+    {
+     "name": "agents",
+     "description": "(removed) Ask Claude to create/manage subagents, or edit .cl",
+     "input": null
+    },
+    {
+     "name": "auto-mode-setup",
+     "description": "Teach auto mode about your environment, plus optional rule t",
+     "input": {
+      "hint": "[--request-id <uuid>] (--wizard posture=\u2026 scope=\u2026 depth=\u2026 --propose | --expect-sha256 <64-hex> --apply-file <path>)"
+     }
+    },
+    {
+     "name": "autocompact",
+     "description": "Configure the auto-compact window size",
+     "input": {
+      "hint": "[auto|<tokens>]"
+     }
+    },
+    {
+     "name": "compact",
+     "description": "Free up context by summarizing the conversation so far",
+     "input": {
+      "hint": "<optional custom summarization instructions>"
+     }
+    },
+    {
+     "name": "config",
+     "description": "Set a setting by key",
+     "input": {
+      "hint": "key=value"
+     }
+    },
+    {
+     "name": "output-style",
+     "description": "List output styles or switch to one",
+     "input": {
+      "hint": "[style]"
+     }
+    },
+    {
+     "name": "context",
+     "description": "Show current context usage",
+     "input": null
+    },
+    {
+     "name": "effort",
+     "description": "Set effort level for model usage",
+     "input": {
+      "hint": "<low|medium|high|xhigh|max|auto|ultracode [on|off]>"
+     }
+    },
+    {
+     "name": "fast",
+     "description": "Toggle fast mode (Opus 5.5)",
+     "input": {
+      "hint": "[on|off]"
+     }
+    },
+    {
+     "name": "heapdump",
+     "description": "Dump the JS heap to the Desktop; on Linux with no Desktop fo",
+     "input": null
+    },
+    {
+     "name": "init",
+     "description": "Initialize a new CLAUDE.md file with codebase documentation",
+     "input": null
+    },
+    {
+     "name": "import",
+     "description": "Import config from another AI coding agent",
+     "input": null
+    },
+    {
+     "name": "model",
+     "description": "Set the AI model for Claude Code",
+     "input": {
+      "hint": "<model>"
+     }
+    },
+    {
+     "name": "__remote-workflow",
+     "description": "Run the workflow script delivered in this session environmen",
+     "input": null
+    },
+    {
+     "name": "workflow-launch-exec",
+     "description": "Execute a server-launched workflow handoff (workflow_launch ",
+     "input": null
+    },
+    {
+     "name": "reload-skills",
+     "description": "Pick up skills added or changed on disk during this session",
+     "input": null
+    },
+    {
+     "name": "rename",
+     "description": "Rename the current conversation",
+     "input": {
+      "hint": "[name]"
+     }
+    },
+    {
+     "name": "ultrareview",
+     "description": "Start a cloud agent that finds and verifies bugs in your bra",
+     "input": null
+    },
+    {
+     "name": "security-review",
+     "description": "Complete a security review of the pending changes on the cur",
+     "input": null
+    },
+    {
+     "name": "usage-credits",
+     "description": "Configure usage credits or request them from your admin when",
+     "input": null
+    },
+    {
+     "name": "extra-usage",
+     "description": "Renamed to /usage-credits",
+     "input": null
+    },
+    {
+     "name": "usage",
+     "description": "Show session cost, plan usage, and what's contributing to yo",
+     "input": null
+    },
+    {
+     "name": "insights",
+     "description": "Generate a report analyzing your Claude Code sessions",
+     "input": null
+    },
+    {
+     "name": "recap",
+     "description": "Generate a one-line session recap now",
+     "input": null
+    },
+    {
+     "name": "skill-doctor",
+     "description": "Show which loaded skills are unused and costing context",
+     "input": null
+    },
+    {
+     "name": "goal",
+     "description": "Set a goal \u2014 keep working until the condition is met",
+     "input": null
+    },
+    {
+     "name": "design-consent",
+     "description": "Grant Claude agent access to your Design projects",
+     "input": null
+    },
+    {
+     "name": "design-revoke",
+     "description": "Revoke Claude agent access to your Design projects",
+     "input": null
+    },
+    {
+     "name": "list-agents",
+     "description": "List subagents, teammates, and other Claude sessions you can",
+     "input": null
+    },
+    {
+     "name": "team-onboarding",
+     "description": "Help teammates ramp on Claude Code with a guide from your us",
+     "input": null
+    },
+    {
+     "name": "built-in-browser",
+     "description": "Read this skill before the first step that uses the built-in",
+     "input": null
+    },
+    {
+     "name": "chrome-browser",
+     "description": "Read this skill before the first step that uses Claude in Ch",
+     "input": null
+    },
+    {
+     "name": "computer-use",
+     "description": "Read this skill before the first step of any request to do s",
+     "input": null
+    },
+    {
+     "name": "anthropic-skills:deep-research",
+     "description": "Use this skill when the user's prompt requires (1) researchi",
+     "input": null
+    },
+    {
+     "name": "docs",
+     "description": "docs (editable docs people share and comment on; the default",
+     "input": null
+    },
+    {
+     "name": "docx",
+     "description": "Use this skill whenever the user wants to create, read, edit",
+     "input": null
+    },
+    {
+     "name": "google-workspace",
+     "description": "Read this before the first Google Drive, Docs, Sheets or Sli",
+     "input": null
+    },
+    {
+     "name": "import-memory",
+     "description": "Import a memory export from another AI assistant into Claude",
+     "input": null
+    },
+    {
+     "name": "morning",
+     "description": "Render the user's morning brief as a styled HTML artifact, o",
+     "input": null
+    },
+    {
+     "name": "pdf",
+     "description": "Use this skill whenever the user wants to do anything with P",
+     "input": null
+    },
+    {
+     "name": "pptx",
+     "description": "Use this skill any time a .pptx or .potx file is involved in",
+     "input": null
+    },
+    {
+     "name": "skill-creator",
+     "description": "Create new skills, modify and improve existing skills, and m",
+     "input": null
+    },
+    {
+     "name": "xlsx",
+     "description": "Use this skill any time a spreadsheet file is the primary in",
+     "input": null
+    },
+    {
+     "name": "mcp",
+     "description": "Show the MCP servers and their status, or reconnect, enable,",
+     "input": {
+      "hint": "[reconnect|enable|disable [<server>|all]]"
+     }
+    }
+   ],
+   "sessionUpdate": "available_commands_update"
+  },
+  {
+   "used": 19904,
+   "size": 1000000,
+   "_meta": {
+    "_claude/model": "claude-haiku-5-5"
+   },
+   "sessionUpdate": "usage_update"
+  },
+  {
+   "toolCallId": "toolu_019y2ug77M2ZiKpi82tCZYhK",
+   "title": "Read File",
+   "name": "Read",
+   "kind": "read",
+   "status": "pending",
+   "content": [],
+   "locations": [],
+   "rawInput": {},
+   "_meta": {
+    "claudeCode": {
+     "toolName": "Read"
+    }
+   },
+   "sessionUpdate": "tool_call"
+  },
+  {
+   "toolCallId": "toolu_019y2ug77M2ZiKpi82tCZYhK",
+   "title": "Read notes.txt",
+   "locations": [
+    {
+     "path": "/work/notes.txt",
+     "line": 1
+    }
+   ],
+   "rawInput": {
+    "file_path": "/work/notes.txt"
+   },
+   "_meta": {
+    "claudeCode": {
+     "toolName": "Read"
+    }
+   },
+   "sessionUpdate": "tool_call_update"
+  },
+  {
+   "used": 20050,
+   "size": 1000000,
+   "_meta": {
+    "_claude/model": "claude-haiku-5-5"
+   },
+   "sessionUpdate": "usage_update"
+  },
+  {
+   "toolCallId": "toolu_019y2ug77M2ZiKpi82tCZYhK",
+   "_meta": {
+    "claudeCode": {
+     "toolResponse": {
+      "type": "text",
+      "file": {
+       "filePath": "/work/notes.txt",
+       "content": "hello world\n",
+       "numLines": 2,
+       "startLine": 1,
+       "totalLines": 2
+      }
+     },
+     "toolName": "Read"
+    }
+   },
+   "sessionUpdate": "tool_call_update"
+  },
+  {
+   "toolCallId": "toolu_019y2ug77M2ZiKpi82tCZYhK",
+   "status": "completed",
+   "content": [
+    {
+     "content": {
+      "text": "```\n1\thello world\n```",
+      "type": "text"
+     },
+     "type": "content"
+    }
+   ],
+   "rawOutput": "1\thello world\n2\t",
+   "_meta": {
+    "claudeCode": {
+     "toolName": "Read"
+    }
+   },
+   "sessionUpdate": "tool_call_update"
+  },
+  {
+   "used": 21881,
+   "size": 1000000,
+   "_meta": {
+    "_claude/model": "claude-haiku-5-5"
+   },
+   "sessionUpdate": "usage_update"
+  },
+  {
+   "toolCallId": "toolu_01SrgoQSCYwK1Ba4Hvau7ZK1",
+   "title": "Edit",
+   "name": "Edit",
+   "kind": "edit",
+   "status": "pending",
+   "content": [],
+   "locations": [],
+   "rawInput": {},
+   "_meta": {
+    "claudeCode": {
+     "toolName": "Edit"
+    }
+   },
+   "sessionUpdate": "tool_call"
+  },
+  {
+   "toolCallId": "toolu_01SrgoQSCYwK1Ba4Hvau7ZK1",
+   "title": "Edit notes.txt",
+   "locations": [
+    {
+     "path": "/work/notes.txt"
+    }
+   ],
+   "rawInput": {
+    "file_path": "/work/notes.txt"
+   },
+   "_meta": {
+    "claudeCode": {
+     "toolName": "Edit"
+    }
+   },
+   "sessionUpdate": "tool_call_update"
+  },
+  {
+   "toolCallId": "toolu_01SrgoQSCYwK1Ba4Hvau7ZK1",
+   "rawInput": {
+    "file_path": "/work/notes.txt",
+    "old_string": "hello world"
+   },
+   "_meta": {
+    "claudeCode": {
+     "toolName": "Edit"
+    }
+   },
+   "sessionUpdate": "tool_call_update"
+  },
+  {
+   "toolCallId": "toolu_01SrgoQSCYwK1Ba4Hvau7ZK1",
+   "content": [
+    {
+     "path": "/work/notes.txt",
+     "oldText": "hello world",
+     "newText": "hello there",
+     "type": "diff"
+    }
+   ],
+   "rawInput": {
+    "replace_all": false,
+    "file_path": "/work/notes.txt",
+    "old_string": "hello world",
+    "new_string": "hello there"
+   },
+   "_meta": {
+    "claudeCode": {
+     "toolName": "Edit"
+    }
+   },
+   "sessionUpdate": "tool_call_update"
+  },
+  {
+   "used": 21985,
+   "size": 1000000,
+   "_meta": {
+    "_claude/model": "claude-haiku-5-5"
+   },
+   "sessionUpdate": "usage_update"
+  },
+  {
+   "toolCallId": "toolu_01SrgoQSCYwK1Ba4Hvau7ZK1",
+   "locations": [
+    {
+     "path": "/work/notes.txt",
+     "line": 1
+    }
+   ],
+   "_meta": {
+    "claudeCode": {
+     "toolResponse": {
+      "filePath": "/work/notes.txt",
+      "oldString": "hello world",
+      "newString": "hello there",
+      "originalFile": "hello world\n",
+      "structuredPatch": [
+       {
+        "oldStart": 1,
+        "oldLines": 1,
+        "newStart": 1,
+        "newLines": 1,
+        "lines": [
+         "-hello world",
+         "+hello there"
+        ]
+       }
+      ],
+      "userModified": false,
+      "replaceAll": false
+     },
+     "toolName": "Edit"
+    }
+   },
+   "sessionUpdate": "tool_call_update"
+  },
+  {
+   "toolCallId": "toolu_01SrgoQSCYwK1Ba4Hvau7ZK1",
+   "status": "completed",
+   "rawOutput": "The file /work/notes.txt has been updated successfully. (file state is current in your context \u2014 no need to Read it back)",
+   "_meta": {
+    "claudeCode": {
+     "toolName": "Edit"
+    }
+   },
+   "sessionUpdate": "tool_call_update"
+  },
+  {
+   "used": 22066,
+   "size": 1000000,
+   "_meta": {
+    "_claude/model": "claude-haiku-5-5"
+   },
+   "sessionUpdate": "usage_update"
+  },
+  {
+   "content": {
+    "text": "done",
+    "type": "text"
+   },
+   "messageId": "msg_011CfpWnazLDPLAXXKyFDdxg",
+   "sessionUpdate": "agent_message_chunk"
+  },
+  {
+   "used": 22067,
+   "size": 1000000,
+   "_meta": {
+    "_claude/model": "claude-haiku-5-5"
+   },
+   "sessionUpdate": "usage_update"
+  },
+  {
+   "used": 22067,
+   "size": 1000000,
+   "cost": {
+    "amount": 0.0030302700000000003,
+    "currency": "USD"
+   },
+   "_meta": {
+    "_claude/origin": {
+     "kind": "human"
+    },
+    "_claude/model": "claude-haiku-5-5"
+   },
+   "sessionUpdate": "usage_update"
+  },
+  {
+   "title": "Replace word in notes.txt",
+   "updatedAt": "2026-10-08T09:13:57.414Z",
+   "sessionUpdate": "session_info_update"
+  },
+  {
+   "used": 22163,
+   "size": 1000000,
+   "_meta": {
+    "_claude/model": "claude-haiku-5-5"
+   },
+   "sessionUpdate": "usage_update"
+  },
+  {
+   "toolCallId": "toolu_01EhpX5h26nDiiacPejzb2oX",
+   "title": "Terminal",
+   "name": "Bash",
+   "kind": "execute",
+   "status": "pending",
+   "content": [],
+   "rawInput": {},
+   "_meta": {
+    "claudeCode": {
+     "toolName": "Bash"
+    }
+   },
+   "sessionUpdate": "tool_call"
+  },
+  {
+   "toolCallId": "toolu_01EhpX5h26nDiiacPejzb2oX",
+   "title": "python3 -c \"open('ran.txt','w').write('x')\"",
+   "rawInput": {
+    "command": "python3 -c \"open('ran.txt','w').write('x')\""
+   },
+   "_meta": {
+    "claudeCode": {
+     "toolName": "Bash"
+    }
+   },
+   "sessionUpdate": "tool_call_update"
+  },
+  {
+   "toolCallId": "toolu_01EhpX5h26nDiiacPejzb2oX",
+   "content": [
+    {
+     "content": {
+      "text": "Write x into ran.txt via Python",
+      "type": "text"
+     },
+     "type": "content"
+    }
+   ],
+   "rawInput": {
+    "command": "python3 -c \"open('ran.txt','w').write('x')\"",
+    "description": "Write x into ran.txt via Python"
+   },
+   "_meta": {
+    "claudeCode": {
+     "toolName": "Bash"
+    }
+   },
+   "sessionUpdate": "tool_call_update"
+  },
+  {
+   "used": 22246,
+   "size": 1000000,
+   "_meta": {
+    "_claude/model": "claude-haiku-5-5"
+   },
+   "sessionUpdate": "usage_update"
+  },
+  {
+   "toolCallId": "toolu_01EhpX5h26nDiiacPejzb2oX",
+   "_meta": {
+    "claudeCode": {
+     "toolResponse": {
+      "stdout": "",
+      "stderr": "",
+      "interrupted": false,
+      "isImage": false,
+      "noOutputExpected": false
+     },
+     "toolName": "Bash"
+    }
+   },
+   "sessionUpdate": "tool_call_update"
+  },
+  {
+   "toolCallId": "toolu_01EhpX5h26nDiiacPejzb2oX",
+   "status": "completed",
+   "rawOutput": "(Bash completed with no output)",
+   "_meta": {
+    "claudeCode": {
+     "toolName": "Bash"
+    }
+   },
+   "sessionUpdate": "tool_call_update"
+  },
+  {
+   "used": 22288,
+   "size": 1000000,
+   "_meta": {
+    "_claude/model": "claude-haiku-5-5"
+   },
+   "sessionUpdate": "usage_update"
+  },
+  {
+   "content": {
+    "text": "done",
+    "type": "text"
+   },
+   "messageId": "msg_011CfpWngVyrMK6xAoNxWD3F",
+   "sessionUpdate": "agent_message_chunk"
+  },
+  {
+   "used": 22288,
+   "size": 1000000,
+   "cost": {
+    "amount": 0.0035679400000000003,
+    "currency": "USD"
+   },
+   "_meta": {
+    "_claude/origin": {
+     "kind": "human"
+    },
+    "_claude/model": "claude-haiku-5-5"
+   },
+   "sessionUpdate": "usage_update"
+  },
+  {
+   "used": 22376,
+   "size": 1000000,
+   "_meta": {
+    "_claude/model": "claude-haiku-5-5"
+   },
+   "sessionUpdate": "usage_update"
+  },
+  {
+   "toolCallId": "toolu_01GMkdx6Y9ASGpp53LwK7dZv",
+   "title": "Terminal",
+   "name": "Bash",
+   "kind": "execute",
+   "status": "pending",
+   "content": [],
+   "rawInput": {},
+   "_meta": {
+    "claudeCode": {
+     "toolName": "Bash"
+    }
+   },
+   "sessionUpdate": "tool_call"
+  },
+  {
+   "toolCallId": "toolu_01GMkdx6Y9ASGpp53LwK7dZv",
+   "title": "python3 -c \"open('late.txt','w').write('x')\"",
+   "rawInput": {
+    "command": "python3 -c \"open('late.txt','w').write('x')\""
+   },
+   "_meta": {
+    "claudeCode": {
+     "toolName": "Bash"
+    }
+   },
+   "sessionUpdate": "tool_call_update"
+  },
+  {
+   "toolCallId": "toolu_01GMkdx6Y9ASGpp53LwK7dZv",
+   "content": [
+    {
+     "content": {
+      "text": "Write x into late.txt via Python",
+      "type": "text"
+     },
+     "type": "content"
+    }
+   ],
+   "rawInput": {
+    "command": "python3 -c \"open('late.txt','w').write('x')\"",
+    "description": "Write x into late.txt via Python"
+   },
+   "_meta": {
+    "claudeCode": {
+     "toolName": "Bash"
+    }
+   },
+   "sessionUpdate": "tool_call_update"
+  },
+  {
+   "used": 22457,
+   "size": 1000000,
+   "_meta": {
+    "_claude/model": "claude-haiku-5-5"
+   },
+   "sessionUpdate": "usage_update"
+  },
+  {
+   "used": 22457,
+   "size": 1000000,
+   "cost": {
+    "amount": 0.0038544700000000005,
+    "currency": "USD"
+   },
+   "_meta": {
+    "_claude/origin": {
+     "kind": "human"
+    },
+    "_claude/model": "claude-haiku-5-5"
+   },
+   "sessionUpdate": "usage_update"
+  },
+  {
+   "used": 22671,
+   "size": 1000000,
+   "_meta": {
+    "_claude/model": "claude-haiku-5-5"
+   },
+   "sessionUpdate": "usage_update"
+  },
+  {
+   "content": {
+    "text": "1",
+    "type": "text"
+   },
+   "messageId": "msg_011CfpWnmVbuWt9bzmYYdpmP",
+   "sessionUpdate": "agent_message_chunk"
+  },
+  {
+   "used": 22671,
+   "size": 1000000,
+   "cost": {
+    "amount": 0.0038544700000000005,
+    "currency": "USD"
+   },
+   "_meta": {
+    "_claude/origin": {
+     "kind": "human"
+    },
+    "_claude/model": "claude-haiku-5-5"
+   },
+   "sessionUpdate": "usage_update"
+  }
+ ],
+ "permissionRequests": [
+  {
+   "sessionId": "s",
+   "toolCall": {
+    "toolCallId": "toolu_01EhpX5h26nDiiacPejzb2oX",
+    "kind": "execute",
+    "status": "pending",
+    "title": "python3 -c \"open('ran.txt','w').write('x')\"",
+    "name": "Bash",
+    "content": [
+     {
+      "content": {
+       "text": "Write x into ran.txt via Python",
+       "type": "text"
+      },
+      "type": "content"
+     }
+    ],
+    "rawInput": {
+     "command": "python3 -c \"open('ran.txt','w').write('x')\"",
+     "description": "Write x into ran.txt via Python"
+    }
+   },
+   "options": [
+    {
+     "optionId": "allow-once",
+     "name": "Yes",
+     "kind": "allow_once"
+    },
+    {
+     "optionId": "allow-with-updates",
+     "name": "Yes, and don't ask again for python3 -c \"open('ran.txt','w').write('x')\" commands",
+     "kind": "allow_always"
+    },
+    {
+     "optionId": "reject",
+     "name": "No",
+     "kind": "reject_once"
+    }
+   ]
+  },
+  {
+   "sessionId": "s",
+   "toolCall": {
+    "toolCallId": "toolu_01GMkdx6Y9ASGpp53LwK7dZv",
+    "kind": "execute",
+    "status": "pending",
+    "title": "python3 -c \"open('late.txt','w').write('x')\"",
+    "name": "Bash",
+    "content": [
+     {
+      "content": {
+       "text": "Write x into late.txt via Python",
+       "type": "text"
+      },
+      "type": "content"
+     }
+    ],
+    "rawInput": {
+     "command": "python3 -c \"open('late.txt','w').write('x')\"",
+     "description": "Write x into late.txt via Python"
+    }
+   },
+   "options": [
+    {
+     "optionId": "allow-once",
+     "name": "Yes",
+     "kind": "allow_once"
+    },
+    {
+     "optionId": "allow-with-updates",
+     "name": "Yes, and don't ask again for python3 -c \"open('late.txt','w').write('x')\" commands",
+     "kind": "allow_always"
+    },
+    {
+     "optionId": "reject",
+     "name": "No",
+     "kind": "reject_once"
+    }
+   ]
+  }
+ ]
+}

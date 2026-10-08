@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Build our built-in extensions (extensions/agent-review, bundled with the engine; optionally the
-# agent-chat spike) and copy them into a prepared VS Code tree under extensions/. VS Code's build packages
-# every extensions/*/package.json, so no gulp changes are needed. Re-run after changing an extension.
+# Build our built-in extensions (extensions/agent-review, bundled with the engine; extensions/agent-chat,
+# bundled with the ACP client) and copy them into a prepared VS Code tree under extensions/. VS Code's build
+# packages every extensions/*/package.json, so no gulp changes are needed. Re-run after changing an extension.
 #
 # Usage: [EXTENSIONS="agent-review agent-chat"] fork/scripts/install-extension.sh [VSCODE_DIR]
-# EXTENSIONS defaults to agent-review only: agent-chat (phase A0 spike) isn't shipped yet.
+# EXTENSIONS defaults to both.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 VSCODE_DIR="${1:-${XDG_CACHE_HOME:-$HOME/.cache}/editor-fork-build/vscodium/vscode}"
@@ -12,7 +12,7 @@ VSCODE_DIR="${1:-${XDG_CACHE_HOME:-$HOME/.cache}/editor-fork-build/vscodium/vsco
 cd "${REPO_ROOT}"
 [[ -d node_modules ]] || npm ci
 
-for NAME in ${EXTENSIONS:-agent-review}; do
+for NAME in ${EXTENSIONS:-agent-review agent-chat}; do
   EXT_SRC="${REPO_ROOT}/extensions/${NAME}"
   npm run build -w "${NAME}"
 
@@ -25,6 +25,8 @@ for NAME in ${EXTENSIONS:-agent-review}; do
   if [[ -f "${EXT_SRC}/package.nls.json" ]]; then cp "${EXT_SRC}/package.nls.json" "${DEST}/"; fi
   mkdir -p "${DEST}/dist"
   cp "${EXT_SRC}/dist/extension.js" "${DEST}/dist/"
+  # agent-chat: the pinned adapters' lockfiles for the first-use installer.
+  if [[ -d "${EXT_SRC}/dist/adapters" ]]; then cp -r "${EXT_SRC}/dist/adapters" "${DEST}/dist/"; fi
   if [[ -d "${EXT_SRC}/media" ]] && [[ -n "$(ls -A "${EXT_SRC}/media")" ]]; then cp -r "${EXT_SRC}/media" "${DEST}/"; fi
   echo "Installed built-in extension: ${DEST}"
 done

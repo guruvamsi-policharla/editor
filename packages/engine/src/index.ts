@@ -21,7 +21,7 @@ export { type Hunk, computeHunks, acceptHunks, rejectHunks, hunkRegion } from '.
 export { type InlineRange, type WordDiff, wordDiff, tokenize } from './diff/words.js';
 export { type Region, diffRegions } from './diff/myers.js';
 export { stagedRegions } from './staging.js';
-export { IgnoreRules, DEFAULT_IGNORE_PATTERNS, LATEX_ARTIFACT_PATTERNS, BUILD_DIR_PATTERNS, type IgnoreOptions } from './ignore.js';
+export { IgnoreRules, DEFAULT_IGNORE_PATTERNS, LATEX_ARTIFACT_PATTERNS, BUILD_DIR_PATTERNS, AGENT_STATE_PATTERNS, type IgnoreOptions } from './ignore.js';
 export { type FileSystem, type FileStat, type FileType, type DirEntry, NodeFileSystem, nodeFileSystem, MemoryFileSystem } from './fs.js';
 export { type GitObjectReader, type GitRepoInfo, type HeadState, gitCliObjectReader, parseIndex } from './git/repo.js';
 export { gitBlobId } from './store/objectStore.js';

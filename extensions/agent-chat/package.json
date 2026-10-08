@@ -1,7 +1,7 @@
 {
   "name": "agent-chat",
   "displayName": "Agent Chat",
-  "description": "Spike (phase A0): VS Code's native chat driven by ACP harnesses (Claude Code, Codex) through chat session providers.",
+  "description": "Chat with your agent harness (Claude Code, Codex) in VS Code's native chat, over ACP. The harness edits files itself; edits are reviewed inline with Keep/Undo.",
   "version": "0.0.1",
   "publisher": "editor",
   "private": true,
@@ -35,7 +35,7 @@
         "id": "agent-chat.default",
         "name": "agent",
         "fullName": "Agent",
-        "description": "Start a Claude Code or Codex session",
+        "description": "Chat with Claude Code or Codex",
         "isDefault": true,
         "modes": [
           "ask",
@@ -54,26 +54,65 @@
         "displayName": "Claude Code",
         "icon": "$(sparkle)",
         "welcomeTitle": "Claude Code",
-        "welcomeMessage": "Your Claude Code, over ACP. Edits show up as Keep/Undo in the editor.",
-        "inputPlaceholder": "Ask Claude Code",
+        "welcomeMessage": "Your own Claude Code. It edits files itself; every edit shows up inline for review with Keep/Undo. Commands ask first.",
+        "inputPlaceholder": "Ask Claude Code. @ to reference, / for commands",
         "order": 1,
         "canDelegate": true,
         "capabilities": {
           "supportsFileAttachments": true
         },
-        "requiresCustomModels": true
+        "requiresCustomModels": true,
+        "commands": [
+          {
+            "name": "compact",
+            "description": "Summarize the conversation to free up context"
+          },
+          {
+            "name": "context",
+            "description": "Show what fills the context window"
+          },
+          {
+            "name": "init",
+            "description": "Write a CLAUDE.md for this project"
+          },
+          {
+            "name": "security-review",
+            "description": "Review the pending changes for security issues"
+          },
+          {
+            "name": "usage",
+            "description": "Show plan usage limits"
+          }
+        ]
       },
       {
-        "type": "agent-echo",
-        "name": "echo",
-        "displayName": "Echo (spike)",
-        "icon": "$(debug-console)",
-        "welcomeTitle": "Echo (spike)",
-        "welcomeMessage": "Echoes prompts. Five pickers; type 'permission' for a native confirmation.",
-        "inputPlaceholder": "Say something",
+        "type": "agent-codex",
+        "name": "codex",
+        "displayName": "Codex",
+        "icon": "$(terminal)",
+        "welcomeTitle": "Codex",
+        "welcomeMessage": "Your own Codex, in Workspace access. Its edits show up inline for review with Keep/Undo.",
+        "inputPlaceholder": "Ask Codex. @ to reference, / for commands",
         "order": 2,
         "canDelegate": true,
-        "requiresCustomModels": true
+        "capabilities": {
+          "supportsFileAttachments": true
+        },
+        "requiresCustomModels": true,
+        "commands": [
+          {
+            "name": "init",
+            "description": "Write an AGENTS.md for this project"
+          },
+          {
+            "name": "compact",
+            "description": "Summarize the conversation to free up context"
+          },
+          {
+            "name": "review",
+            "description": "Review the current changes"
+          }
+        ]
       }
     ],
     "configurationDefaults": {
@@ -81,28 +120,97 @@
     },
     "commands": [
       {
+        "command": "agentChat.newChat",
+        "title": "New Agent Chat",
+        "category": "Agent Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "agentChat.newChatInEditor",
+        "title": "New Agent Chat in Editor",
+        "category": "Agent Chat"
+      },
+      {
         "command": "agentChat.newClaude",
         "title": "New Claude Code Chat",
         "category": "Agent Chat"
       },
       {
-        "command": "agentChat.newEcho",
-        "title": "New Echo Chat (spike)",
+        "command": "agentChat.newCodex",
+        "title": "New Codex Chat",
         "category": "Agent Chat"
       },
       {
         "command": "agentChat.insertReference",
         "title": "Insert Selection Reference into Chat",
         "category": "Agent Chat"
+      },
+      {
+        "command": "agentChat.login",
+        "title": "Sign In to an Agent\u2026",
+        "category": "Agent Chat"
+      },
+      {
+        "command": "agentChat.restart",
+        "title": "Restart Agent\u2026",
+        "category": "Agent Chat"
+      },
+      {
+        "command": "agentChat.showLog",
+        "title": "Show Log",
+        "category": "Agent Chat"
+      },
+      {
+        "command": "agentChat.login.claude",
+        "title": "Sign In to Claude Code",
+        "category": "Agent Chat"
+      },
+      {
+        "command": "agentChat.restart.claude",
+        "title": "Restart Claude Code",
+        "category": "Agent Chat"
+      },
+      {
+        "command": "agentChat.login.codex",
+        "title": "Sign In to Codex",
+        "category": "Agent Chat"
+      },
+      {
+        "command": "agentChat.restart.codex",
+        "title": "Restart Codex",
+        "category": "Agent Chat"
       }
     ],
     "configuration": {
       "title": "Agent Chat",
       "properties": {
-        "agentChat.claude.adapterPath": {
-          "type": "string",
-          "default": "claude-agent-acp",
-          "description": "The claude-agent-acp adapter command (spike: no installer yet)."
+        "agentChat.harnesses": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "Per-harness overrides, keyed by `claude` / `codex`: `adapterPath` (an installed ACP adapter command instead of the pinned download), `harnessPath` (the `claude`/`codex` CLI instead of the one on PATH), `env` (extra adapter environment), `defaults` (config option values set on new sessions, e.g. `{\"mode\": \"default\"}`).",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "adapterPath": {
+                "type": "string"
+              },
+              "harnessPath": {
+                "type": "string"
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "defaults": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -111,7 +219,15 @@
         "vendor": "agent-chat",
         "displayName": "Agent harness models"
       }
-    ]
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "agentChat.insertReference",
+          "when": "editorTextFocus"
+        }
+      ]
+    }
   },
   "scripts": {
     "build": "node build.mjs",

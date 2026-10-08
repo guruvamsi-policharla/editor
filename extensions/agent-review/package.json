@@ -37,7 +37,7 @@
             "type": "string"
           },
           "default": [],
-          "description": "Extra gitignore-style patterns to exclude from review (on top of .gitignore and the built-in defaults: node_modules, build dirs, LaTeX artifacts)."
+          "description": "Extra gitignore-style patterns to exclude from review (on top of .gitignore and the built-in defaults: node_modules, build dirs, LaTeX artifacts, Claude Code's .claude/settings.local.json)."
         },
         "agentReview.trace": {
           "type": "boolean",
@@ -65,12 +65,27 @@
         "agentReview.agent.referenceFormat": {
           "type": "string",
           "default": "@${relativePath}:${range}",
-          "markdownDescription": "Text sent to the agent terminal by **Send Selection to Agent** (`Ctrl/Cmd+L`). Placeholders: `${relativePath}`, `${absolutePath}`, `${range}` (`L42-58`, or `L42` for one line), `${startLine}`, `${endLine}`."
+          "markdownDescription": "Text sent to the agent terminal or chat by **Send Selection to Agent** (`Ctrl/Cmd+L`). Placeholders: `${relativePath}`, `${absolutePath}`, `${range}` (`L42-58`, or `L42` for one line), `${startLine}`, `${endLine}`."
         },
         "agentReview.agent.includeSelectedText": {
           "type": "boolean",
           "default": false,
-          "description": "Also send the selected text (as a bracketed paste after the reference)."
+          "description": "Also send the selected text (as a bracketed paste after the reference). Agent terminal only."
+        },
+        "agentReview.agent.target": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "terminal",
+            "chat"
+          ],
+          "enumDescriptions": [
+            "Whichever of the agent terminal and the agent chat you used last.",
+            "Always the agent terminal.",
+            "Always the agent chat's input."
+          ],
+          "default": "auto",
+          "markdownDescription": "Where **Send Selection to Agent** (`Ctrl/Cmd+L`) puts the reference."
         }
       }
     },

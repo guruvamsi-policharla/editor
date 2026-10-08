@@ -28,6 +28,11 @@ describe('IgnoreRules defaults', () => {
     ['sub/.git', true],
     ['paper/main.tex', false],
     ['src/index.ts', false],
+    // Claude Code's "always allow" answers, not agent edits
+    ['.claude/settings.local.json', true],
+    ['sub/project/.claude/settings.local.json', true],
+    ['.claude/settings.json', false],
+    ['.claude/commands/review.md', false],
   ])('%s ignored=%s', async (p, expected) => {
     expect(await r.isIgnored(p)).toBe(expected);
   });
@@ -36,6 +41,11 @@ describe('IgnoreRules defaults', () => {
     expect(await r.isIgnored('paper/main.pdf')).toBe(true);
     expect(await r.isIgnored('paper/figs/plot.pdf')).toBe(false);
     expect(await r.isIgnored('notes.pdf')).toBe(false);
+  });
+
+  it('a user pattern can re-include .claude/settings.local.json', async () => {
+    const r2 = rules({}, { patterns: ['!.claude/settings.local.json'] });
+    expect(await r2.isIgnored('.claude/settings.local.json')).toBe(false);
   });
 
   it('can turn defaults off', async () => {

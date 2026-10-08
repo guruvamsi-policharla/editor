@@ -1,21 +1,28 @@
-/** The agent terminal (configurable command, default `tact`, docked right) and Ctrl/Cmd+L. */
+/** The agent terminal (configurable command, default `tact`, docked right) and Ctrl/Cmd+L (to it or the agent chat). */
 import * as vscode from 'vscode';
 import { AgentSession, type AgentTerminalIO } from './agentSession';
-import { bracketedPaste, formatReference, selectionLines } from './reference';
+import { bracketedPaste, chooseTarget, formatReference, selectionLines, type AgentTarget } from './reference';
 
 export class AgentTerminal implements vscode.Disposable {
   private terminal: vscode.Terminal | undefined;
   /** Gates typing into the agent until its command has started (see agentSession.ts). */
   private session: AgentSession | undefined;
-  private readonly sub: vscode.Disposable;
+  private readonly subs: vscode.Disposable[];
+  /** When the agent terminal was last opened, focused or sent to (Ctrl/Cmd+L's "used last"). */
+  private lastUsed: number | undefined;
 
   constructor() {
-    this.sub = vscode.window.onDidCloseTerminal((t) => {
-      if (t === this.terminal) {
-        this.terminal = undefined;
-        this.session = undefined;
-      }
-    });
+    this.subs = [
+      vscode.window.onDidCloseTerminal((t) => {
+        if (t === this.terminal) {
+          this.terminal = undefined;
+          this.session = undefined;
+        }
+      }),
+      vscode.window.onDidChangeActiveTerminal((t) => {
+        if (t && t === this.terminal) { this.lastUsed = Date.now(); }
+      }),
+    ];
   }
 
   /** Show the agent terminal, starting the agent command in a new one if needed. */
@@ -24,6 +31,7 @@ export class AgentTerminal implements vscode.Disposable {
   }
 
   private open(preserveFocus: boolean): { terminal: vscode.Terminal; session: AgentSession } {
+    this.lastUsed = Date.now();
     if (this.terminal && this.session && this.terminal.exitStatus === undefined) {
       this.terminal.show(preserveFocus);
       return { terminal: this.terminal, session: this.session };
@@ -46,7 +54,10 @@ export class AgentTerminal implements vscode.Disposable {
     return { terminal, session };
   }
 
-  /** Ctrl/Cmd+L: send `@path:L42-58` (and optionally the selected text) to the agent terminal. */
+  /**
+   * Ctrl/Cmd+L: send `@path:L42-58` to the agent terminal (optionally with the selected text), or insert it into
+   * the agent chat's input (`agentReview.agent.target`; `auto` = whichever was used last).
+   */
   async sendSelection(): Promise<void> {
     const editor = vscode.window.activeTextEditor;
     if (!editor) { return; }
@@ -60,6 +71,16 @@ export class AgentTerminal implements vscode.Disposable {
       startLine,
       endLine,
     });
+    const chatAt = await Promise.resolve(vscode.commands.executeCommand<number | undefined>('agentChat.lastUsed')).catch(() => undefined);
+    const target = chooseTarget(config.get<AgentTarget>('target', 'auto'), { terminal: this.lastUsed, chat: chatAt });
+    if (target === 'chat') {
+      try {
+        await vscode.commands.executeCommand('agentChat.insertReference', `${ref} `);
+        return;
+      } catch {
+        // no agent chat in this build: fall back to the terminal
+      }
+    }
     let text = `${ref} `;
     if (config.get<boolean>('includeSelectedText', false) && !sel.isEmpty) { text += bracketedPaste(doc.getText(sel)); }
     // In a terminal created just now, this waits until the agent command has started.
@@ -67,7 +88,7 @@ export class AgentTerminal implements vscode.Disposable {
   }
 
   dispose(): void {
-    this.sub.dispose();
+    this.subs.forEach((d) => d.dispose());
   }
 }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { EditLogs } from '../src/editLog';
-import { bracketedPaste, formatReference, selectionLines } from '../src/reference';
+import { bracketedPaste, chooseTarget, formatReference, selectionLines } from '../src/reference';
 
 describe('Ctrl/Cmd+L reference', () => {
   const sel = { relativePath: 'paper/main.tex', absolutePath: '/w/paper/main.tex', startLine: 42, endLine: 58 };
@@ -57,5 +57,20 @@ describe('EditLogs', () => {
     expect(logs.cleanText('a')).toBe('v2\n');
     logs.markClean('a', 'merged\n'); // saved
     expect(logs.get('a')).toEqual([]);
+  });
+});
+
+describe('Ctrl/Cmd+L target', () => {
+  it('auto: whichever of chat and terminal was used last; the terminal when neither or only it was', () => {
+    expect(chooseTarget('auto', {})).toBe('terminal');
+    expect(chooseTarget('auto', { terminal: 5 })).toBe('terminal');
+    expect(chooseTarget('auto', { chat: 5 })).toBe('chat');
+    expect(chooseTarget('auto', { terminal: 5, chat: 9 })).toBe('chat');
+    expect(chooseTarget('auto', { terminal: 9, chat: 5 })).toBe('terminal');
+    expect(chooseTarget(undefined, { chat: 1 })).toBe('chat');
+  });
+  it('a fixed setting wins', () => {
+    expect(chooseTarget('terminal', { chat: 9 })).toBe('terminal');
+    expect(chooseTarget('chat', { terminal: 9 })).toBe('chat');
   });
 });

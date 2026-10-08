@@ -1,14 +1,35 @@
-# agent-chat (spike)
+# agent-chat
 
-Phase A0 prototype of the ACP chat panel ([PLAN.md](../../PLAN.md) Phase 4, [docs/acp-design.md](../../docs/acp-design.md)). It drives VS Code's native chat, in the secondary side bar or an editor tab, from a built-in extension, with no core patch. Not shipped yet: `fork/scripts/install-extension.sh` installs it only with `EXTENSIONS="agent-review agent-chat"`.
+The ACP chat panel ([PLAN.md](../../PLAN.md) §5.4 and Phase 4, design in [docs/acp-design.md](../../docs/acp-design.md)). It drives VS Code's native chat from a built-in extension, with no core patch, on top of [`@editor/acp-client`](../../packages/acp-client). Chats open in the secondary side bar (Agent Chat: New Claude Code Chat / New Codex Chat) or as editor tabs (New Agent Chat in Editor).
 
-- **Default participant** (`chatParticipants[].isDefault`, `modes: [ask, agent, edit]`, `defaultChatParticipant` proposal). This is what makes core show the chat view and accept requests while `chat.disableAIFeatures` stays on and Copilot is absent.
-- **Session types** `agent-claude` (relays to `claude-agent-acp` through `@editor/acp-client`) and `agent-echo` (UI checks without model usage). Each has `canDelegate: true`, because core registers a session type's participant only then.
-- **Models.** Each type sets `requiresCustomModels` and the extension registers the `agent-chat` language-model vendor, whose models are the harness's model choices, targeted at that type. Core needs a model for every request; the editor never calls one, and the choice is forwarded as the ACP `model` option.
-- **Pickers.** The other ACP select options become `ChatSessionProviderOptionGroup`s (`src/options.ts`). Changes reach the harness through `inputState.onDidChange`, and selections made in an untitled chat carry over through `previousInputState`.
-- **Permission prompts** use the core `vscode_get_confirmation_with_options` tool, which can't be auto-approved.
-- **Opens on Claude Code.** `configurationDefaults` sets `chat.editor.localAgent.enabled: false`, so core's Local chat (Copilot's "Build with Agent") isn't offered and new chats default to the first session type by `order`.
-- **No edit parts** are emitted, so the chat's own editing session stays empty and agent-review owns Keep/Undo.
-- **`agentChat.insertReference`** inserts `@path:Lx-y` into the last focused chat input (`workbench.action.chat.open` with `isPartialQuery`).
+![Claude Code in the chat: the edit is reviewed inline with Keep/Undo](../../docs/img/acp/claude-edit-inline.png)
+
+More: [permission prompt](../../docs/img/acp/permission-prompt.png), [mode picker](../../docs/img/acp/mode-picker.png), [model picker](../../docs/img/acp/model-picker.png), [Cmd/Ctrl+L reference](../../docs/img/acp/cmdl-reference.png), [Codex not signed in](../../docs/img/acp/codex-signin-chat.png) ([picker](../../docs/img/acp/codex-signin-picker.png)), ["always" not shown as an agent edit](../../docs/img/acp/settings-local-ignored.png).
+
+**The harness edits files itself.** The client advertises no `fs` or `terminal` capability, and nothing here emits chat edit parts, so the chat's own editing session stays empty and agent-review shows every edit inline with Keep/Undo.
+
+| Piece | How |
+|---|---|
+| Showing chat without Copilot | A default participant (`chatParticipants[].isDefault`, `modes: [ask, agent, edit]`, `defaultChatParticipant` proposal) makes core show the chat view and accept requests while `chat.disableAIFeatures` stays on. `configurationDefaults` turns off core's Local chat, so new chats open on Claude Code |
+| Session types | `agent-claude`, `agent-codex`: one per harness profile (`src/harnessChat.ts`), each with `canDelegate` (core registers a type's participant only then) and `requiresCustomModels` |
+| Models | The harness's `model` options are the native model picker, through the `agent-chat` language-model vendor targeted at the session type (`src/models.ts`). Core needs a model per request; the editor never calls one. A picker selection is applied when the user changed it, so the agent's own model switches stick |
+| Pickers | Every other ACP select option is an option group (`src/groups.ts`), in the agent's order: Claude's mode (Plan is a mode, also `/plan`), effort and fast; Codex's approval preset, collaboration mode (`/plan`), effort and fast. Codex's next-turn options say "Applies from your next message". Re-rendered from every response and `config_option_update`. Selections made in an untitled chat carry over to its first message. Dangerous values (Codex Full access) need a modal confirm; Claude's Bypass is removed from the session and hidden |
+| A turn | Reducer changes → render ops (`src/render.ts`, pure) → stream parts (`src/stream.ts`): markdown, thinking blocks, tool cards (commands as terminal cards with output and exit code; reads and edits as file pills, edits with +/− counts, display only; searches and other tools with input/output), the plan as core's todo list (`manage_todo_list`). The footer shows the model and context use |
+| Permissions | `session/request_permission` → core's `vscode_get_confirmation_with_options` (can't be auto-approved): the exact command or paths, the agent's description, buttons Yes / No / "always" (with where it's saved). Stop answers open prompts `cancelled`. Every decision is in the log |
+| Stop | The Stop button → `session/cancel` |
+| References | The text goes as typed; attached files, the active editor, and `@path:L42-58` mentions also go as ACP `resource_link`s (`src/prompt.ts`). Slash commands: Claude's and Codex's common ones are listed for completion; any other `/command` goes through as text |
+| Cmd/Ctrl+L | `agentChat.insertReference(text)` inserts into the last focused chat input. agent-review's Send Selection to Agent calls it when the chat is the target (`agentReview.agent.target`; `auto` = whichever of chat and terminal was used last, from `agentChat.lastUsed`) |
+| Lazy start | Nothing starts at window load: the pickers show the options remembered from the last session. The adapter starts on the first message, or in the background when you open a new chat |
+| Install | The user's `claude`/`codex` on PATH is passed to the adapter. The pinned adapter is installed on first use into global storage (`npm ci` with the lockfiles in `dist/adapters/`, without the bundled harness binary when the CLI is on PATH) and runs under the editor's own Node. Overrides: `agentChat.harnesses.<id>.adapterPath`, `.harnessPath`, `.env`, `.defaults` |
+| Errors | Not signed in → a "Not signed in" picker and an in-chat warning with **Sign in** (runs `claude auth login` / `codex login` in a terminal; the adapter restarts when it closes). Adapter crash → the turn ends with "stopped unexpectedly (exit code …)"; the next message restarts it (backoff) and resumes the session. Start failures say why, with Show Log / Restart |
+| Workspace trust | Agents don't start in Restricted Mode |
 
 `src/typings/` holds copies of the VS Code 1.135 proposal `.d.ts` files (`src/vscode-dts`). Refresh them on upstream merges.
+
+Tests (`npm test`): rendering against a recorded Claude run, pickers from recorded config options, prompt blocks. The protocol side is tested in `packages/acp-client` (fake agent, contract tests).
+
+## Known issues
+
+- **Stop with a command card open:** a command that was waiting for permission or running when you pressed Stop keeps its spinner. The turn did stop (`session/cancel`, the prompt answered `cancelled`, the command never ran), but core drops stream updates after a cancel and only cancels tool invocations that are still streaming their input (`ChatResponseModel.cancel`). Fix: a few lines in core to move executing external invocations to Cancelled on cancel (a future `94-agent-chat.patch`).
+- **Model picker order:** core sorts the harness's models alphabetically.
+- **Restored chats:** after a reload, an old chat's transcript isn't restored (phase D: `session/load`).
