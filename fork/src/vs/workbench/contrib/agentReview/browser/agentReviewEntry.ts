@@ -194,6 +194,7 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 		));
 		this._changeService.extendToSubwords = true;
 		this._changeService.preserveShortMatchingLines = true;
+		this._changeService.alignSimilarLines = true;
 
 		this._register(this._changeService.onDidAcceptOrRejectAllHunks(state => {
 			this._stateObs.set(state, undefined);

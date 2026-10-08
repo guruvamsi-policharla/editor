@@ -225,6 +225,29 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.strictEqual(hunkWidgets().length, 2, 'both still have Keep/Undo');
 	});
 
+	test('a small edit next to a deleted or inserted paragraph: track changes for the edit, the paragraph on its own', async () => {
+		const edited = 'Note that the setup ceremony verifies an epoch identifier without any interaction, and the aggregator outputs the vector $\\mathbf{x}$ of ciphertexts.';
+		const deleted = 'Concretely, the aggregator aggregates the batch commitment which is the dominant cost in practice, even if $t-1$ parties are corrupt.';
+		const glued = 'We stress that the decryption shares are \\emph{constant size}, regardless of how many ciphertexts are in the batch.';
+		const next = 'In particular, the committee publishes an epoch identifier after the epoch closes, and each party samples a threshold signature.';
+		const rename = (s: string) => s.replace('mathbf{x}', 'mathbf{y}').replace('epoch closes', 'epoch ends');
+		model.setValue(['\\section{Intro}', '', rename(edited), '', rename(next), glued, '', '\\end{document}', ''].join('\n'));
+		const { entry } = await showPending(['\\section{Intro}', '', edited, '', deleted, '', next, '', '\\end{document}', ''].join('\n'));
+
+		const struck = model.getAllDecorations().filter(d => d.options.before?.inlineClassName?.includes('agent-review-deleted-text'));
+		assert.deepStrictEqual(struck.map(d => [d.range.startLineNumber, d.options.before?.content]), [[3, 'x'], [5, 'closes']], 'word-level, in both edited paragraphs');
+		const deletedZones = [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
+		assert.deepStrictEqual(deletedZones.map(z => z.afterLineNumber), [3], 'only the deleted paragraph gets red rows, after the paragraph it followed');
+		assert.ok(deletedZones[0].domNode.textContent?.replace(/\u00a0/g, ' ').includes('Concretely'));
+		assert.ok(!deletedZones[0].domNode.textContent?.replace(/\u00a0/g, ' ').includes('Note that'), 'the edited paragraph is not repeated in red');
+		assert.strictEqual(hunkWidgets().length, 2, 'Keep/Undo for each edited paragraph (the deletion goes with the first)');
+
+		// Keep the first: the second edit and its inserted sentence stay pending.
+		const diff = entry.diffInfo.get();
+		await diff.keep(diff.changes[0]);
+		assert.deepStrictEqual(entry.diffInfo.get().changes.map(c => `${c.original} -> ${c.modified}`), ['[5,6) -> [5,7)']);
+	});
+
 	test('a Keep/Undo toolbar with no room at the end of its hunk has its own row below it, so it never covers text', async () => {
 		model.setValue('a one\nb TWO, rewritten by the agent\nc three\ne five\n');
 		const { entry } = await showPending('a one\nb two\nc three\nd four\ne five\n');

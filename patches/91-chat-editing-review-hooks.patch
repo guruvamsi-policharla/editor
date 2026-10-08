@@ -1,8 +1,8 @@
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
-index 2e43b458..d71f4525 100644
+index 2e43b458..0441ad03 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
 +++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
-@@ -17,6 +17,7 @@ import { AccessibleDiffViewer, IAccessibleDiffViewerModel } from '../../../../..
+@@ -17,12 +17,13 @@ import { AccessibleDiffViewer, IAccessibleDiffViewerModel } from '../../../../..
  import { LineSource, renderLines, RenderOptions } from '../../../../../editor/browser/widget/diffEditor/components/diffEditorViewZones/renderLines.js';
  import { diffAddDecoration, diffDeleteDecoration, diffWholeLineAddDecoration } from '../../../../../editor/browser/widget/diffEditor/registrations.contribution.js';
  import { EditorOption, IEditorOptions } from '../../../../../editor/common/config/editorOptions.js';
@@ -10,6 +10,13 @@ index 2e43b458..d71f4525 100644
  import { Position } from '../../../../../editor/common/core/position.js';
  import { Range } from '../../../../../editor/common/core/range.js';
  import { LineRange } from '../../../../../editor/common/core/ranges/lineRange.js';
+ import { Selection } from '../../../../../editor/common/core/selection.js';
+ import { IDocumentDiff } from '../../../../../editor/common/diff/documentDiffProvider.js';
+-import { DetailedLineRangeMapping } from '../../../../../editor/common/diff/rangeMapping.js';
++import { DetailedLineRangeMapping, RangeMapping } from '../../../../../editor/common/diff/rangeMapping.js';
+ import { IEditorDecorationsCollection } from '../../../../../editor/common/editorCommon.js';
+ import { IModelDeltaDecoration, ITextModel, MinimapPosition, OverviewRulerLane, TrackedRangeStickiness } from '../../../../../editor/common/model.js';
+ import { ModelDecorationOptions } from '../../../../../editor/common/model/textModel.js';
 @@ -77,6 +78,9 @@ class ObjectPool<T extends IDisposable> {
  	}
  }
@@ -20,16 +27,18 @@ index 2e43b458..d71f4525 100644
  export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEditorIntegration {
  
  	private static readonly _diffLineDecorationData = ModelDecorationOptions.register({ description: 'diff-line-decoration' });
-@@ -91,6 +95,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -91,6 +95,10 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  	private readonly _diffHunkWidgetPool = this._store.add(new ObjectPool<DiffHunkWidget>());
  	private readonly _diffHunkWidgets: DiffHunkWidget[] = [];
  	private _viewZones: string[] = [];
 +	/** Agent review: one row per hunk, below it, holding the hunk's Keep/Undo toolbar (index = widget index). */
 +	private _toolbarRowZones: string[] = [];
++	/** Red rows of whole lines deleted inside a track-changes hunk: zone id -> index of the hunk's widget. */
++	private readonly _innerDeletionZones = new Map<string, number>();
  
  	private readonly _accessibleDiffViewVisible = observableValue<boolean>(this, false);
  
-@@ -194,6 +200,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -194,6 +202,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  
  				codeEditorObs.getOption(EditorOption.fontInfo).read(r);
  				codeEditorObs.getOption(EditorOption.lineHeight).read(r);
@@ -37,7 +46,7 @@ index 2e43b458..d71f4525 100644
  
  				const reviewMode = _entry.reviewMode.read(r);
  				const diff = documentDiffInfo.read(r);
-@@ -201,16 +208,29 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -201,16 +210,29 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  			}
  		}));
  
@@ -69,13 +78,13 @@ index 2e43b458..d71f4525 100644
  
  			const diff = documentDiffInfo.read(r);
  			const changeAtCursor = diff.changes.find(m => m.modified.contains(position.lineNumber) || m.modified.isEmpty && m.modified.startLineNumber === position.lineNumber);
-@@ -312,11 +332,14 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -312,11 +334,15 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  
  	private _clearDiffRendering() {
  		this._editor.changeViewZones((viewZoneChangeAccessor) => {
 -			for (const id of this._viewZones) {
 -				viewZoneChangeAccessor.removeZone(id);
-+			for (const id of [...this._viewZones, ...this._toolbarRowZones]) {
++			for (const id of [...this._viewZones, ...this._toolbarRowZones, ...this._innerDeletionZones.keys()]) {
 +				if (id) {
 +					viewZoneChangeAccessor.removeZone(id);
 +				}
@@ -83,10 +92,11 @@ index 2e43b458..d71f4525 100644
  		});
  		this._viewZones = [];
 +		this._toolbarRowZones = [];
++		this._innerDeletionZones.clear();
  		this._diffHunksRenderStore.clear();
  		for (const widget of this._diffHunkWidgetPool.free) {
  			widget.remove();
-@@ -324,6 +347,40 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -324,6 +350,40 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  		this._diffVisualDecorations.clear();
  	}
  
@@ -95,7 +105,7 @@ index 2e43b458..d71f4525 100644
 +		const line = change.modified.endLineNumberExclusive - 1;
 +		let text = modified.getLineContent(line);
 +		if (trackChanges) {
-+			const deleted = (change.innerChanges ?? []).filter(i => i.modifiedRange.startLineNumber === line && !i.originalRange.isEmpty());
++			const deleted = (change.innerChanges ?? []).filter(i => i.modifiedRange.startLineNumber === line && !i.originalRange.isEmpty() && !deletedWholeLines(i, original));
 +			for (const i of deleted.reverse()) {
 +				const at = i.modifiedRange.startColumn - 1;
 +				text = text.slice(0, at) + original.getValueInRange(i.originalRange) + text.slice(at);
@@ -127,7 +137,7 @@ index 2e43b458..d71f4525 100644
  	private _updateDiffRendering(diff: IDocumentDiff2, reviewMode: boolean, diffMode: boolean): void {
  
  		const chatDiffAddDecoration = ModelDecorationOptions.createDynamic({
-@@ -348,32 +405,67 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -348,32 +408,94 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  		this._diffHunksRenderStore.clear();
  		this._diffHunkWidgets.length = 0;
  		const diffHunkDecorations: IModelDeltaDecoration[] = [];
@@ -137,13 +147,14 @@ index 2e43b458..d71f4525 100644
  		this._editor.changeViewZones((viewZoneChangeAccessor) => {
 -			for (const id of this._viewZones) {
 -				viewZoneChangeAccessor.removeZone(id);
-+			for (const id of [...this._viewZones, ...this._toolbarRowZones]) {
++			for (const id of [...this._viewZones, ...this._toolbarRowZones, ...this._innerDeletionZones.keys()]) {
 +				if (id) {
 +					viewZoneChangeAccessor.removeZone(id);
 +				}
  			}
  			this._viewZones = [];
 +			this._toolbarRowZones = [];
++			this._innerDeletionZones.clear();
  			const modifiedVisualDecorations: IModelDeltaDecoration[] = [];
  			const mightContainNonBasicASCII = diff.originalModel.mightContainNonBasicASCII();
  			const mightContainRTL = diff.originalModel.mightContainRTL();
@@ -170,10 +181,11 @@ index 2e43b458..d71f4525 100644
  
  				const originalRange = diffEntry.original;
  				diff.originalModel.tokenization.forceTokenization(Math.max(1, originalRange.endLineNumberExclusive - 1));
++				const originalLineBreaks = originalRange.mapToLineArray(() => lineBreakData[lineBreakDataIdx++] ?? null);
  				const source = new LineSource(
  					originalRange.mapToLineArray(l => diff.originalModel.tokenization.getLineTokens(l)),
 -					[],
-+					originalRange.mapToLineArray(() => lineBreakData[lineBreakDataIdx++] ?? null),
++					originalLineBreaks,
  					mightContainNonBasicASCII,
  					mightContainRTL,
  				);
@@ -184,6 +196,31 @@ index 2e43b458..d71f4525 100644
  
  				if (reviewMode) {
  					for (const i of diffEntry.innerChanges || []) {
++						const deletedLines = trackChanges ? deletedWholeLines(i, diff.originalModel) : undefined;
++						if (deletedLines && !diffMode) {
++							// Whole lines deleted next to the edited words: red rows, as in a deletion of their own.
++							const domNode = document.createElement('div');
++							domNode.className = 'chat-editing-original-zone view-lines line-delete monaco-mouse-cursor-text';
++							const lines = deletedLines.lines;
++							const result = renderLines(new LineSource(
++								lines.mapToLineArray(l => diff.originalModel.tokenization.getLineTokens(l)),
++								lines.mapToLineArray(l => originalLineBreaks[l - originalRange.startLineNumber] ?? null),
++								mightContainNonBasicASCII,
++								mightContainRTL,
++							), renderOptions, lines.mapToLineArray(l => new InlineDecoration(
++								new Range(l - lines.startLineNumber + 1, 1, l - lines.startLineNumber + 1, diff.originalModel.getLineMaxColumn(l)),
++								diffDeleteDecoration.className!,
++								InlineDecorationType.Regular
++							)), domNode);
++							const zoneId = viewZoneChangeAccessor.addZone({
++								afterLineNumber: deletedLines.afterLineNumber,
++								heightInLines: result.heightInLines,
++								domNode,
++								ordinal: 50000 + 2,
++							});
++							this._innerDeletionZones.set(zoneId, this._diffHunkWidgets.length);
++							continue;
++						}
 +						if (trackChanges && !i.originalRange.isEmpty()) {
 +							modifiedVisualDecorations.push({
 +								range: Range.fromPositions(i.modifiedRange.getStartPosition()),
@@ -198,7 +235,7 @@ index 2e43b458..d71f4525 100644
  						decorations.push(new InlineDecoration(
  							i.originalRange.delta(-(diffEntry.original.startLineNumber - 1)),
  							diffDeleteDecoration.className!,
-@@ -421,19 +513,27 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -421,21 +543,31 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  				}
  
  				let extraLines = 0;
@@ -228,8 +265,12 @@ index 2e43b458..d71f4525 100644
 +						}
  
  						this._viewZones.push(viewZoneChangeAccessor.addZone(viewZoneData));
++					} else {
++						this._viewZones.push(''); // no red rows (keeps the indexes in line with the widgets)
  					}
-@@ -456,6 +556,39 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 				}
+ 
+@@ -456,6 +588,39 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  						this._diffHunkWidgetPool.putBack(widget);
  					}));
  
@@ -269,7 +310,7 @@ index 2e43b458..d71f4525 100644
  					widget.layout(diffEntry.modified.startLineNumber);
  
  					this._diffHunkWidgets.push(widget);
-@@ -470,8 +603,26 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -470,8 +635,26 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  			}
  
  			this._diffVisualDecorations.set(!diffMode ? modifiedVisualDecorations : []);
@@ -277,7 +318,7 @@ index 2e43b458..d71f4525 100644
 +			// Struck-through deleted words (track changes) are injected text: they can wrap a line onto one more row
 +			// after the zones below it were placed. Place them again, or a toolbar row lands inside the paragraph.
 +			if (trackChangesEnabled) {
-+				for (const id of [...this._viewZones, ...this._toolbarRowZones]) {
++				for (const id of [...this._viewZones, ...this._toolbarRowZones, ...this._innerDeletionZones.keys()]) {
 +					if (id) {
 +						viewZoneChangeAccessor.layoutZone(id);
 +					}
@@ -296,17 +337,26 @@ index 2e43b458..d71f4525 100644
  		const diffHunkDecoCollection = this._editor.createDecorationsCollection(diffHunkDecorations);
  
  		this._diffHunksRenderStore.add(toDisposable(() => {
-@@ -532,7 +683,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -514,7 +697,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 			if (e.target.type === MouseTargetType.CONTENT_VIEW_ZONE) {
+ 				const zone = e.target.detail;
+ 				const idx = this._viewZones.findIndex(id => id === zone.viewZoneId);
+-				if (idx >= 0) {
++				if (idx >= 0 || this._innerDeletionZones.has(zone.viewZoneId)) {
+ 					this._editor.setPosition(e.target.position);
+ 					this._editor.focus();
+ 				}
+@@ -532,7 +715,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  			} else if (e.target.type === MouseTargetType.CONTENT_VIEW_ZONE) {
  				const zone = e.target.detail;
  				const idx = this._viewZones.findIndex(id => id === zone.viewZoneId);
 -				toggleWidget(this._diffHunkWidgets[idx]);
 +				const rowIdx = this._toolbarRowZones.findIndex(id => id === zone.viewZoneId);
-+				toggleWidget(this._diffHunkWidgets[rowIdx >= 0 ? rowIdx : idx]);
++				toggleWidget(this._diffHunkWidgets[rowIdx >= 0 ? rowIdx : idx >= 0 ? idx : this._innerDeletionZones.get(zone.viewZoneId) ?? -1]);
  
  			} else if (e.target.position) {
  				const { position } = e.target;
-@@ -699,7 +851,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -699,7 +883,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  				original: { resource: this._entry.originalURI },
  				modified: { resource: this._entry.modifiedURI },
  				options: { selection },
@@ -315,20 +365,29 @@ index 2e43b458..d71f4525 100644
  			});
  
  			if (diffEditor && diffEditor.input) {
-@@ -735,6 +887,28 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -735,6 +919,54 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  	}
  }
  
 +/**
-+ * Whether a change is a few words within lines: every inner change stays on one line, the lines correspond one to
-+ * one, and the changed text is at most 30% of the lines. Larger rewrites read better as old lines above new ones.
++ * Whether a change is a few words within lines: every inner change stays on one line, or inserts or deletes whole
++ * lines (shown as they are: green, or red rows), the other lines correspond one to one, and the changed text is at most
++ * 30% of them. Larger rewrites read better as old lines above new ones.
 + */
 +export function showAsTrackChanges(change: DetailedLineRangeMapping, original: ITextModel, modified: ITextModel): boolean {
-+	if (change.original.isEmpty || change.modified.isEmpty || change.original.length !== change.modified.length || !change.innerChanges?.length) {
++	if (change.original.isEmpty || change.modified.isEmpty || !change.innerChanges?.length) {
 +		return false;
 +	}
 +	let changed = 0;
++	let inserted = 0;
 +	for (const i of change.innerChanges) {
++		if (i.originalRange.isEmpty() && i.modifiedRange.startLineNumber !== i.modifiedRange.endLineNumber) {
++			inserted += modified.getValueLengthInRange(i.modifiedRange);
++			continue;
++		}
++		if (deletedWholeLines(i, original)) {
++			continue;
++		}
 +		if (i.originalRange.startLineNumber !== i.originalRange.endLineNumber || i.modifiedRange.startLineNumber !== i.modifiedRange.endLineNumber) {
 +			return false;
 +		}
@@ -338,13 +397,30 @@ index 2e43b458..d71f4525 100644
 +	for (let line = change.modified.startLineNumber; line < change.modified.endLineNumberExclusive; line++) {
 +		total += modified.getLineLength(line);
 +	}
-+	return changed <= 0.3 * total;
++	return changed <= 0.3 * (total - inserted);
++}
++
++/**
++ * If an inner change deletes whole lines (and inserts nothing): those lines, and the modified line they were after.
++ */
++export function deletedWholeLines(i: RangeMapping, original: ITextModel): { lines: LineRange; afterLineNumber: number } | undefined {
++	const r = i.originalRange;
++	if (!i.modifiedRange.isEmpty() || r.startLineNumber === r.endLineNumber) {
++		return undefined;
++	}
++	if (r.startColumn === 1 && r.endColumn === 1) {
++		return { lines: new LineRange(r.startLineNumber, r.endLineNumber), afterLineNumber: i.modifiedRange.startLineNumber - 1 };
++	}
++	if (r.startColumn === original.getLineMaxColumn(r.startLineNumber) && r.endColumn === original.getLineMaxColumn(r.endLineNumber)) {
++		return { lines: new LineRange(r.startLineNumber + 1, r.endLineNumber + 1), afterLineNumber: i.modifiedRange.startLineNumber };
++	}
++	return undefined;
 +}
 +
  class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  
  	private static _idPool = 0;
-@@ -745,6 +919,19 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+@@ -745,6 +977,19 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  	private _position: IOverlayWidgetPosition | undefined;
  	private _lastStartLineNumber: number | undefined;
  	private _removed: boolean = false;
@@ -364,7 +440,7 @@ index 2e43b458..d71f4525 100644
  
  	constructor(
  		private readonly _editor: ICodeEditor,
-@@ -806,13 +993,87 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+@@ -806,13 +1051,87 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  		return this._id;
  	}
  
@@ -579,10 +655,10 @@ index c0b57e5f..ccf58dbe 100644
  			};
  		}
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
-index 309562ec..582489c7 100644
+index 309562ec..a7e67d6f 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
 +++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
-@@ -80,7 +80,14 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -80,7 +80,16 @@ export class ChatEditingTextModelChangeService extends Disposable {
  	public get allEditsAreFromUs() {
  		return this._allEditsAreFromUs;
  	}
@@ -591,14 +667,16 @@ index 309562ec..582489c7 100644
 +
 +	/**
 +	 * Extra diff options. Agent review turns on word-level (subword) inner changes and keeps
-+	 * hunks as granular as the line diff so that each one can be kept or undone on its own.
++	 * hunks as granular as the line diff so that each one can be kept or undone on its own, with an edited line
++	 * paired with its old version even next to inserted or deleted lines.
 +	 */
 +	public extendToSubwords = false;
 +	public preserveShortMatchingLines = false;
++	public alignSimilarLines = false;
  	private _diffOperation: Promise<IDocumentDiff | undefined> | undefined;
  	private _diffOperationIds: number = 0;
  
-@@ -126,7 +133,8 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -126,7 +135,8 @@ export class ChatEditingTextModelChangeService extends Disposable {
  		private readonly originalModel: ITextModel,
  		private readonly modifiedModel: ITextModel,
  		private readonly state: IObservable<ModifiedFileEntryState>,
@@ -608,7 +686,7 @@ index 309562ec..582489c7 100644
  		@IEditorWorkerService private readonly _editorWorkerService: IEditorWorkerService,
  		@IAccessibilitySignalService private readonly _accessibilitySignalService: IAccessibilitySignalService,
  	) {
-@@ -357,7 +365,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -357,7 +367,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
  
  	private _mirrorEdits(event: IModelContentChangedEvent) {
  		const edit = offsetEditFromContentChanges(event.changes);
@@ -617,7 +695,7 @@ index 309562ec..582489c7 100644
  
  		if (this._isEditFromUs || isExternalEdit) {
  			const e_sum = this._originalToModifiedEdit;
-@@ -501,7 +509,9 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -501,7 +511,10 @@ export class ChatEditingTextModelChangeService extends Disposable {
  			{
  				ignoreTrimWhitespace: false, // NEVER ignore whitespace so that undo/accept edits are correct and so that all changes (1 of 2) are spelled out
  				computeMoves: false,
@@ -625,6 +703,7 @@ index 309562ec..582489c7 100644
 +				maxComputationTimeMs: 3000,
 +				extendToSubwords: this.extendToSubwords,
 +				preserveShortMatchingLines: this.preserveShortMatchingLines,
++				alignSimilarLines: this.alignSimilarLines,
  			},
  			'advanced'
  		);
