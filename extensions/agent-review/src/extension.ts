@@ -82,7 +82,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
     rejectInEditor: async (uiPath) => {
       if (!hasCore) { return undefined; }
-      return vscode.commands.executeCommand<'saved' | 'unsaved' | 'deleted' | undefined>(CORE_REJECT, vscode.Uri.file(uiPath));
+      return vscode.commands.executeCommand<'saved' | 'unsaved' | 'deleted' | 'cancelled' | undefined>(CORE_REJECT, vscode.Uri.file(uiPath));
     },
   };
 

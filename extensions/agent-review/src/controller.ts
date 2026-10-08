@@ -25,7 +25,7 @@ export interface CoreBridge {
    * user typed outside the changes stays, and the buffer is saved only if it had no other unsaved edits.
    * Returns where the undo ended up, or undefined if the file isn't shown. Optional: only the fork has it.
    */
-  rejectInEditor?(absPath: string): Promise<'saved' | 'unsaved' | 'deleted' | undefined>;
+  rejectInEditor?(absPath: string): Promise<'saved' | 'unsaved' | 'deleted' | 'cancelled' | undefined>;
 }
 
 export interface DocumentState {
@@ -70,8 +70,11 @@ export interface BulkOutcome {
   unsaved?: string[];
 }
 
-/** Where a file Undo ended up: written to disk, or only in the editor buffer (the user's unsaved edits keep it dirty). */
-export type UndoOutcome = 'saved' | 'unsaved';
+/**
+ * Where a file Undo ended up: written to disk, only in the editor buffer (the user's unsaved edits keep it dirty), or
+ * not done (`cancelled`: the user kept the changes rather than lose what they typed inside them).
+ */
+export type UndoOutcome = 'saved' | 'unsaved' | 'cancelled';
 
 export class ReviewController {
   /** absPath -> baseline text last pushed to the core UI. */
@@ -170,8 +173,10 @@ export class ReviewController {
     const engine = this.engineForRoot(f.root);
     const baseline = f.kind === 'created' ? '' : decode(await engine.getBaselineContent(f.rel));
     // Core's models keep one EOL per file, so a baseline that differs only in line endings looks the same there.
+    // An external change is pushed anyway: the editor's review is a view, and the push makes sure it shows the file
+    // (it compares the baseline itself, so this costs nothing when it already does).
     const pushed = this.pushed.get(f.absPath);
-    if (pushed !== undefined && equalIgnoringEol(pushed, baseline)) { return; }
+    if (pushed !== undefined && equalIgnoringEol(pushed, baseline) && reason !== 'external') { return; }
     this.pushed.set(f.absPath, baseline);
     this.deferred.delete(f.absPath);
     this.log.trace?.(`${f.absPath}: baseline pushed to the editor (${reason ?? 'sync'})`);
@@ -311,7 +316,7 @@ export class ReviewController {
       return undefined;
     }
     const r = await this.bridge.rejectInEditor(this.ui.toUi(abs));
-    return r === 'saved' || r === 'unsaved' ? r : undefined;
+    return r === 'saved' || r === 'unsaved' || r === 'cancelled' ? r : undefined;
   }
 
   async acceptAll(): Promise<BulkOutcome> {
@@ -340,6 +345,7 @@ export class ReviewController {
         }
       } else {
         const r = await this.rejectInEditor(f.absPath);
+        if (r === 'cancelled') { continue; } // the user chose to keep it
         if (r) { out.done.push(f.absPath); }
         else { out.skipped.push(f.absPath); }
         if (r === 'unsaved') { out.unsaved!.push(f.absPath); }

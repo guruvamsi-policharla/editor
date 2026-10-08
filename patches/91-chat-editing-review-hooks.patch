@@ -722,7 +722,7 @@ index 01fe8016..02c409a7 100644
  			icon: Codicon.checkAll,
  			f1: true,
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorOverlay.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorOverlay.ts
-index 6817b7dc..7b44cdc7 100644
+index 6817b7dc..32c46330 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorOverlay.ts
 +++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorOverlay.ts
 @@ -23,7 +23,7 @@ import { Event } from '../../../../../base/common/event.js';
@@ -734,7 +734,27 @@ index 6817b7dc..7b44cdc7 100644
  import { Codicon } from '../../../../../base/common/codicons.js';
  import { renderIcon } from '../../../../../base/browser/ui/iconLabel/iconLabels.js';
  import { ThemeIcon } from '../../../../../base/common/themables.js';
-@@ -190,6 +190,15 @@ class ChatEditorOverlayWidget extends Disposable {
+@@ -112,7 +112,7 @@ class ChatEditorOverlayWidget extends Disposable {
+ 	private readonly _entry = observableValue<IModifiedFileEntry | undefined>(this, undefined);
+ 	private readonly _isBusy: IObservable<boolean | undefined>;
+ 
+-	private readonly _navigationBearings = observableValue<{ changeCount: number; activeIdx: number; entriesCount: number }>(this, { changeCount: -1, activeIdx: -1, entriesCount: -1 });
++	private readonly _navigationBearings = observableValue<{ changeCount: number; activeIdx: number; entriesCount: number; fileChangeCount?: number; totalChangeCount?: number }>(this, { changeCount: -1, activeIdx: -1, entriesCount: -1 });
+ 
+ 	constructor(
+ 		private readonly _editor: { focus(): void },
+@@ -186,10 +186,26 @@ class ChatEditorOverlayWidget extends Disposable {
+ 				}
+ 			}
+ 
++			if ((entry as { readonly hunkToolbarRows?: boolean } | undefined)?.hunkToolbarRows) {
++				// Agent review: the bar names one file, so "n of m" counts that file's changes (the ones on screen). The
++				// arrows still go on to the next file after its last change; the tooltip has the totals.
++				const fileChangeCount = entry!.changesCount.read(r);
++				this._navigationBearings.set({ changeCount: fileChangeCount, activeIdx: changeIndex ?? -1, entriesCount: entries.length, fileChangeCount, totalChangeCount: totalChangesCount }, undefined);
++				return;
++			}
+ 			this._navigationBearings.set({ changeCount: totalChangesCount, activeIdx, entriesCount: entries.length }, undefined);
  		}));
  
  
@@ -750,7 +770,26 @@ index 6817b7dc..7b44cdc7 100644
  		this._domNode.appendChild(this._toolbarNode);
  		this._showStore.add(toDisposable(() => this._toolbarNode.remove()));
  
-@@ -324,6 +333,10 @@ class ChatEditingOverlayController {
+@@ -234,12 +250,16 @@ class ChatEditorOverlayWidget extends Disposable {
+ 						}
+ 
+ 						protected override getTooltip(): string | undefined {
+-							const { changeCount, entriesCount } = that._navigationBearings.get();
++							const { changeCount, entriesCount, fileChangeCount, totalChangeCount } = that._navigationBearings.get();
+ 							if (changeCount === -1 || entriesCount === -1) {
+ 								return undefined;
+ 							}
+ 							let result: string | undefined;
+-							if (changeCount === 1 && entriesCount === 1) {
++							if (fileChangeCount !== undefined && totalChangeCount !== undefined) {
++								result = entriesCount === 1
++									? localize('agentReview.tooltip_file', "{0} agent change(s) in this file", fileChangeCount)
++									: localize('agentReview.tooltip_files', "{0} agent change(s) in this file, {1} in {2} files", fileChangeCount, totalChangeCount, entriesCount);
++							} else if (changeCount === 1 && entriesCount === 1) {
+ 								result = localize('tooltip_11', "1 change in 1 file");
+ 							} else if (changeCount === 1) {
+ 								result = localize('tooltip_1n', "1 change in {0} files", entriesCount);
+@@ -324,6 +344,10 @@ class ChatEditingOverlayController {
  			if (!getCodeEditor(editor?.getControl())) {
  				return undefined;
  			}
@@ -761,7 +800,7 @@ index 6817b7dc..7b44cdc7 100644
  
  			const uri = EditorResourceAccessor.getOriginalUri(editor?.input, { supportSideBySide: SideBySideEditor.PRIMARY });
  
-@@ -378,6 +391,12 @@ class ChatEditingOverlayController {
+@@ -378,6 +402,12 @@ class ChatEditingOverlayController {
  				);
  
  				widget.show(session, entry, { entryIndex, changeIndex });
@@ -788,9 +827,18 @@ index c0b57e5f..ccf58dbe 100644
  			};
  		}
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
-index 309562ec..a7e67d6f 100644
+index 309562ec..86307233 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
 +++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
+@@ -20,7 +20,7 @@ import { LineRange } from '../../../../../editor/common/core/ranges/lineRange.js
+ import { IDocumentDiff, nullDocumentDiff } from '../../../../../editor/common/diff/documentDiffProvider.js';
+ import { DetailedLineRangeMapping } from '../../../../../editor/common/diff/rangeMapping.js';
+ import { TextEdit, VersionedExtensionId } from '../../../../../editor/common/languages.js';
+-import { IModelDeltaDecoration, ITextModel, ITextSnapshot, MinimapPosition, OverviewRulerLane } from '../../../../../editor/common/model.js';
++import { IModelDeltaDecoration, ITextModel, ITextSnapshot, MinimapPosition, OverviewRulerLane, TrackedRangeStickiness } from '../../../../../editor/common/model.js';
+ import { ModelDecorationOptions } from '../../../../../editor/common/model/textModel.js';
+ import { offsetEditFromContentChanges, offsetEditFromLineRangeMapping, offsetEditToEditOperations } from '../../../../../editor/common/model/textModelStringEdit.js';
+ import { IEditorWorkerService } from '../../../../../editor/common/services/editorWorker.js';
 @@ -80,7 +80,16 @@ export class ChatEditingTextModelChangeService extends Disposable {
  	public get allEditsAreFromUs() {
  		return this._allEditsAreFromUs;
@@ -809,7 +857,27 @@ index 309562ec..a7e67d6f 100644
  	private _diffOperation: Promise<IDocumentDiff | undefined> | undefined;
  	private _diffOperationIds: number = 0;
  
-@@ -126,7 +135,8 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -118,6 +127,19 @@ export class ChatEditingTextModelChangeService extends Disposable {
+ 
+ 	private _originalToModifiedEdit: StringEdit = StringEdit.empty;
+ 
++	/**
++	 * Text the user typed inside a pending change (an edit that can't be folded into the original because it touches
++	 * the change). It is part of that change until the change is kept or undone, so undoing the change removes it too:
++	 * see `userTextIn`.
++	 */
++	private _userTextDecorations: string[] = [];
++	private static readonly _userTextDecorationOptions = ModelDecorationOptions.register({
++		description: 'chat-editing-user-text-in-change',
++		stickiness: TrackedRangeStickiness.AlwaysGrowsWhenTypingAtEdges,
++	});
++	/** The model versions the current diff was computed for. */
++	private _diffVersions: { readonly modified: number; readonly original: number } | undefined;
++
+ 	private lineChangeCount: number = 0;
+ 	private linesAdded: number = 0;
+ 	private linesRemoved: number = 0;
+@@ -126,7 +148,8 @@ export class ChatEditingTextModelChangeService extends Disposable {
  		private readonly originalModel: ITextModel,
  		private readonly modifiedModel: ITextModel,
  		private readonly state: IObservable<ModifiedFileEntryState>,
@@ -819,7 +887,58 @@ index 309562ec..a7e67d6f 100644
  		@IEditorWorkerService private readonly _editorWorkerService: IEditorWorkerService,
  		@IAccessibilitySignalService private readonly _accessibilitySignalService: IAccessibilitySignalService,
  	) {
-@@ -357,7 +367,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -334,13 +357,50 @@ export class ChatEditingTextModelChangeService extends Disposable {
+ 	private _reset() {
+ 		this._originalToModifiedEdit = StringEdit.empty;
+ 		this._diffInfo.set(nullDocumentDiff, undefined);
++		this._diffVersions = undefined;
+ 		this._didUserEditModelFired = false;
++		this._clearUserText();
++	}
++
++	private _clearUserText(): void {
++		if (this._userTextDecorations.length && !this.modifiedModel.isDisposed()) {
++			this._userTextDecorations = this.modifiedModel.deltaDecorations(this._userTextDecorations, []);
++		}
++		this._userTextDecorations = [];
++	}
++
++	/**
++	 * The text the user typed inside `change` (still in the buffer), or '' if none. Undoing the change removes it too,
++	 * because a change can only be undone as a whole.
++	 */
++	public userTextIn(change: DetailedLineRangeMapping): string {
++		const lines = change.modified;
++		const parts: string[] = [];
++		const ranges = this._userTextDecorations.map(id => this.modifiedModel.getDecorationRange(id)).filter((r): r is Range => !!r && !r.isEmpty()).sort(Range.compareRangesUsingStarts);
++		for (let i = 0; i < ranges.length; i++) {
++			let range = ranges[i];
++			while (i + 1 < ranges.length && Range.areIntersectingOrTouching(range, ranges[i + 1])) {
++				range = Range.plusRange(range, ranges[++i]);
++			}
++			// A pure deletion (empty modified range) can still have typing at its position.
++			const inChange = lines.isEmpty
++				? range.startLineNumber <= lines.startLineNumber && lines.startLineNumber <= range.endLineNumber
++				: range.startLineNumber < lines.endLineNumberExclusive && lines.startLineNumber <= range.endLineNumber;
++			if (inChange) {
++				const text = this.modifiedModel.getValueInRange(range).trim();
++				if (text) {
++					parts.push(text);
++				}
++			}
++		}
++		return parts.join(' ');
+ 	}
+ 
+ 	public async resetDocumentValues(newOriginal: string | ITextSnapshot | undefined, newModified: string | undefined): Promise<void> {
+ 		let didChange = false;
+ 		if (newOriginal !== undefined) {
+ 			this.originalModel.setValue(newOriginal);
++			this._clearUserText(); // a new original: what the user typed is either in it now or the host decides
+ 			didChange = true;
+ 		}
+ 		if (newModified !== undefined && this.modifiedModel.getValue() !== newModified) {
+@@ -357,7 +417,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
  
  	private _mirrorEdits(event: IModelContentChangedEvent) {
  		const edit = offsetEditFromContentChanges(event.changes);
@@ -828,7 +947,99 @@ index 309562ec..a7e67d6f 100644
  
  		if (this._isEditFromUs || isExternalEdit) {
  			const e_sum = this._originalToModifiedEdit;
-@@ -501,7 +511,10 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -391,10 +451,16 @@ export class ChatEditingTextModelChangeService extends Disposable {
+ 			if (e_user_r === undefined) {
+ 				// user edits overlaps/conflicts with AI edits
+ 				this._originalToModifiedEdit = e_ai.compose(e_user);
++				this._trackUserText(e_user);
+ 			} else {
++				const originalBefore = this.originalModel.getValue();
+ 				const edits = offsetEditToEditOperations(e_user_r, this.originalModel);
+ 				this.originalModel.applyEdits(edits);
+-				this._originalToModifiedEdit = e_ai.rebaseSkipConflicting(e_user_r);
++				// The new original -> modified edit, exactly: back to the old original, the AI edit, the user's edit.
++				// (Rebasing the AI edit over the user's skipped it where both insert at the same offset, e.g. typing
++				// right after text the AI inserted. Until the next diff, the following keystrokes were then mapped
++				// into the original as if the AI had changed nothing, at the wrong place: #15.)
++				this._originalToModifiedEdit = e_user_r.inverse(originalBefore).compose(e_ai).compose(e_user);
+ 			}
+ 
+ 			this._allEditsAreFromUs = false;
+@@ -406,11 +472,50 @@ export class ChatEditingTextModelChangeService extends Disposable {
+ 		}
+ 	}
+ 
+-	private async _keepHunk(change: DetailedLineRangeMapping): Promise<boolean> {
++	/** Remember the text an edit (that touches a pending change) inserted, in the modified model's coordinates. */
++	private _trackUserText(edit: StringEdit): void {
++		const ranges: IModelDeltaDecoration[] = [];
++		let delta = 0;
++		for (const r of edit.replacements) {
++			const start = r.replaceRange.start + delta;
++			delta += r.newText.length - r.replaceRange.length;
++			if (r.newText.trim().length === 0) {
++				continue;
++			}
++			const range = Range.fromPositions(this.modifiedModel.getPositionAt(start), this.modifiedModel.getPositionAt(start + r.newText.length));
++			// Typing on at the edge of earlier typing: that decoration grew over it already.
++			if (!this._userTextDecorations.some(id => this.modifiedModel.getDecorationRange(id)?.containsRange(range))) {
++				ranges.push({ range, options: ChatEditingTextModelChangeService._userTextDecorationOptions });
++			}
++		}
++		if (ranges.length) {
++			this._userTextDecorations.push(...this.modifiedModel.deltaDecorations([], ranges));
++		}
++	}
++
++	/**
++	 * The change to keep or undo, from the current diff. A diff computed before the last edits is recomputed first,
++	 * and the change is looked up again by its lines there: its old ranges would put the edit in the wrong place.
++	 */
++	private async _currentChange(change: DetailedLineRangeMapping): Promise<DetailedLineRangeMapping | undefined> {
+ 		if (!this._diffInfo.get().changes.includes(change)) {
+-			// diffInfo should have model version ids and check them (instead of the caller doing that)
++			return undefined;
++		}
++		const versions = this._diffVersions;
++		if (!versions || (versions.modified === this.modifiedModel.getVersionId() && versions.original === this.originalModel.getVersionId())) {
++			return change;
++		}
++		await this._updateDiffInfoSeq();
++		const candidates = this._diffInfo.get().changes.filter(c => c.modified.intersectsOrTouches(change.modified));
++		return candidates.length === 1 ? candidates[0] : undefined;
++	}
++
++	private async _keepHunk(change: DetailedLineRangeMapping): Promise<boolean> {
++		const current = await this._currentChange(change);
++		if (!current) {
+ 			return false;
+ 		}
++		change = current;
+ 		const edits: ISingleEditOperation[] = [];
+ 		for (const edit of change.innerChanges ?? []) {
+ 			const newText = this.modifiedModel.getValueInRange(edit.modifiedRange);
+@@ -426,9 +531,11 @@ export class ChatEditingTextModelChangeService extends Disposable {
+ 	}
+ 
+ 	private async _undoHunk(change: DetailedLineRangeMapping): Promise<boolean> {
+-		if (!this._diffInfo.get().changes.includes(change)) {
++		const current = await this._currentChange(change);
++		if (!current) {
+ 			return false;
+ 		}
++		change = current;
+ 		const edits: ISingleEditOperation[] = [];
+ 		for (const edit of change.innerChanges ?? []) {
+ 			const newText = this.originalModel.getValueInRange(edit.originalRange);
+@@ -487,6 +594,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
+ 		}
+ 
+ 		if (this.state.get() !== ModifiedFileEntryState.Modified) {
++			this._diffVersions = undefined;
+ 			this._diffInfo.set(nullDocumentDiff, undefined);
+ 			this._originalToModifiedEdit = StringEdit.empty;
+ 			return nullDocumentDiff;
+@@ -501,7 +609,10 @@ export class ChatEditingTextModelChangeService extends Disposable {
  			{
  				ignoreTrimWhitespace: false, // NEVER ignore whitespace so that undo/accept edits are correct and so that all changes (1 of 2) are spelled out
  				computeMoves: false,
@@ -840,6 +1051,14 @@ index 309562ec..a7e67d6f 100644
  			},
  			'advanced'
  		);
+@@ -513,6 +624,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
+ 		// only update the diff if the documents didn't change in the meantime
+ 		if (this.modifiedModel.getVersionId() === docVersionNow && this.originalModel.getVersionId() === snapshotVersionNow) {
+ 			const diff2 = diff ?? nullDocumentDiff;
++			this._diffVersions = { modified: docVersionNow, original: snapshotVersionNow };
+ 			this._diffInfo.set(diff2, undefined);
+ 			this._originalToModifiedEdit = offsetEditFromLineRangeMapping(this.originalModel, this.modifiedModel, diff2.changes);
+ 			return diff2;
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/notebook/chatEditingNotebookEditorIntegration.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/notebook/chatEditingNotebookEditorIntegration.ts
 index 2eaea73e..b48e5c6c 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/notebook/chatEditingNotebookEditorIntegration.ts

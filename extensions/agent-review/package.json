@@ -90,7 +90,8 @@
       }
     },
     "configurationDefaults": {
-      "chat.disableAIFeatures": true
+      "chat.disableAIFeatures": true,
+      "chat.editing.revealNextChangeOnResolve": false
     },
     "commands": [
       {

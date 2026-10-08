@@ -50,7 +50,7 @@ CommandsRegistry.registerCommand('_agentReview.clear', (accessor: ServicesAccess
  * for files with unsaved edits, which it must not write itself. Returns 'saved', 'unsaved' (the undo is in the
  * buffer only; the user's unsaved edits keep it dirty), 'deleted' (created file), or undefined (not shown).
  */
-CommandsRegistry.registerCommand('_agentReview.reject', (accessor: ServicesAccessor, uri: UriComponents): Promise<'saved' | 'unsaved' | 'deleted'> | undefined => {
+CommandsRegistry.registerCommand('_agentReview.reject', (accessor: ServicesAccessor, uri: UriComponents): Promise<'saved' | 'unsaved' | 'deleted' | 'cancelled'> | undefined => {
 	return accessor.get(IAgentReviewService).getEntry(URI.revive(uri))?.rejectFile();
 });
 

@@ -1,6 +1,6 @@
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts b/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts
 new file mode 100644
-index 00000000..0362ae67
+index 00000000..e8175fba
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts
 @@ -0,0 +1,111 @@
@@ -56,7 +56,7 @@ index 00000000..0362ae67
 + * for files with unsaved edits, which it must not write itself. Returns 'saved', 'unsaved' (the undo is in the
 + * buffer only; the user's unsaved edits keep it dirty), 'deleted' (created file), or undefined (not shown).
 + */
-+CommandsRegistry.registerCommand('_agentReview.reject', (accessor: ServicesAccessor, uri: UriComponents): Promise<'saved' | 'unsaved' | 'deleted'> | undefined => {
++CommandsRegistry.registerCommand('_agentReview.reject', (accessor: ServicesAccessor, uri: UriComponents): Promise<'saved' | 'unsaved' | 'deleted' | 'cancelled'> | undefined => {
 +	return accessor.get(IAgentReviewService).getEntry(URI.revive(uri))?.rejectFile();
 +});
 +
@@ -117,10 +117,10 @@ index 00000000..0362ae67
 +registerWorkbenchContribution2(AgentReviewOrphanedMerges.ID, AgentReviewOrphanedMerges, WorkbenchPhase.AfterRestored);
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
 new file mode 100644
-index 00000000..6388f4bd
+index 00000000..1ad5343a
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
-@@ -0,0 +1,481 @@
+@@ -0,0 +1,516 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -163,6 +163,7 @@ index 00000000..6388f4bd
 +import { IResolvedTextEditorModel, ITextModelService } from '../../../../editor/common/services/resolverService.js';
 +import { IModelContentChangedEvent } from '../../../../editor/common/textModelEvents.js';
 +import { localize } from '../../../../nls.js';
++import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 +import { IFileService } from '../../../../platform/files/common/files.js';
 +import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 +import { ILogService } from '../../../../platform/log/common/log.js';
@@ -255,8 +256,21 @@ index 00000000..6388f4bd
 +	readonly originalModel: ITextModel;
 +	readonly modifiedModel: ITextModel;
 +
++	/**
++	 * The change service's state. Always Modified: the service diffs only Modified entries, and an entry exists only
++	 * while the engine has something pending, so a new agent write must always show (see `state`).
++	 */
 +	private readonly _stateObs = observableValue<ModifiedFileEntryState>(this, ModifiedFileEntryState.Modified);
-+	readonly state: IObservable<ModifiedFileEntryState> = this._stateObs;
++	/** How the last change in view was resolved (shown while nothing is left to review). */
++	private readonly _resolution = observableValue<ModifiedFileEntryState.Accepted | ModifiedFileEntryState.Rejected>(this, ModifiedFileEntryState.Accepted);
++	/**
++	 * What the UI shows (overlay, explorer decoration, navigation, the diff editor): pending exactly while the review
++	 * has a change to show, i.e. derived from the same diff that draws the hunks and counts them. Kept or undone
++	 * everything in view is not a state the entry can get stuck in: an unsaved Undo, a revert or a Keep the engine
++	 * didn't follow used to leave the entry Rejected/Accepted, which hid every later agent write to the file while
++	 * Agent Changes still listed it (#16).
++	 */
++	readonly state: IObservable<ModifiedFileEntryState>;
 +
 +	// The chat-specific parts of IModifiedFileEntry are constant for agent review:
 +	// there is no streaming request, no auto-accept timer, and review mode is always on.
@@ -299,6 +313,7 @@ index 00000000..6388f4bd
 +		@ILogService private readonly _logService: ILogService,
 +		@INotificationService private readonly _notificationService: INotificationService,
 +		@ITextModelService textModelService: ITextModelService,
++		@IDialogService private readonly _dialogService: IDialogService,
 +	) {
 +		super();
 +		this._kind = kind;
@@ -337,8 +352,9 @@ index 00000000..6388f4bd
 +		this._changeService.preserveShortMatchingLines = true;
 +		this._changeService.alignSimilarLines = true;
 +
++		this.state = derived(r => this._changeService.diffInfo.read(r).changes.length > 0 ? ModifiedFileEntryState.Modified : this._resolution.read(r));
 +		this._register(this._changeService.onDidAcceptOrRejectAllHunks(state => {
-+			this._stateObs.set(state, undefined);
++			this._resolution.set(state, undefined);
 +		}));
 +
 +		// Hunk actions from the widgets, keybindings and commands all go through diffInfo.keep/undo.
@@ -359,6 +375,9 @@ index 00000000..6388f4bd
 +	}
 +
 +	private async _undoHunk(diff: IDocumentDiff2, change: DetailedLineRangeMapping): Promise<boolean> {
++		if (!await this._confirmUndoOfTyping([this._changeService.userTextIn(change)])) {
++			return false;
++		}
 +		const wasDirty = this._hasUnsavedUserEdits();
 +		const before = this.modifiedModel.getValue();
 +		const done = await diff.undo(change);
@@ -378,6 +397,25 @@ index 00000000..6388f4bd
 +		return true;
 +	}
 +
++	/**
++	 * Text the user typed inside a change is part of it (a change is undone as a whole), so undoing the change would
++	 * remove that text as well (#15). Ask first; nothing is changed if the user cancels.
++	 */
++	private async _confirmUndoOfTyping(typed: readonly string[]): Promise<boolean> {
++		const text = typed.filter(t => t.length > 0).join(' … ');
++		if (!text) {
++			return true;
++		}
++		const shown = text.length > 80 ? `${text.slice(0, 77)}…` : text;
++		const { confirmed } = await this._dialogService.confirm({
++			type: 'warning',
++			message: localize('agentReview.undoTyping', "Undo the agent's change and what you typed in it?"),
++			detail: localize('agentReview.undoTypingDetail', "You typed \"{0}\" inside this change in {1}. Undo puts back the text from before the agent's change, so your typing goes too. Ctrl+Z brings both back.", shown, basename(this.modifiedURI)),
++			primaryButton: localize({ key: 'agentReview.undoTypingButton', comment: ['&& denotes a mnemonic'] }, "&&Undo Change and My Typing"),
++		});
++		return confirmed;
++	}
++
 +	private _rememberUndo(before: string, saved: boolean): void {
 +		this._undoHistory.remember(this.modifiedModel, before, saved);
 +	}
@@ -387,11 +425,7 @@ index 00000000..6388f4bd
 +	 * pending, not folded into the baseline. (The service saves it if the Undo was saved.)
 +	 */
 +	private _isEditorUndoOfUndo(e: IModelContentChangedEvent): boolean {
-+		if (!this._undoHistory.match(this.modifiedModel, e)) {
-+			return false;
-+		}
-+		this._stateObs.set(ModifiedFileEntryState.Modified, undefined); // e.g. after Undo of the last hunk
-+		return true;
++		return !!this._undoHistory.match(this.modifiedModel, e);
 +	}
 +
 +	/**
@@ -457,10 +491,8 @@ index 00000000..6388f4bd
 +	async setBaseline(baseline: string, kind: AgentReviewKind): Promise<void> {
 +		baseline = await this._instantiationService.invokeFunction(baselineWithUnsavedEdits, this.modifiedURI, baseline);
 +		this._kind = kind;
-+		const stateChanged = this._stateObs.get() !== ModifiedFileEntryState.Modified;
-+		this._stateObs.set(ModifiedFileEntryState.Modified, undefined);
 +		// Models keep one EOL, so a baseline that differs only in line endings (mixed CRLF/LF files) is the same here.
-+		if (!stateChanged && this.originalModel.getValue(EndOfLinePreference.LF) === baseline.replace(/\r\n/g, '\n')) {
++		if (this.originalModel.getValue(EndOfLinePreference.LF) === baseline.replace(/\r\n/g, '\n')) {
 +			return; // e.g. the echo of a Keep that this entry reported itself
 +		}
 +		await this._changeService.resetDocumentValues(baseline, undefined);
@@ -468,8 +500,8 @@ index 00000000..6388f4bd
 +
 +	async accept(): Promise<void> {
 +		const previousBaseline = this._kind === 'created' ? null : this.originalModel.getValue();
++		this._resolution.set(ModifiedFileEntryState.Accepted, undefined);
 +		this._changeService.keep();
-+		this._stateObs.set(ModifiedFileEntryState.Accepted, undefined);
 +		this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'acceptFile', previousBaseline });
 +	}
 +
@@ -482,11 +514,15 @@ index 00000000..6388f4bd
 +	 * user typed outside the changes stays, it is part of the baseline) and is saved if it had no other
 +	 * unsaved edits. Created files: the extension deletes the file.
 +	 * @returns where the undo is: `saved` to disk, only in the buffer (`unsaved`, the user's unsaved edits
-+	 * keep it dirty), or `deleted` (created file, removed by the extension).
++	 * keep it dirty), `deleted` (created file, removed by the extension), or `cancelled` (the user kept the changes
++	 * rather than lose what they typed inside them).
 +	 */
-+	async rejectFile(): Promise<'saved' | 'unsaved' | 'deleted'> {
++	async rejectFile(): Promise<'saved' | 'unsaved' | 'deleted' | 'cancelled'> {
++		if (this._kind !== 'created' && !await this._confirmUndoOfTyping(this._changeService.diffInfo.get().changes.map(c => this._changeService.userTextIn(c)))) {
++			return 'cancelled';
++		}
++		this._resolution.set(ModifiedFileEntryState.Rejected, undefined);
 +		if (this._kind === 'created') {
-+			this._stateObs.set(ModifiedFileEntryState.Rejected, undefined);
 +			this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'rejectFile' });
 +			return 'deleted';
 +		}
@@ -494,7 +530,6 @@ index 00000000..6388f4bd
 +		const before = this.modifiedModel.getValue();
 +		this._changeService.undo();
 +		this._rememberUndo(before, !wasDirty);
-+		this._stateObs.set(ModifiedFileEntryState.Rejected, undefined);
 +		this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'rejected' });
 +		if (wasDirty) {
 +			return 'unsaved';
@@ -1269,10 +1304,10 @@ index 00000000..aad60b47
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
 new file mode 100644
-index 00000000..c7727931
+index 00000000..7417d631
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
-@@ -0,0 +1,769 @@
+@@ -0,0 +1,854 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -1297,6 +1332,7 @@ index 00000000..c7727931
 +import { IOverlayWidget, IViewZone, IViewZoneChangeAccessor } from '../../../../../editor/browser/editorBrowser.js';
 +import { EditorLayoutInfo, EditorOption } from '../../../../../editor/common/config/editorOptions.js';
 +import { EditOperation } from '../../../../../editor/common/core/editOperation.js';
++import { Position } from '../../../../../editor/common/core/position.js';
 +import { Range } from '../../../../../editor/common/core/range.js';
 +import { ITextModel } from '../../../../../editor/common/model.js';
 +import { IEditorWorkerService } from '../../../../../editor/common/services/editorWorker.js';
@@ -1313,7 +1349,7 @@ index 00000000..c7727931
 +import { INotification, INotificationHandle, INotificationService, Severity } from '../../../../../platform/notification/common/notification.js';
 +import { IChatWidgetService } from '../../../chat/browser/chat.js';
 +import { IChatEditingExplanationModelManager } from '../../../chat/browser/chatEditing/chatEditingExplanationModelManager.js';
-+import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntryChangeHunk } from '../../../chat/common/editing/chatEditingService.js';
++import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntryChangeHunk, ModifiedFileEntryState } from '../../../chat/common/editing/chatEditingService.js';
 +import { TestWorkerService } from '../../../inlineChat/test/browser/testWorkerService.js';
 +import { IEditorService } from '../../../../services/editor/common/editorService.js';
 +import { IEditorPane, IResourceDiffEditorInput } from '../../../../common/editor.js';
@@ -1327,6 +1363,7 @@ index 00000000..c7727931
 +import { IFileContent, IFileService } from '../../../../../platform/files/common/files.js';
 +import { VSBuffer } from '../../../../../base/common/buffer.js';
 +import { AgentReviewService } from '../../browser/agentReviewService.js';
++import { IConfirmation, IConfirmationResult, IDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 +
 +suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 +
@@ -1354,6 +1391,9 @@ index 00000000..c7727931
 +	let notifications: INotification[];
 +	/** The file on disk, for the entry's view of unsaved edits (disk -> buffer). */
 +	let diskContent: string;
++	/** Confirmation dialogs shown, and the answer to give. */
++	let confirms: IConfirmation[];
++	let confirmAnswer: boolean;
 +
 +	setup(() => {
 +		diskContent = DISK;
@@ -1368,6 +1408,8 @@ index 00000000..c7727931
 +		holdSave = undefined;
 +		saveOutcome = 'ok';
 +		notifications = [];
++		confirms = [];
++		confirmAnswer = true;
 +
 +		const workbench = store.add(workbenchInstantiationService(undefined, store));
 +		// The real resolver for the baseline models: reference counted, and it disposes a model it resolved when the
@@ -1426,6 +1468,12 @@ index 00000000..c7727931
 +			override notify(notification: INotification): INotificationHandle {
 +				notifications.push(notification);
 +				return new class extends mock<INotificationHandle>() { }();
++			}
++		}());
++		collection.set(IDialogService, new class extends mock<IDialogService>() {
++			override async confirm(confirmation: IConfirmation): Promise<IConfirmationResult> {
++				confirms.push(confirmation);
++				return { confirmed: confirmAnswer };
 +			}
 +		}());
 +		collection.set(IViewsService, new class extends mock<IViewsService>() {
@@ -2040,6 +2088,78 @@ index 00000000..c7727931
 +		model.applyEdits([EditOperation.replace(new Range(1, 1, 1, 6), 'Opening')]);
 +		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 && entry.originalModel.getValue().startsWith('Opening') ? d : undefined));
 +		assert.ok(entry.originalModel.getValue().startsWith('Opening sentence.'));
++	});
++	/** Type `text` at the end of `line`, one keystroke (one model edit) at a time, without waiting for the diff. */
++	function typeAtEndOf(line: number, text: string): void {
++		for (const ch of text) {
++			const col = model.getLineMaxColumn(line);
++			model.applyEdits([EditOperation.insert(new Position(line, col), ch)]);
++		}
++	}
++
++	test('#15: typing right after text the agent inserted stays where it was typed, and Undo takes out only the agent text', async () => {
++		model.setValue('The router is a softmax. The gate is learned.\nThis paper asks how the routing works.\n');
++		const { entry, integration } = await showPending('The router is a softmax.\nThis paper asks how the routing works.\n');
++		typeAtEndOf(1, ' ABC');
++		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && entry.originalModel.getValue().includes('ABC') ? d : undefined));
++		assert.strictEqual(entry.originalModel.getValue(), 'The router is a softmax. ABC\nThis paper asks how the routing works.\n', 'the typing is in the baseline at the place it was typed, not in the next line');
++		await timeout(0); // the toolbars follow the new diff
++
++		await integration.rejectNearestChange(hunkWidgets()[0]);
++		assert.strictEqual(model.getValue(), 'The router is a softmax. ABC\nThis paper asks how the routing works.\n');
++		assert.deepStrictEqual(confirms, [], 'nothing of the user\'s is undone, so no question');
++	});
++
++	test('#15: text typed inside an agent change goes with it, so its Undo asks first; cancelling changes nothing', async () => {
++		model.setValue('Results.\nThe random seed was fixed to 7.\n');
++		const { entry, integration } = await showPending('Results.\n');
++		typeAtEndOf(2, ' QQQ');
++		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(2).endsWith('QQQ') ? d : undefined));
++		await timeout(0);
++
++		confirmAnswer = false;
++		await integration.rejectNearestChange(hunkWidgets()[0]);
++		assert.strictEqual(confirms.length, 1);
++		assert.ok(String(confirms[0].detail).includes('"QQQ"'), `the dialog shows what would be lost, once: ${confirms[0].detail}`);
++		assert.strictEqual(model.getValue(), 'Results.\nThe random seed was fixed to 7. QQQ\n', 'cancelled: the buffer is untouched');
++		assert.deepStrictEqual(hunkEvents, []);
++
++		confirmAnswer = true;
++		await integration.rejectNearestChange(hunkWidgets()[0]);
++		assert.strictEqual(model.getValue(), 'Results.\n');
++		assert.strictEqual(confirms.length, 2);
++
++		// File Undo asks too.
++		await model.undo();
++		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 ? d : undefined));
++		confirmAnswer = false;
++		assert.strictEqual(await entry.rejectFile(), 'cancelled');
++		assert.ok(model.getValue().includes('QQQ'));
++	});
++
++	test('#16: after the last change is undone in an unsaved buffer, a later agent write still shows (the entry is never stuck hidden)', async () => {
++		const { entry, integration } = await showPending();
++		dirty = true;
++		await integration.rejectNearestChange(hunkWidgets()[0]);
++		assert.strictEqual(model.getValue(), BASELINE);
++		assert.notStrictEqual(entry.state.get(), ModifiedFileEntryState.Modified, 'nothing left to review');
++
++		// The user reverts the buffer (it is the disk again), then the agent writes once more.
++		dirty = false;
++		modelService.updateModel(model, DISK, EditSources.reloadFromDisk());
++		modelService.updateModel(model, DISK + 'Agent line.\n', EditSources.reloadFromDisk());
++		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 ? d : undefined));
++		assert.strictEqual(entry.state.get(), ModifiedFileEntryState.Modified);
++		assert.strictEqual(entry.changesCount.get(), 2);
++	});
++
++	test('#16: after the file is kept in the editor, the next agent write to it is pending again without a new push', async () => {
++		const { entry } = await showPending();
++		await entry.accept();
++		assert.strictEqual(entry.state.get(), ModifiedFileEntryState.Accepted);
++		modelService.updateModel(model, DISK + 'Agent line.\n', EditSources.reloadFromDisk());
++		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 ? d : undefined));
++		assert.strictEqual(entry.state.get(), ModifiedFileEntryState.Modified);
 +	});
 +});
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReviewMerge.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReviewMerge.test.ts

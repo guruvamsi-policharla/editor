@@ -101,6 +101,17 @@ describe('ReviewController', () => {
     expect(ctl.pendingFiles.map((f) => [f.rel, f.kind, f.inline])).toEqual([['paper.tex', 'modified', true]]);
   });
 
+  it('every external write to a pending file is pushed again, even with the same baseline (the editor may not show it any more, #16)', async () => {
+    fs.writeFileSync(path.join(root, 'a.tex'), 'one\n');
+    await open();
+    const abs = await agentWrite('a.tex', 'one\nAGENT\n');
+    expect(core.calls).toEqual(['set a.tex']);
+    // The editor's review may have stopped showing the file (an unsaved Undo, then a revert); the next write must show.
+    await agentWrite('a.tex', 'one\nAGENT\nAGAIN\n');
+    expect(core.calls).toEqual(['set a.tex', 'set a.tex']);
+    expect(core.shown.get(abs)?.baseline).toBe('one\n');
+  });
+
   it('closing a diff or editor of a pending file (its document closes) changes nothing: still pending, same baseline', async () => {
     await open();
     const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\n');
