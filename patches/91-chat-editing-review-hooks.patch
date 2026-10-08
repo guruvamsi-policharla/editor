@@ -1,5 +1,5 @@
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
-index 2e43b458..ac155e1e 100644
+index 2e43b458..d9db56cb 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
 +++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
 @@ -17,6 +17,7 @@ import { AccessibleDiffViewer, IAccessibleDiffViewerModel } from '../../../../..
@@ -269,8 +269,20 @@ index 2e43b458..ac155e1e 100644
  					widget.layout(diffEntry.modified.startLineNumber);
  
  					this._diffHunkWidgets.push(widget);
-@@ -472,6 +605,14 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -470,8 +603,26 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 			}
+ 
  			this._diffVisualDecorations.set(!diffMode ? modifiedVisualDecorations : []);
++
++			// Struck-through deleted words (track changes) are injected text: they can wrap a line onto one more row
++			// after the zones below it were placed. Place them again, or a toolbar row lands inside the paragraph.
++			if (trackChangesEnabled) {
++				for (const id of [...this._viewZones, ...this._toolbarRowZones]) {
++					if (id) {
++						viewZoneChangeAccessor.layoutZone(id);
++					}
++				}
++			}
  		});
  
 +		// Toolbars at a line's end follow that line, which the new view zones and struck-through text may have moved.
@@ -284,7 +296,7 @@ index 2e43b458..ac155e1e 100644
  		const diffHunkDecoCollection = this._editor.createDecorationsCollection(diffHunkDecorations);
  
  		this._diffHunksRenderStore.add(toDisposable(() => {
-@@ -532,7 +673,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -532,7 +683,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  			} else if (e.target.type === MouseTargetType.CONTENT_VIEW_ZONE) {
  				const zone = e.target.detail;
  				const idx = this._viewZones.findIndex(id => id === zone.viewZoneId);
@@ -294,7 +306,7 @@ index 2e43b458..ac155e1e 100644
  
  			} else if (e.target.position) {
  				const { position } = e.target;
-@@ -699,7 +841,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -699,7 +851,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  				original: { resource: this._entry.originalURI },
  				modified: { resource: this._entry.modifiedURI },
  				options: { selection },
@@ -303,7 +315,7 @@ index 2e43b458..ac155e1e 100644
  			});
  
  			if (diffEditor && diffEditor.input) {
-@@ -735,6 +877,28 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -735,6 +887,28 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  	}
  }
  
@@ -332,7 +344,7 @@ index 2e43b458..ac155e1e 100644
  class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  
  	private static _idPool = 0;
-@@ -745,6 +909,19 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+@@ -745,6 +919,19 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  	private _position: IOverlayWidgetPosition | undefined;
  	private _lastStartLineNumber: number | undefined;
  	private _removed: boolean = false;
@@ -352,7 +364,7 @@ index 2e43b458..ac155e1e 100644
  
  	constructor(
  		private readonly _editor: ICodeEditor,
-@@ -806,13 +983,87 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+@@ -806,13 +993,87 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  		return this._id;
  	}
  
