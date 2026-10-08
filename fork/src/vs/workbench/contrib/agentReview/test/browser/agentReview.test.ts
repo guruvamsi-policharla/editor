@@ -225,7 +225,7 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.strictEqual(hunkWidgets().length, 2, 'both still have Keep/Undo');
 	});
 
-	test('each Keep/Undo toolbar has its own row below its hunk, so it never covers text', async () => {
+	test('a Keep/Undo toolbar with no room at the end of its hunk has its own row below it, so it never covers text', async () => {
 		model.setValue('a one\nb TWO, rewritten by the agent\nc three\ne five\n');
 		const { entry } = await showPending('a one\nb two\nc three\nd four\ne five\n');
 		assert.strictEqual(entry.diffInfo.get().changes.length, 2, 'a rewrite and a pure deletion');
@@ -252,6 +252,27 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.ok(position && typeof position === 'object', 'widget moved to its row');
 		assert.ok(position.top < 137 + row.heightInPx!, 'inside the row');
 		assert.strictEqual(position.left, editor.getLayoutInfo().contentLeft);
+	});
+
+	test('the toolbar sits at the end of the hunk\'s last line when it fits there, else in its own row', async () => {
+		// A 7px-wide monospace font in an 800px-wide editor: about 110 columns.
+		const getOption = editor.getOption.bind(editor);
+		editor.getOption = (id => id === EditorOption.fontInfo ? { ...getOption(EditorOption.fontInfo), typicalHalfwidthCharacterWidth: 7 } : getOption(id)) as typeof editor.getOption;
+		editor.getLayoutInfo = () => ({ ...getOption(EditorOption.layoutInfo), contentLeft: 50, contentWidth: 800, verticalScrollbarWidth: 14 });
+		const long = 'x'.repeat(100);
+		model.setValue(`a one\nb TWO\nc three\n${long} LONG\ne five\n`);
+		await showPending(`a one\nb two\nc three\n${long} long\ne five\n`);
+
+		const rows = [...zones.values()].filter(z => z.domNode.classList.contains('agent-review-hunk-toolbar-row'));
+		assert.deepStrictEqual(rows.map(r => r.afterLineNumber), [4], 'only the line that runs to the edge gets a toolbar row');
+		const widgets = hunkWidgets();
+		assert.strictEqual(widgets.length, 2);
+		const atEnd = widgets.filter(w => w.getDomNode().classList.contains('at-line-end'));
+		assert.strictEqual(atEnd.length, 1);
+		const position = atEnd[0].getPosition()?.preference;
+		assert.ok(position && typeof position === 'object');
+		assert.ok(position.left > 50 + 'b TWO'.length * 7, 'right of the text');
+		assert.ok(position.top < editor.getTopForLineNumber(3), 'on line 2, not below it');
 	});
 
 	test('Ctrl+Y/Ctrl+N context: "cursor in a change" follows the file the editor shows, not the last integration created', async () => {

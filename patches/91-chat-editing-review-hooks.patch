@@ -1,8 +1,16 @@
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
-index 2e43b458..a40b6868 100644
+index 2e43b458..3e9a2d5d 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
 +++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
-@@ -77,6 +77,9 @@ class ObjectPool<T extends IDisposable> {
+@@ -17,6 +17,7 @@ import { AccessibleDiffViewer, IAccessibleDiffViewerModel } from '../../../../..
+ import { LineSource, renderLines, RenderOptions } from '../../../../../editor/browser/widget/diffEditor/components/diffEditorViewZones/renderLines.js';
+ import { diffAddDecoration, diffDeleteDecoration, diffWholeLineAddDecoration } from '../../../../../editor/browser/widget/diffEditor/registrations.contribution.js';
+ import { EditorOption, IEditorOptions } from '../../../../../editor/common/config/editorOptions.js';
++import { CursorColumns } from '../../../../../editor/common/core/cursorColumns.js';
+ import { Position } from '../../../../../editor/common/core/position.js';
+ import { Range } from '../../../../../editor/common/core/range.js';
+ import { LineRange } from '../../../../../editor/common/core/ranges/lineRange.js';
+@@ -77,6 +78,9 @@ class ObjectPool<T extends IDisposable> {
  	}
  }
  
@@ -12,7 +20,7 @@ index 2e43b458..a40b6868 100644
  export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEditorIntegration {
  
  	private static readonly _diffLineDecorationData = ModelDecorationOptions.register({ description: 'diff-line-decoration' });
-@@ -91,6 +94,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -91,6 +95,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  	private readonly _diffHunkWidgetPool = this._store.add(new ObjectPool<DiffHunkWidget>());
  	private readonly _diffHunkWidgets: DiffHunkWidget[] = [];
  	private _viewZones: string[] = [];
@@ -21,7 +29,7 @@ index 2e43b458..a40b6868 100644
  
  	private readonly _accessibleDiffViewVisible = observableValue<boolean>(this, false);
  
-@@ -194,6 +199,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -194,6 +200,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  
  				codeEditorObs.getOption(EditorOption.fontInfo).read(r);
  				codeEditorObs.getOption(EditorOption.lineHeight).read(r);
@@ -29,7 +37,7 @@ index 2e43b458..a40b6868 100644
  
  				const reviewMode = _entry.reviewMode.read(r);
  				const diff = documentDiffInfo.read(r);
-@@ -201,16 +207,29 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -201,16 +208,29 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  			}
  		}));
  
@@ -61,13 +69,16 @@ index 2e43b458..a40b6868 100644
  
  			const diff = documentDiffInfo.read(r);
  			const changeAtCursor = diff.changes.find(m => m.modified.contains(position.lineNumber) || m.modified.isEmpty && m.modified.startLineNumber === position.lineNumber);
-@@ -312,11 +331,12 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -312,11 +332,14 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  
  	private _clearDiffRendering() {
  		this._editor.changeViewZones((viewZoneChangeAccessor) => {
 -			for (const id of this._viewZones) {
+-				viewZoneChangeAccessor.removeZone(id);
 +			for (const id of [...this._viewZones, ...this._toolbarRowZones]) {
- 				viewZoneChangeAccessor.removeZone(id);
++				if (id) {
++					viewZoneChangeAccessor.removeZone(id);
++				}
  			}
  		});
  		this._viewZones = [];
@@ -75,7 +86,48 @@ index 2e43b458..a40b6868 100644
  		this._diffHunksRenderStore.clear();
  		for (const widget of this._diffHunkWidgetPool.free) {
  			widget.remove();
-@@ -348,32 +368,65 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -324,6 +347,40 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 		this._diffVisualDecorations.clear();
+ 	}
+ 
++	/** The text of a hunk's last line as shown: with the struck-through deleted words of track changes. */
++	private _lastLineWithDeletedText(change: DetailedLineRangeMapping, original: ITextModel, modified: ITextModel, trackChanges: boolean): string {
++		const line = change.modified.endLineNumberExclusive - 1;
++		let text = modified.getLineContent(line);
++		if (trackChanges) {
++			const deleted = (change.innerChanges ?? []).filter(i => i.modifiedRange.startLineNumber === line && !i.originalRange.isEmpty());
++			for (const i of deleted.reverse()) {
++				const at = i.modifiedRange.startColumn - 1;
++				text = text.slice(0, at) + original.getValueInRange(i.originalRange) + text.slice(at);
++			}
++		}
++		return text;
++	}
++
++	/**
++	 * If the hunk toolbar fits to the right of the last row of `text` as the editor wraps it, with a gap: where that
++	 * row's text ends (editor coordinates). The width is estimated from the font's character width (exact for
++	 * monospace fonts) and the editor's line breaks.
++	 */
++	private _toolbarRoomAfter(text: string, widget: DiffHunkWidget): number | undefined {
++		const { contentLeft, contentWidth, verticalScrollbarWidth } = this._editor.getLayoutInfo();
++		const charWidth = this._editor.getOption(EditorOption.fontInfo).typicalHalfwidthCharacterWidth;
++		const tabSize = this._editor.getModel()?.getOptions().tabSize ?? 4;
++		const breaks = this._editor._getViewModel()?.createLineBreaksComputer({ getLineContent: () => text, getLineInjectedText: () => null });
++		breaks?.addRequest(1, null);
++		const data = breaks?.finalize()[0];
++		const columns = data && data.breakOffsetsVisibleColumn.length > 1
++			? data.breakOffsetsVisibleColumn.at(-1)! - data.breakOffsetsVisibleColumn.at(-2)! + data.wrappedTextIndentLength
++			: CursorColumns.visibleColumnFromColumn(text, text.length + 1, tabSize);
++		const toolbarWidth = getTotalWidth(widget.getDomNode()) || 120;
++		const fits = charWidth > 0 && columns * charWidth + 3 * charWidth + toolbarWidth <= contentWidth - 2 * verticalScrollbarWidth;
++		return fits ? contentLeft + columns * charWidth : undefined;
++	}
++
+ 	private _updateDiffRendering(diff: IDocumentDiff2, reviewMode: boolean, diffMode: boolean): void {
+ 
+ 		const chatDiffAddDecoration = ModelDecorationOptions.createDynamic({
+@@ -348,32 +405,67 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  		this._diffHunksRenderStore.clear();
  		this._diffHunkWidgets.length = 0;
  		const diffHunkDecorations: IModelDeltaDecoration[] = [];
@@ -84,8 +136,11 @@ index 2e43b458..a40b6868 100644
  
  		this._editor.changeViewZones((viewZoneChangeAccessor) => {
 -			for (const id of this._viewZones) {
+-				viewZoneChangeAccessor.removeZone(id);
 +			for (const id of [...this._viewZones, ...this._toolbarRowZones]) {
- 				viewZoneChangeAccessor.removeZone(id);
++				if (id) {
++					viewZoneChangeAccessor.removeZone(id);
++				}
  			}
  			this._viewZones = [];
 +			this._toolbarRowZones = [];
@@ -143,7 +198,14 @@ index 2e43b458..a40b6868 100644
  						decorations.push(new InlineDecoration(
  							i.originalRange.delta(-(diffEntry.original.startLineNumber - 1)),
  							diffDeleteDecoration.className!,
-@@ -425,8 +478,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -421,19 +513,27 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 				}
+ 
+ 				let extraLines = 0;
++				/** Set below when the toolbar sits at the end of a pure deletion's last red row. */
++				let onLastDeletedRowTop: ((top: number) => void) | undefined;
++				let lastDeletedRowText: string | undefined;
+ 				if (reviewMode && !diffMode) {
  					const domNode = document.createElement('div');
  					domNode.className = 'chat-editing-original-zone view-lines line-delete monaco-mouse-cursor-text';
  					const result = renderLines(source, renderOptions, decorations, domNode);
@@ -152,15 +214,46 @@ index 2e43b458..a40b6868 100644
 +					extraLines = trackChanges ? 0 : result.heightInLines;
 +					if (!isCreatedContent && !trackChanges) {
  
++						const deletedRows = result.heightInLines;
  						const viewZoneData: IViewZone = {
  							afterLineNumber: diffEntry.modified.startLineNumber - 1,
-@@ -456,6 +509,21 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 							heightInLines: result.heightInLines,
+ 							domNode,
+-							ordinal: 50000 + 2 // more than https://github.com/microsoft/vscode/blob/bf52a5cfb2c75a7327c9adeaefbddc06d529dcad/src/vs/workbench/contrib/inlineChat/browser/inlineChatZoneWidget.ts#L42
++							ordinal: 50000 + 2, // more than https://github.com/microsoft/vscode/blob/bf52a5cfb2c75a7327c9adeaefbddc06d529dcad/src/vs/workbench/contrib/inlineChat/browser/inlineChatZoneWidget.ts#L42
++							onDomNodeTop: top => onLastDeletedRowTop?.(top + (deletedRows - 1) * this._editor.getOption(EditorOption.lineHeight)),
+ 						};
++						if (diffEntry.modified.isEmpty) {
++							lastDeletedRowText = diff.originalModel.getLineContent(diffEntry.original.endLineNumberExclusive - 1);
++						}
+ 
+ 						this._viewZones.push(viewZoneChangeAccessor.addZone(viewZoneData));
+ 					}
+@@ -456,6 +556,39 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  						this._diffHunkWidgetPool.putBack(widget);
  					}));
  
++					// Agent review: the toolbar is always visible and never covers text. It sits at the right end of the
++					// hunk's last row when that row leaves room for it (a short last line of a paragraph, an equation),
++					// else in its own row below the hunk (a line that runs to the edge, a narrow editor).
++					let atLineEnd: number | 'deleted' | undefined;
++					let textEnd: number | undefined;
 +					if (toolbarRows) {
-+						// Agent review: the toolbar gets its own row below the hunk, so it never covers text
-+						// (it is always visible there, and lines often reach the right edge in a narrow editor).
++						const lastRowText = diffEntry.modified.isEmpty
++							? lastDeletedRowText
++							: this._lastLineWithDeletedText(diffEntry, diff.originalModel, diff.modifiedModel, trackChanges);
++						textEnd = lastRowText === undefined ? undefined : this._toolbarRoomAfter(lastRowText, widget);
++						if (textEnd !== undefined) {
++							atLineEnd = diffEntry.modified.isEmpty ? 'deleted' : diffEntry.modified.endLineNumberExclusive - 1;
++						}
++					}
++					if (atLineEnd === 'deleted') {
++						const endWidget = widget;
++						onLastDeletedRowTop = top => endWidget.setRowTop(top);
++					}
++					if (toolbarRows && atLineEnd !== undefined) {
++						this._toolbarRowZones.push(''); // no row (keeps the indexes in line with the widgets)
++					} else if (toolbarRows) {
 +						const rowWidget = widget;
 +						const rowDomNode = document.createElement('div');
 +						rowDomNode.className = 'agent-review-hunk-toolbar-row';
@@ -172,11 +265,26 @@ index 2e43b458..a40b6868 100644
 +							onDomNodeTop: top => rowWidget.setRowTop(top),
 +						}));
 +					}
-+					widget.setInOwnRow(toolbarRows);
++					widget.setPlacement(!toolbarRows ? undefined : atLineEnd === undefined ? 'row' : atLineEnd, textEnd);
  					widget.layout(diffEntry.modified.startLineNumber);
  
  					this._diffHunkWidgets.push(widget);
-@@ -532,7 +600,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -472,6 +605,14 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 			this._diffVisualDecorations.set(!diffMode ? modifiedVisualDecorations : []);
+ 		});
+ 
++		// Toolbars at a line's end follow that line, which the new view zones and struck-through text may have moved.
++		for (const widget of this._diffHunkWidgets) {
++			const line = widget.getStartLineNumber();
++			if (line !== undefined) {
++				widget.layout(line);
++			}
++		}
++
+ 		const diffHunkDecoCollection = this._editor.createDecorationsCollection(diffHunkDecorations);
+ 
+ 		this._diffHunksRenderStore.add(toDisposable(() => {
+@@ -532,7 +673,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  			} else if (e.target.type === MouseTargetType.CONTENT_VIEW_ZONE) {
  				const zone = e.target.detail;
  				const idx = this._viewZones.findIndex(id => id === zone.viewZoneId);
@@ -186,7 +294,7 @@ index 2e43b458..a40b6868 100644
  
  			} else if (e.target.position) {
  				const { position } = e.target;
-@@ -699,7 +768,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -699,7 +841,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  				original: { resource: this._entry.originalURI },
  				modified: { resource: this._entry.modifiedURI },
  				options: { selection },
@@ -195,7 +303,7 @@ index 2e43b458..a40b6868 100644
  			});
  
  			if (diffEditor && diffEditor.input) {
-@@ -735,6 +804,28 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -735,6 +877,28 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  	}
  }
  
@@ -224,11 +332,17 @@ index 2e43b458..a40b6868 100644
  class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  
  	private static _idPool = 0;
-@@ -745,6 +836,13 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+@@ -745,6 +909,19 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  	private _position: IOverlayWidgetPosition | undefined;
  	private _lastStartLineNumber: number | undefined;
  	private _removed: boolean = false;
-+	private _inOwnRow = false;
++	/**
++	 * Agent review: `row` = in its own row below the hunk; a line number = at the right end of that line's last row;
++	 * `deleted` = at the right end of a pure deletion's last red row. Undefined: upstream (floating, on hover).
++	 */
++	private _placement: 'row' | 'deleted' | number | undefined;
++	/** At a line's end: where the text on that row ends (editor coordinates). */
++	private _textEnd = 0;
 +	private _rowTop = -1_000_000;
 +
 +	/** Height of the row that holds the toolbar when it sits below its hunk (agent review). */
@@ -238,31 +352,71 @@ index 2e43b458..a40b6868 100644
  
  	constructor(
  		private readonly _editor: ICodeEditor,
-@@ -806,13 +904,39 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+@@ -806,13 +983,87 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  		return this._id;
  	}
  
-+	/** Agent review: place the toolbar in its own row below the hunk (see `setRowTop`) instead of over its first line. */
-+	setInOwnRow(inOwnRow: boolean): void {
-+		this._inOwnRow = inOwnRow;
++	/** Agent review: where the always-visible toolbar goes (see `_placement`) instead of over the hunk's first line on hover. */
++	setPlacement(placement: 'row' | 'deleted' | number | undefined, textEnd?: number): void {
++		this._placement = placement;
++		this._domNode.classList.remove('under-editor-overlay');
++		this._textEnd = textEnd ?? 0;
 +		this._rowTop = -1_000_000; // off-screen until the row reports where it is (pooled widgets move between hunks)
-+		this._domNode.classList.toggle('in-own-row', inOwnRow);
++		this._domNode.classList.toggle('agent-review-hunk-toolbar', placement !== undefined);
++		this._domNode.classList.toggle('in-own-row', placement === 'row');
++		this._domNode.classList.toggle('at-line-end', placement !== undefined && placement !== 'row');
 +	}
 +
-+	/** Called by the row's view zone with its top (relative to the scrolled viewport). */
++	/** Called by the view zone the toolbar sits in (its own row, or a deletion's last row) with its top in the viewport. */
 +	setRowTop(top: number): void {
 +		this._rowTop = top;
-+		if (this._inOwnRow && !this._removed) {
++		if ((this._placement === 'row' || this._placement === 'deleted') && !this._removed) {
 +			// Also move the node now: the view zones render after this frame's overlay widgets.
-+			this._domNode.style.top = `${this._rowOffsetTop()}px`;
++			this._domNode.style.top = `${this._centeredTop(this._rowTop, this._rowHeight())}px`;
 +			if (this._lastStartLineNumber !== undefined) {
 +				this.layout(this._lastStartLineNumber);
 +			}
 +		}
 +	}
 +
-+	private _rowOffsetTop(): number {
-+		return this._rowTop + Math.max(0, Math.floor((DiffHunkWidget.toolbarRowHeight(this._editor) - this._domNode.offsetHeight) / 2));
++	/**
++	 * The review overlay (file Keep/Undo, change i of n) floats over the editor's bottom right corner. A toolbar at a
++	 * line's end that would be under it moves left of it, if the text on its row leaves room; else it's hidden until
++	 * scrolled out from under the overlay (rather than a sliver of it peeking out; the overlay's Keep/Undo and
++	 * Ctrl/Cmd+Y/N still work).
++	 */
++	private _dodgeEditorOverlay(top: number, left: number): IOverlayWidgetPositionCoordinates {
++		const position = this._dodgeEditorOverlayOrHide(top, left);
++		this._domNode.classList.toggle('under-editor-overlay', !position);
++		return position ?? { top, left };
++	}
++
++	private _dodgeEditorOverlayOrHide(top: number, left: number): IOverlayWidgetPositionCoordinates | undefined {
++		const editorNode = this._editor.getContainerDomNode();
++		let overlay: Element | null = null;
++		for (let node = editorNode.parentElement, depth = 0; node && !overlay && depth < 8; node = node.parentElement, depth++) {
++			overlay = node.querySelector(':scope > .chat-editing-editor-overlay');
++		}
++		if (!overlay) {
++			return { top, left };
++		}
++		const o = overlay.getBoundingClientRect();
++		const e = editorNode.getBoundingClientRect();
++		const width = getTotalWidth(this._domNode);
++		const height = this._domNode.offsetHeight;
++		if (e.top + top + height < o.top || e.top + top > o.bottom || e.left + left + width < o.left || e.left + left > o.right) {
++			return { top, left };
++		}
++		const shifted = o.left - e.left - width - 8;
++		return shifted >= this._textEnd + 16 ? { top, left: shifted } : undefined;
++	}
++
++	private _rowHeight(): number {
++		return this._placement === 'row' ? DiffHunkWidget.toolbarRowHeight(this._editor) : this._editor.getOption(EditorOption.lineHeight);
++	}
++
++	private _centeredTop(rowTop: number, rowHeight: number): number {
++		return rowTop + Math.floor((rowHeight - this._domNode.offsetHeight) / 2);
 +	}
 +
  	layout(startLineNumber: number): void {
@@ -272,9 +426,17 @@ index 2e43b458..a40b6868 100644
  		const scrollTop = this._editor.getScrollTop();
  
 -		this._position = {
-+		this._position = this._inOwnRow ? {
++		const rightAligned = contentLeft + contentWidth - (2 * verticalScrollbarWidth + getTotalWidth(this._domNode));
++		this._position = this._placement === 'row' ? {
 +			stackOrdinal: 1,
-+			preference: { top: this._rowOffsetTop(), left: contentLeft }
++			preference: { top: this._centeredTop(this._rowTop, this._rowHeight()), left: contentLeft }
++		} : this._placement === 'deleted' ? {
++			stackOrdinal: 1,
++			preference: this._dodgeEditorOverlay(this._centeredTop(this._rowTop, lineHeight), rightAligned)
++		} : typeof this._placement === 'number' ? {
++			stackOrdinal: 1,
++			// the row with the end of the line (a wrapped line's last row)
++			preference: this._dodgeEditorOverlay(this._centeredTop(this._editor.getTopForPosition(this._placement, Number.MAX_SAFE_INTEGER) - scrollTop, lineHeight), rightAligned)
 +		} : {
  			stackOrdinal: 1,
  			preference: {

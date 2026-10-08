@@ -969,44 +969,49 @@ index 00000000..155f9ac4
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css b/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css
 new file mode 100644
-index 00000000..68180ed8
+index 00000000..5e81478f
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,74 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
 + *--------------------------------------------------------------------------------------------*/
 +
 +/*
-+ * Agent review: each hunk's Keep/Undo toolbar is always visible, in its own row below the hunk
-+ * (`in-own-row`, see ChatEditingCodeEditorIntegration), aligned with the start of the text. Nothing is
-+ * under it, so it's drawn as plain buttons rather than a floating box. It's slightly dimmed until the
-+ * pointer or the cursor is in the change. (The chat UI floats it over the hunk's first line on hover.)
++ * Agent review: each hunk's Keep/Undo toolbar is always visible and never covers text: at the right end of
++ * the hunk's last row when there is room (`at-line-end`), else in its own row below the hunk (`in-own-row`),
++ * aligned with the start of the text (see ChatEditingCodeEditorIntegration). Nothing is under it, so it's
++ * drawn as plain buttons rather than a floating box. It's slightly dimmed until the pointer or the cursor
++ * is in the change. (The chat UI floats it over the hunk's first line on hover.)
 + */
-+.chat-diff-change-content-widget.in-own-row {
++.chat-diff-change-content-widget.agent-review-hunk-toolbar {
 +	opacity: 0.85;
 +	box-shadow: none;
 +	border-radius: 4px;
 +	overflow: visible;
 +}
 +
-+.chat-diff-change-content-widget.in-own-row.hover,
-+.chat-diff-change-content-widget.in-own-row:hover {
++.chat-diff-change-content-widget.agent-review-hunk-toolbar.under-editor-overlay {
++	visibility: hidden;
++}
++
++.chat-diff-change-content-widget.agent-review-hunk-toolbar.hover,
++.chat-diff-change-content-widget.agent-review-hunk-toolbar:hover {
 +	opacity: 1;
 +}
 +
-+.chat-diff-change-content-widget.in-own-row .monaco-action-bar {
++.chat-diff-change-content-widget.agent-review-hunk-toolbar .monaco-action-bar {
 +	padding: 0;
 +	border: none;
 +	background-color: transparent;
 +}
 +
-+.chat-diff-change-content-widget.in-own-row .monaco-action-bar .actions-container {
++.chat-diff-change-content-widget.agent-review-hunk-toolbar .monaco-action-bar .actions-container {
 +	gap: 6px;
 +}
 +
-+.chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item .action-label {
++.chat-diff-change-content-widget.agent-review-hunk-toolbar .monaco-action-bar .action-item .action-label {
 +	padding: 1px 8px;
 +	font-size: 11px;
 +	line-height: 16px;
@@ -1015,21 +1020,21 @@ index 00000000..68180ed8
 +	color: var(--vscode-button-secondaryForeground);
 +}
 +
-+.monaco-workbench .chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item .action-label:hover {
++.monaco-workbench .chat-diff-change-content-widget.agent-review-hunk-toolbar .monaco-action-bar .action-item .action-label:hover {
 +	background-color: var(--vscode-button-secondaryHoverBackground);
 +}
 +
-+.chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item.primary .action-label {
++.chat-diff-change-content-widget.agent-review-hunk-toolbar .monaco-action-bar .action-item.primary .action-label {
 +	background-color: var(--vscode-button-background);
 +	color: var(--vscode-button-foreground);
 +}
 +
-+.monaco-workbench .chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item.primary .action-label:hover {
++.monaco-workbench .chat-diff-change-content-widget.agent-review-hunk-toolbar .monaco-action-bar .action-item.primary .action-label:hover {
 +	background-color: var(--vscode-button-hoverBackground);
 +}
 +
 +/* The "open diff" icon: a plain icon button, not a pill. */
-+.chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item .action-label.codicon:not(.separator) {
++.chat-diff-change-content-widget.agent-review-hunk-toolbar .monaco-action-bar .action-item .action-label.codicon:not(.separator) {
 +	width: 18px;
 +	height: 18px;
 +	padding: 0;
@@ -1039,15 +1044,15 @@ index 00000000..68180ed8
 +	color: var(--vscode-icon-foreground);
 +}
 +
-+.monaco-workbench .chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item .action-label.codicon:not(.separator):hover {
++.monaco-workbench .chat-diff-change-content-widget.agent-review-hunk-toolbar .monaco-action-bar .action-item .action-label.codicon:not(.separator):hover {
 +	background-color: var(--vscode-toolbar-hoverBackground);
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
 new file mode 100644
-index 00000000..43e91463
+index 00000000..1d947694
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
-@@ -0,0 +1,539 @@
+@@ -0,0 +1,560 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -1275,7 +1280,7 @@ index 00000000..43e91463
 +		assert.strictEqual(hunkWidgets().length, 2, 'both still have Keep/Undo');
 +	});
 +
-+	test('each Keep/Undo toolbar has its own row below its hunk, so it never covers text', async () => {
++	test('a Keep/Undo toolbar with no room at the end of its hunk has its own row below it, so it never covers text', async () => {
 +		model.setValue('a one\nb TWO, rewritten by the agent\nc three\ne five\n');
 +		const { entry } = await showPending('a one\nb two\nc three\nd four\ne five\n');
 +		assert.strictEqual(entry.diffInfo.get().changes.length, 2, 'a rewrite and a pure deletion');
@@ -1302,6 +1307,27 @@ index 00000000..43e91463
 +		assert.ok(position && typeof position === 'object', 'widget moved to its row');
 +		assert.ok(position.top < 137 + row.heightInPx!, 'inside the row');
 +		assert.strictEqual(position.left, editor.getLayoutInfo().contentLeft);
++	});
++
++	test('the toolbar sits at the end of the hunk\'s last line when it fits there, else in its own row', async () => {
++		// A 7px-wide monospace font in an 800px-wide editor: about 110 columns.
++		const getOption = editor.getOption.bind(editor);
++		editor.getOption = (id => id === EditorOption.fontInfo ? { ...getOption(EditorOption.fontInfo), typicalHalfwidthCharacterWidth: 7 } : getOption(id)) as typeof editor.getOption;
++		editor.getLayoutInfo = () => ({ ...getOption(EditorOption.layoutInfo), contentLeft: 50, contentWidth: 800, verticalScrollbarWidth: 14 });
++		const long = 'x'.repeat(100);
++		model.setValue(`a one\nb TWO\nc three\n${long} LONG\ne five\n`);
++		await showPending(`a one\nb two\nc three\n${long} long\ne five\n`);
++
++		const rows = [...zones.values()].filter(z => z.domNode.classList.contains('agent-review-hunk-toolbar-row'));
++		assert.deepStrictEqual(rows.map(r => r.afterLineNumber), [4], 'only the line that runs to the edge gets a toolbar row');
++		const widgets = hunkWidgets();
++		assert.strictEqual(widgets.length, 2);
++		const atEnd = widgets.filter(w => w.getDomNode().classList.contains('at-line-end'));
++		assert.strictEqual(atEnd.length, 1);
++		const position = atEnd[0].getPosition()?.preference;
++		assert.ok(position && typeof position === 'object');
++		assert.ok(position.left > 50 + 'b TWO'.length * 7, 'right of the text');
++		assert.ok(position.top < editor.getTopForLineNumber(3), 'on line 2, not below it');
 +	});
 +
 +	test('Ctrl+Y/Ctrl+N context: "cursor in a change" follows the file the editor shows, not the last integration created', async () => {
