@@ -14,7 +14,8 @@ import { AgentTerminal } from './agentTerminal';
 import { ConflictMerger } from './conflicts';
 import { normalizePath, ReviewController, UiPaths, type CoreBridge, type ReviewAction } from './controller';
 import { EditLogs } from './editLog';
-import { BASELINE_SCHEME, BaselineContentProvider, baselineUri, deletedUri, ReviewTree, type FileItem } from './reviewTree';
+import { closeDeletion, DeletionReview, showDeletion } from './deletions';
+import { BASELINE_SCHEME, BaselineContentProvider, baselineUri, DELETED_SCHEME, ReviewTree, type FileItem } from './reviewTree';
 
 const CORE_SET_BASELINE = '_agentReview.setBaseline';
 const CORE_REMOVE = '_agentReview.remove';
@@ -235,6 +236,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   context.subscriptions.push(
     vscode.workspace.registerTextDocumentContentProvider(BASELINE_SCHEME, baselines),
+    vscode.workspace.registerTextDocumentContentProvider(DELETED_SCHEME, baselines),
     baselines,
     tree,
     view,
@@ -246,6 +248,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if (!arg) { return vscode.window.activeTextEditor?.document.uri.fsPath; }
     return arg instanceof vscode.Uri ? arg.fsPath : arg.file.absPath;
   };
+  // Tabs of files the agent deleted become the deletion's review (Keep Deletion / Restore File).
+  const deletions = new DeletionReview(ctl, (p) => ui.toUi(p), log);
+  context.subscriptions.push(deletions);
+  /** After Keep/Undo of a deletion: close its review; a restored file opens in its place if the review was active. */
+  const settleDeletion = async (p: string, restored: boolean) => {
+    await ctl.idle();
+    const real = normalizePath(p);
+    if (!ctl.pendingFiles.some((f) => f.absPath === real && f.kind === 'deleted') && (await closeDeletion(ui.toUi(real))) && restored) {
+      await vscode.window.showTextDocument(uiUri(real), { preview: false });
+    }
+  };
   const run = async (what: string, fn: () => Promise<unknown>) => {
     try {
       await fn();
@@ -256,13 +269,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.commands.registerCommand('agentReview.acceptFile', (arg?: FileItem | vscode.Uri) => run('Keep', async () => {
       const p = itemPath(arg);
-      if (p) { await ctl.acceptFile(p); }
+      if (!p) { return; }
+      await ctl.acceptFile(p);
+      await settleDeletion(p, false);
     })),
+    vscode.commands.registerCommand('agentReview.keepDeletion', (arg?: vscode.Uri) => vscode.commands.executeCommand('agentReview.acceptFile', arg)),
+    vscode.commands.registerCommand('agentReview.restoreFile', (arg?: vscode.Uri) => vscode.commands.executeCommand('agentReview.rejectFile', arg)),
     vscode.commands.registerCommand('agentReview.rejectFile', (arg?: FileItem | vscode.Uri) => run('Undo', async () => {
       const p = itemPath(arg);
-      if (p && (await ctl.rejectFile(p)) === 'unsaved') {
+      if (!p) { return; }
+      const outcome = await ctl.rejectFile(p);
+      if (outcome === 'unsaved') {
         void vscode.window.showInformationMessage(`Agent Review: undone in the editor. ${path.basename(p)} has unsaved edits, so it isn't saved yet; save it to write the undo to disk.`);
       }
+      await settleDeletion(p, true);
     })),
     vscode.commands.registerCommand('agentReview.acceptAll', () => run('Keep All', async () => {
       const r = await ctl.acceptAll();
@@ -294,8 +314,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const real = normalizePath(p);
       const f = ctl.pendingFiles.find((x) => x.absPath === real);
       const left = baselineUri(ui.toUi(f?.oldAbsPath ?? real));
-      // A deleted file: its accepted text against nothing, so it reads as deleted (all red), not as a normal file.
-      if (f?.kind === 'deleted') { await vscode.commands.executeCommand('vscode.diff', left, deletedUri(ui.toUi(real)), `${path.basename(p)} (deleted)`); }
+      // A deleted file: its accepted text against nothing, so it reads as deleted (all red), with Keep/Restore above.
+      if (f?.kind === 'deleted') { await showDeletion(ui.toUi(real)); }
       else { await vscode.commands.executeCommand('vscode.diff', left, uiUri(real), `${path.basename(p)} (accepted ↔ current)`); }
     })),
     vscode.commands.registerCommand('agentReview.refresh', () => run('Rescan', async () => {
@@ -313,6 +333,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Push everything pending (core was cleared by the probe above).
   await ctl.syncAll();
   updateBadge();
+  deletions.schedule(); // tabs restored with files deleted while the editor was closed
   // Changes made while the editor was closed were picked up by the engine's open (stat-cache rescan).
   log.info(`Agent review active: ${ctl.pendingFiles.length} file(s) pending.`);
 }

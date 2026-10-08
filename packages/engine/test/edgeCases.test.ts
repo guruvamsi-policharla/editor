@@ -121,6 +121,21 @@ describe('§7 agent creates, deletes, or renames files', () => {
     expect(await baselineFiles(engine)).toEqual({ 'deep/dir/a.txt': 'a\n' });
   });
 
+  it('a save of a file whose deletion is pending (its editor was still open) restores it, with the user\'s edits, nothing pending (#17)', async () => {
+    const ws = memWorkspace({ 'tmp.tex': 'Temp three.\n', 'b.tex': 'other\n' });
+    const engine = await ws.open();
+    await engine.handleFsEvents([ws.remove('tmp.tex')]);
+    expect(engine.listChanges().map((c) => [c.path, c.kind])).toEqual([['tmp.tex', 'deleted']]);
+    // The open buffer still has the old text; the user types a line and saves (the log starts from that text).
+    const buffer = 'Temp three.\n';
+    const saved = 'Temp three.\nz\n';
+    await engine.reportUserSave('tmp.tex', saved, { edits: [{ offset: buffer.length, length: 0, text: 'z\n', origin: 'user' }] });
+    ws.write('tmp.tex', saved);
+    await engine.handleFsEvents([ws.abs('tmp.tex')]);
+    expect(engine.listChanges()).toEqual([]);
+    expect((await baselineFiles(engine))['tmp.tex']).toBe(saved);
+  });
+
   it('delete + create with identical content is one rename', async () => {
     const ws = memWorkspace({ 'old/name.txt': 'same content\n' });
     const engine = await ws.open();

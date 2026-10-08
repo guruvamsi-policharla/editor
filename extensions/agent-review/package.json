@@ -119,6 +119,18 @@
         "icon": "$(discard)"
       },
       {
+        "command": "agentReview.keepDeletion",
+        "title": "Keep Deletion",
+        "category": "Agent Review",
+        "icon": "$(check)"
+      },
+      {
+        "command": "agentReview.restoreFile",
+        "title": "Restore File",
+        "category": "Agent Review",
+        "icon": "$(discard)"
+      },
+      {
         "command": "agentReview.openChanges",
         "title": "Open All Changes",
         "category": "Agent Review",
@@ -241,6 +253,26 @@
         {
           "command": "agentReview.openFileDiff",
           "when": "false"
+        },
+        {
+          "command": "agentReview.keepDeletion",
+          "when": "resourceScheme == agent-review-deleted"
+        },
+        {
+          "command": "agentReview.restoreFile",
+          "when": "resourceScheme == agent-review-deleted"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "agentReview.keepDeletion",
+          "when": "resourceScheme == agent-review-deleted",
+          "group": "navigation@1"
+        },
+        {
+          "command": "agentReview.restoreFile",
+          "when": "resourceScheme == agent-review-deleted",
+          "group": "navigation@2"
         }
       ]
     },

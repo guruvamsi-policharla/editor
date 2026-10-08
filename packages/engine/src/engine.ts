@@ -373,11 +373,18 @@ export class ReviewEngine {
       if (await this.rules.isIgnored(rel)) { return { attribution: 'file' as const }; }
 
       const diskNow = await this.readDisk(rel);
-      const diskBytes = options.base !== undefined ? toBytes(options.base) : diskNow?.data;
       if (diskNow?.entry.oid !== savedOid) { this.inFlightSaves.set(rel, { data: saved, oid: savedOid, before: diskNow?.entry ?? null, until: this.now() + SAVE_IN_FLIGHT_MS }); }
       else { this.inFlightSaves.delete(rel); }
       const baseEntry = this.baseline.get(rel);
       const baseBytes = baseEntry ? await this.store.read(baseEntry.oid) : undefined;
+      // A save of a file that is a pending deletion (the editor still had it open) brings it back: the user chose to
+      // keep the file, with their edits. Attribute against its accepted content, as if the deletion had been undone
+      // first, so the deletion stops being pending and what the user typed folds in. Against the missing file every
+      // saved line counted as typed, while the deletion of the old lines stayed pending: the old lines showed red above
+      // the same lines as plain text (#17).
+      const restoresDeletion = options.base === undefined && !diskNow && baseBytes !== undefined;
+      if (restoresDeletion) { this.trace(`${rel}: saved while its deletion is pending: the save restores it`); }
+      const diskBytes = options.base !== undefined ? toBytes(options.base) : restoresDeletion ? baseBytes : diskNow?.data;
 
       let newBaseline: Uint8Array | undefined;
       let attribution: UserSaveResult['attribution'];
