@@ -169,7 +169,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // run after formatters, so their edits count as the user's.
   if (hasCore) {
     context.subscriptions.push(
-      vscode.commands.registerCommand('agentReview.ext.onWillWrite', async (e: { uri: CoreUri; userVersion: number; version: number }) => {
+      vscode.commands.registerCommand('agentReview.ext.onWillWrite', async (e: { uri: CoreUri; userVersion: number; version: number; userText?: string }) => {
         const uri = toUri(e.uri);
         if (uri.scheme !== 'file') { return; }
         const doc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
@@ -178,8 +178,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         const inSync = doc.version === e.version;
         if (!inSync) { log.warn(`save of ${uri.fsPath}: document version ${doc.version}, core ${e.version}; attributing all edits to the user`); }
         const edits = logs.get(uri.toString(), inSync ? e.userVersion : undefined);
-        trace(`${uri.fsPath}: will write version ${e.version} (user edits up to ${e.userVersion}, document at ${doc.version}); edit log: ${edits ? `${edits.length} edits, ${edits.filter((x) => x.origin === 'formatter').length} by the formatter` : 'none'}`);
-        await ctl.onWillSave(uri.fsPath, doc.getText(), edits);
+        trace(`${uri.fsPath}: will write version ${e.version} (user edits up to ${e.userVersion}, document at ${doc.version}); edit log: ${edits ? `${edits.length} edits, ${edits.filter((x) => x.origin === 'formatter').length} by the formatter` : 'none'}; user text ${e.userText !== undefined ? 'given' : 'not given'}`);
+        // The text before save participants ran: given by core when they changed it; else it is what is written.
+        const content = doc.getText();
+        const userContent = e.userText ?? (e.version === e.userVersion ? content : undefined);
+        await ctl.onWillSave(uri.fsPath, content, edits, userContent);
       }),
     );
   } else {

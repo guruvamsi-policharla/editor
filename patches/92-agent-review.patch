@@ -736,10 +736,10 @@ index 00000000..77cb4f5b
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewSaveParticipant.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewSaveParticipant.ts
 new file mode 100644
-index 00000000..341604e2
+index 00000000..71987493
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewSaveParticipant.ts
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,89 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -751,10 +751,12 @@ index 00000000..341604e2
 +// agent-review extension hears about a save, formatter edits are already in the buffer and look like
 +// the user's typing.
 +//
-+// Two participants bracket all others: the first records the model's version before any participant
-+// runs; the last tells the extension `agentReview.ext.onWillWrite({ uri, userVersion, version })`
-+// right before the write. Buffer edits after `userVersion` were made by the editor during the save,
-+// not by the user: the engine keeps them pending inside agent hunks and folds them in elsewhere.
++// Two participants bracket all others: the first records the model's version and text before any
++// participant runs; the last tells the extension `agentReview.ext.onWillWrite({ uri, userVersion,
++// version, userText })` right before the write. Buffer edits after `userVersion` were made by the
++// editor during the save, not by the user: the engine keeps them pending inside agent hunks and folds
++// them in elsewhere. `userText` lets the engine find them by diffing (user text -> written text) even
++// when the extension's edit log or document version can't be trusted.
 +
 +import { raceTimeout } from '../../../../base/common/async.js';
 +import { Disposable } from '../../../../base/common/lifecycle.js';
@@ -772,6 +774,8 @@ index 00000000..341604e2
 +	readonly userVersion: number;
 +	/** Model version about to be written. */
 +	readonly version: number;
++	/** The text at `userVersion` (as the user left it), when save participants changed it; else omitted. */
++	readonly userText?: string;
 +}
 +
 +/** Same budget the extension host gets for onWillSaveTextDocument. */
@@ -783,7 +787,7 @@ index 00000000..341604e2
 +	static readonly FIRST = -1_000_000;
 +	static readonly LAST = 1_000_000;
 +
-+	private readonly _userVersions = new ResourceMap<number>();
++	private readonly _userVersions = new ResourceMap<{ readonly version: number; readonly text: string }>();
 +
 +	constructor(
 +		@ITextFileService textFileService: ITextFileService,
@@ -803,17 +807,20 @@ index 00000000..341604e2
 +
 +	private _willParticipate(model: ITextFileEditorModel): void {
 +		if (model.textEditorModel) {
-+			this._userVersions.set(model.resource, model.textEditorModel.getVersionId());
++			this._userVersions.set(model.resource, { version: model.textEditorModel.getVersionId(), text: model.textEditorModel.getValue() });
 +		}
 +	}
 +
 +	private async _willWrite(model: ITextFileEditorModel): Promise<void> {
-+		const userVersion = this._userVersions.get(model.resource);
++		const user = this._userVersions.get(model.resource);
 +		this._userVersions.delete(model.resource);
-+		if (userVersion === undefined || !model.textEditorModel) {
++		if (user === undefined || !model.textEditorModel) {
 +			return;
 +		}
-+		const event: IAgentReviewWillWriteEvent = { uri: model.resource, userVersion, version: model.textEditorModel.getVersionId() };
++		const version = model.textEditorModel.getVersionId();
++		const event: IAgentReviewWillWriteEvent = version === user.version
++			? { uri: model.resource, userVersion: user.version, version }
++			: { uri: model.resource, userVersion: user.version, version, userText: user.text };
 +		try {
 +			// Bounded: a slow or missing extension must never block saving.
 +			await raceTimeout(this._commandService.executeCommand('agentReview.ext.onWillWrite', event), WILL_WRITE_TIMEOUT_MS);
@@ -2015,10 +2022,10 @@ index 00000000..1ff7019e
 +});
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReviewSaveParticipant.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReviewSaveParticipant.test.ts
 new file mode 100644
-index 00000000..5c7bac64
+index 00000000..a8897fab
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReviewSaveParticipant.test.ts
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,132 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -2119,6 +2126,15 @@ index 00000000..5c7bac64
 +		assert.ok(event.version > userVersion, 'the formatter edit comes after the user version');
 +		assert.strictEqual(event.version, model.textEditorModel.getVersionId(), 'nothing changes after the report');
 +		assert.strictEqual(text, 'alpha = 1\ngamma = 3\n', 'reported right before the write, with the formatter edits applied');
++		assert.strictEqual(event.userText, 'alpha = 1\ngamma=3\n', 'the text as the user left it, before the formatter');
++	});
++
++	test('no userText when no participant changed the buffer', async () => {
++		model.textEditorModel.applyEdits([EditOperation.replace(new Range(2, 1, 2, 9), 'gamma = 3')]);
++		await model.save({ reason: SaveReason.EXPLICIT });
++		assert.strictEqual(events.length, 1);
++		assert.strictEqual(events[0].event.userVersion, events[0].event.version);
++		assert.strictEqual(events[0].event.userText, undefined);
 +	});
 +
 +	test('runs after participants added later, so their edits are reported too', async () => {

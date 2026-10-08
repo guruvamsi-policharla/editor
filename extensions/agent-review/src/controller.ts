@@ -243,8 +243,11 @@ export class ReviewController {
     }
   }
 
-  /** Before the editor writes a user save to disk. */
-  async onWillSave(absPath: string, content: string, edits: readonly TrackedEdit[] | undefined): Promise<void> {
+  /**
+   * Before the editor writes a user save to disk. `userContent`: the buffer before save participants (format on
+   * save) changed it, if known; the engine then tells the formatter's changes apart by diffing, not by the log.
+   */
+  async onWillSave(absPath: string, content: string, edits: readonly TrackedEdit[] | undefined, userContent?: string): Promise<void> {
     const abs = normalizePath(absPath);
     const engine = await this.review.engineFor(abs);
     if (!engine) { return; }
@@ -255,7 +258,7 @@ export class ReviewController {
       return;
     }
     try {
-      await engine.reportUserSave(abs, content, edits ? { edits } : {});
+      await engine.reportUserSave(abs, content, { ...(edits ? { edits } : {}), ...(userContent !== undefined ? { userContent } : {}) });
     } catch (err) {
       this.log.error(`reportUserSave failed for ${abs}`, err);
     }

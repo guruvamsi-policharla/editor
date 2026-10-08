@@ -12,7 +12,7 @@
  * All public operations are serialized.
  */
 import * as path from 'node:path';
-import { foldUserSave, provenanceFromDiff, trackEdits, type TrackedEdit } from './attribution.js';
+import { addFormatterPass, foldUserSave, provenanceFromDiff, trackEdits, type Provenance, type TrackedEdit } from './attribution.js';
 import { acceptHunks, computeHunks, hunkRegion, rejectHunks, type Hunk } from './diff/hunks.js';
 import { diffRegions } from './diff/myers.js';
 import { nodeFileSystem, type FileStat, type FileSystem } from './fs.js';
@@ -137,6 +137,14 @@ export interface UserSaveOptions {
    * `reportUserSave` before writing, or pass `base`.
    */
   base?: string | Uint8Array;
+  /**
+   * The buffer as the user left it, before format on save and other save participants changed it (the saved
+   * content if none did). With it, the user's part (disk -> userContent: the 'user' edits, else a diff) and the
+   * formatter's part (userContent -> saved, by diff) are told apart without trusting the edit log, so a formatter
+   * rewriting agent lines can never pass for the user rewriting them. Without it, edits tagged 'formatter' are the
+   * only way to know, and a log that doesn't replay counts every change as the user's.
+   */
+  userContent?: string;
 }
 
 export interface UserSaveResult {
@@ -390,11 +398,24 @@ export class ReviewEngine {
           diskText = convertEol(diskText, savedEol);
           baseText = convertEol(baseText, savedEol);
         }
-        let prov = options.edits ? trackEdits(diskText, options.edits) : undefined;
-        attribution = 'edits';
-        if (!prov || joinLines(prov.lines.map((l) => l.text)) !== savedText) {
-          prov = provenanceFromDiff(diskText, savedText, 'user');
-          attribution = options.edits ? 'fallback' : 'diff';
+        let prov: Provenance | undefined;
+        if (options.userContent !== undefined) {
+          // Two passes: the user's edits (disk -> userContent), then the formatter's (userContent -> saved).
+          const userText = savedEol ? convertEol(options.userContent, savedEol) : options.userContent;
+          prov = options.edits ? trackEdits(diskText, options.edits.filter((e) => e.origin === 'user')) : undefined;
+          attribution = 'edits';
+          if (!prov || joinLines(prov.lines.map((l) => l.text)) !== userText) {
+            prov = provenanceFromDiff(diskText, userText, 'user');
+            attribution = options.edits ? 'fallback' : 'diff';
+          }
+          prov = addFormatterPass(prov, userText, savedText);
+        } else {
+          prov = options.edits ? trackEdits(diskText, options.edits) : undefined;
+          attribution = 'edits';
+          if (!prov || joinLines(prov.lines.map((l) => l.text)) !== savedText) {
+            prov = provenanceFromDiff(diskText, savedText, 'user');
+            attribution = options.edits ? 'fallback' : 'diff';
+          }
         }
         const baseLines = splitLines(baseText);
         const folded = foldUserSave(baseLines, splitLines(diskText), prov);
@@ -402,7 +423,8 @@ export class ReviewEngine {
           const n = (o: string) => options.edits?.filter((e) => e.origin === o).length ?? 0;
           const before = diffRegions(baseLines, splitLines(diskText)).length;
           const after = diffRegions(folded, splitLines(savedText)).length;
-          this.trace(`${rel}: save attributed by ${attribution} (${options.edits ? `${options.edits.length} edits: ${n('user')} user, ${n('formatter')} formatter` : 'no edit log'}; base ${options.base !== undefined ? 'given' : 'from disk'}); changes against the baseline: ${before} before the save (baseline -> disk), ${after} after (new baseline -> saved)`);
+          const fmt = options.userContent === undefined ? 'formatter: by edit tags' : options.userContent === savedText ? 'no formatter changes' : 'formatter: by diff from the user text';
+          this.trace(`${rel}: save attributed by ${attribution} (${options.edits ? `${options.edits.length} edits: ${n('user')} user, ${n('formatter')} formatter` : 'no edit log'}; ${fmt}; base ${options.base !== undefined ? 'given' : 'from disk'}); changes against the baseline: ${before} before the save (baseline -> disk), ${after} after (new baseline -> saved)`);
         }
         // An agent-created file the user saved without folding anything stays a pending creation.
         if (!baseEntry && folded.length === 0 && saved.length > 0) { newBaseline = undefined; }

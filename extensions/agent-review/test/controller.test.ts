@@ -300,6 +300,24 @@ describe('ReviewController', () => {
     expect(await ctl.baselineText(abs)).not.toContain('warmup');
   });
 
+  it('with the user text from core, a broken edit log cannot make format on save accept the agent JSON edit', async () => {
+    fs.writeFileSync(path.join(root, 'data.json'), '{\n  "runs": 50,\n  "batch": [32, 128, 512]\n}\n');
+    await open();
+    const abs = await agentWrite('data.json', '{\n  "runs": 50, "warmup":5,"cores" :[1,2,4],\n  "batch": [32, 128, 512]\n}\n');
+    const user = read(abs).replace('512]\n', '512], 2048\n');
+    const saved = '{\n  "runs": 50,\n  "warmup": 5,\n  "cores": [\n    1,\n    2,\n    4\n  ],\n  "batch": [\n    32,\n    128,\n    512\n  ],\n  2048\n}\n';
+    dirty.add(abs);
+    // No edit log at all (e.g. the buffer was restored with unsaved edits), but core says what the user typed.
+    await ctl.onWillSave(abs, saved, undefined, user);
+    fs.writeFileSync(abs, saved);
+    dirty.delete(abs);
+    await ctl.onBufferSettled(abs);
+    await ctl.handleFsEvents([abs]);
+    await ctl.idle();
+    expect(ctl.pendingFiles.map((f) => path.basename(f.absPath))).toEqual(['data.json']);
+    expect(await ctl.baselineText(abs)).not.toContain('warmup');
+  });
+
   it('a change reported clean with no dirty state after it (a reload from disk) restarts the edit log', async () => {
     await open();
     const logs = new EditLogs();

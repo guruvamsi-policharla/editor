@@ -158,6 +158,44 @@ export function trackEdits(disk: string, edits: readonly TrackedEdit[]): Provena
 }
 
 /**
+ * Add a formatter pass to the provenance of the user's text: `saved` is `userText` after format on save (or any
+ * edits the editor made while saving). The formatter's changes are found by diffing, so this doesn't depend on an
+ * edit log: unchanged lines keep their provenance, removed disk lines count as removed by the formatter (unless the
+ * user removed them first), and new lines are the formatter's, except a line that replaces one line the user wrote
+ * (a line-for-line rewrite), which stays the user's.
+ */
+export function addFormatterPass(user: Provenance, userText: string, saved: string): Provenance {
+  if (userText === saved) { return user; }
+  const u = splitLines(userText);
+  const s = splitLines(saved);
+  const lines: SavedLine[] = [];
+  const removedBy = new Map(user.removedBy);
+  let ui = 0;
+  let si = 0;
+  const pushEqualUntil = (uEnd: number) => {
+    while (ui < uEnd) {
+      lines.push({ ...user.lines[ui++]!, text: s[si++]! });
+    }
+  };
+  for (const r of diffRegions(u, s)) {
+    pushEqualUntil(r.aStart);
+    for (let i = r.aStart; i < r.aEnd; i++) {
+      const src = user.lines[i]!.src;
+      if (src >= 0 && !removedBy.has(src)) { removedBy.set(src, 'formatter'); }
+    }
+    const paired = r.aEnd - r.aStart === r.bEnd - r.bStart;
+    for (let j = r.bStart; j < r.bEnd; j++) {
+      const prev = paired ? user.lines[r.aStart + (j - r.bStart)] : undefined;
+      lines.push({ text: s[j]!, src: -1, origin: prev?.origin === 'user' ? 'user' : 'formatter' });
+    }
+    ui = r.aEnd;
+    si = r.bEnd;
+  }
+  pushEqualUntil(u.length);
+  return { lines, removedBy };
+}
+
+/**
  * Compute the new baseline after a user save.
  *
  * @param baseline current baseline lines (B)

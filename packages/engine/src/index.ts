@@ -16,7 +16,7 @@ export {
   type UserSaveResult,
 } from './engine.js';
 export { MultiRootReview, storageDirForRoot, type MultiRootOptions } from './multiRoot.js';
-export { type TrackedEdit, type EditOrigin, type Provenance, type SavedLine, trackEdits, provenanceFromDiff, foldUserSave } from './attribution.js';
+export { type TrackedEdit, type EditOrigin, type Provenance, type SavedLine, trackEdits, provenanceFromDiff, addFormatterPass, foldUserSave } from './attribution.js';
 export { type Hunk, computeHunks, acceptHunks, rejectHunks, hunkRegion } from './diff/hunks.js';
 export { type InlineRange, type WordDiff, wordDiff, tokenize } from './diff/words.js';
 export { type Region, diffRegions } from './diff/myers.js';

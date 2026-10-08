@@ -14,7 +14,7 @@ describe('trace', () => {
     expect(text).toMatch(/\[\] a\.txt: baseline none -> \w{8} \(first scan\)/);
     expect(text).toMatch(/\[handleFsEvents\] a\.txt: pending \(disk \w{8}, baseline \w{8}\)/);
     expect(text).toContain('[handleFsEvents] watcher: a.txt (external)');
-    expect(text).toMatch(/\[reportUserSave\] a\.txt: save attributed by edits \(1 edits: 1 user, 0 formatter; base from disk\); changes against the baseline: 1 before the save .*, 1 after/);
+    expect(text).toMatch(/\[reportUserSave\] a\.txt: save attributed by edits \(1 edits: 1 user, 0 formatter; formatter: by edit tags; base from disk\); changes against the baseline: 1 before the save .*, 1 after/);
     expect(text).toMatch(/\[reportUserSave\] a\.txt: baseline \w{8} -> \w{8} \(user save, attribution: edits\)/);
     expect(text).toMatch(/\[acceptFile\] a\.txt: baseline \w{8} -> \w{8} \(Keep file, the save in flight\)/);
     expect(text).toMatch(/\[acceptFile\] a\.txt: no longer pending/);
