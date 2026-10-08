@@ -75,7 +75,8 @@ export class AgentTerminal implements vscode.Disposable {
     const target = chooseTarget(config.get<AgentTarget>('target', 'auto'), { terminal: this.lastUsed, chat: chatAt });
     if (target === 'chat') {
       try {
-        await vscode.commands.executeCommand('agentChat.insertReference', `${ref} `);
+        // Inserted at the chat input's cursor as an inline reference to these lines.
+        await vscode.commands.executeCommand('agentChat.insertReference', ref, doc.uri, startLine, endLine);
         return;
       } catch {
         // no agent chat in this build: fall back to the terminal

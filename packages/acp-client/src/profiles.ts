@@ -16,8 +16,11 @@ export interface HarnessProfile {
 	/** Stable id: `claude`, `codex`. The chat session type is `agent-<id>`. */
 	readonly id: string;
 	readonly label: string;
-	/** The pinned ACP adapter, installed from npm on first use unless `adapterPath` overrides it. */
-	readonly adapter: { readonly npm: string; readonly version: string; readonly bin: string };
+	/**
+	 * The ACP adapter: a pinned npm package installed on first use (`npm`), or one that ships with the editor
+	 * (`bundled`: a script in the extension's `dist/adapters`, tact's). `adapterPath` overrides either.
+	 */
+	readonly adapter: NpmAdapter | { readonly bundled: string };
 	/**
 	 * The harness's own CLI. When found on PATH it's passed to the adapter through `env`, so the user's install,
 	 * version and login are shared (and the adapter's bundled copy isn't needed). `bundled` is the adapter's own
@@ -38,14 +41,37 @@ export interface HarnessProfile {
 	readonly dangerousValues?: Readonly<Record<string, readonly string[]>>;
 	/** When option changes apply: per config id, else `default`. */
 	readonly timing: { readonly default: OptionTiming; readonly byId?: Readonly<Record<string, OptionTiming>> };
+	/**
+	 * Option values in which the harness doesn't edit files (plan, read-only). A chat in one of them doesn't wait
+	 * for another chat's turn to end. Keyed by config id.
+	 */
+	readonly readOnlyValues?: Readonly<Record<string, readonly string[]>>;
+	/** A codicon id for the harness's chats. */
+	readonly icon?: string;
 	/** Where plan mode lives (`mode=plan` for Claude, `collaboration_mode=plan` for Codex). */
 	readonly planOption?: { readonly configId: string; readonly value: string };
 	/** The harness's login command, run in a terminal: `<binary> ...args`. */
 	readonly login: { readonly args: readonly string[] };
 	/** Shown in the model picker before the adapter has started for the first time. */
 	readonly placeholderModel: { readonly id: string; readonly name: string };
+	/** How to install the harness, shown when its CLI isn't found. */
+	readonly install?: string;
 	/** Standing permission rules (phase C rules editor). */
 	readonly rules?: { readonly format: 'claude-settings' | 'codex-execpolicy'; readonly files: readonly string[] };
+}
+
+export interface NpmAdapter {
+	readonly npm: string;
+	readonly version: string;
+	readonly bin: string;
+}
+
+/** The profile's npm adapter (throws for a bundled one, which needs no install). */
+export function npmAdapter(profile: HarnessProfile): NpmAdapter {
+	if (!('npm' in profile.adapter)) {
+		throw new Error(`${profile.label}'s adapter ships with the editor; nothing to install`);
+	}
+	return profile.adapter;
 }
 
 export const CLAUDE: HarnessProfile = {
@@ -59,6 +85,8 @@ export const CLAUDE: HarnessProfile = {
 	hiddenValues: { mode: ['bypassPermissions'] },
 	dangerousValues: { mode: ['bypassPermissions'] },
 	timing: { default: 'live' },
+	readOnlyValues: { mode: ['plan'] },
+	icon: 'sparkle',
 	planOption: { configId: 'mode', value: 'plan' },
 	login: { args: ['auth', 'login'] },
 	placeholderModel: { id: 'default', name: 'Default (recommended)' },
@@ -78,13 +106,33 @@ export const CODEX: HarnessProfile = {
 	dangerousValues: { mode: ['agent-full-access'] },
 	// The adapter sends approval policy, sandbox, model, effort and speed with each turn.
 	timing: { default: 'next-turn', byId: { collaboration_mode: 'live' } },
+	readOnlyValues: { mode: ['read-only'], collaboration_mode: ['plan'] },
+	icon: 'terminal',
 	planOption: { configId: 'collaboration_mode', value: 'plan' },
 	login: { args: ['login'] },
 	placeholderModel: { id: 'default', name: 'Default' },
 	rules: { format: 'codex-execpolicy', files: ['~/.codex/rules/default.rules'] },
 };
 
-export const BUILTIN_PROFILES: readonly HarnessProfile[] = [CLAUDE, CODEX];
+/**
+ * tact (https://github.com/clabby/tact), Nanocodex in a terminal UI. tact has no ACP mode; our adapter
+ * (packages/tact-acp, bundled) runs its terminal UI in a hidden pty and talks to the web API every running tact
+ * serves (tact's main branch after v0.8.3). tact never asks for permission: Nanocodex runs with full access.
+ */
+export const TACT: HarnessProfile = {
+	id: 'tact',
+	label: 'tact',
+	adapter: { bundled: 'tact-acp.js' },
+	harness: { binary: 'tact', env: 'TACT_BIN', fallbackPaths: ['~/.local/bin/tact', '~/.cargo/bin/tact'] },
+	// The model and reasoning mode are fixed after the first message (the adapter then offers only the current one).
+	timing: { default: 'live' },
+	icon: 'rocket',
+	login: { args: ['auth', 'login'] },
+	placeholderModel: { id: 'gpt-6.1-sol', name: 'Sol' },
+	install: 'Install tact with `cargo install --locked --git https://github.com/clabby/tact tact` (the web API the editor uses is on tact\'s main branch, after v0.8.3), then sign in with `tact auth login`.',
+};
+
+export const BUILTIN_PROFILES: readonly HarnessProfile[] = [CLAUDE, CODEX, TACT];
 
 /** User overrides from settings (`agentChat.harnesses.<id>`). */
 export interface ProfileOverride {

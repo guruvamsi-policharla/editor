@@ -1,6 +1,6 @@
 // A chat request → ACP prompt content blocks. The text goes as typed (references like `@main.tex:L42-58`
-// stay in it, which every harness understands); each referenced file is also sent as a `resource_link`,
-// which ACP requires every agent to accept. Pure, for unit tests.
+// stay in it, in place, which every harness understands); each referenced file is also sent as a
+// `resource_link` (inline ones in text order), which ACP requires every agent to accept. Pure, for unit tests.
 import type { acp } from '@editor/acp-client';
 
 export interface PromptReference {
@@ -8,6 +8,8 @@ export interface PromptReference {
 	path: string;
 	startLine?: number;
 	endLine?: number;
+	/** Where an inline reference (a Cmd/Ctrl+L pill, `#file`) sits in the prompt text. */
+	at?: number;
 }
 
 export interface PromptInput {
@@ -52,7 +54,9 @@ export function promptBlocks(input: PromptInput): acp.ContentBlock[] {
 	const text = input.command ? `/${input.command}${input.prompt ? ` ${input.prompt}` : ''}` : input.prompt;
 	const blocks: acp.ContentBlock[] = [{ type: 'text', text }];
 	const seen = new Set<string>();
-	for (const ref of [...input.references, ...mentions(input.prompt, input.root, input.exists)]) {
+	// Inline references in the order they appear in the text, then attached files and the active editor.
+	const refs = [...input.references].sort((a, b) => (a.at ?? Infinity) - (b.at ?? Infinity));
+	for (const ref of [...refs, ...mentions(input.prompt, input.root, input.exists)]) {
 		const name = linkName(ref, input.root);
 		if (seen.has(name)) {
 			continue;

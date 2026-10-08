@@ -9,7 +9,7 @@
 import { spawn } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { HarnessProfile } from './profiles.js';
+import { npmAdapter, type HarnessProfile } from './profiles.js';
 
 export type CommandRunner = (command: string, args: readonly string[], options: { cwd: string; env?: Record<string, string> }) => Promise<void>;
 
@@ -41,7 +41,7 @@ export class AdapterInstaller {
 	constructor(private readonly root: string, private readonly lockfiles: string | undefined, private readonly run: CommandRunner = runCommand, private readonly npm = 'npm') { }
 
 	dirFor(profile: HarnessProfile): string {
-		return join(this.root, profile.id, profile.adapter.version);
+		return join(this.root, profile.id, npmAdapter(profile).version);
 	}
 
 	/** The installed adapter, if a complete install exists (and has optional deps when they're needed). */
@@ -55,7 +55,7 @@ export class AdapterInstaller {
 			if (needFull && !marker.full) {
 				return undefined;
 			}
-			return { entry: resolveBin(join(dir, 'node_modules'), profile.adapter.npm, profile.adapter.bin), nodeModules: join(dir, 'node_modules'), full: !!marker.full };
+			return { entry: resolveBin(join(dir, 'node_modules'), npmAdapter(profile).npm, npmAdapter(profile).bin), nodeModules: join(dir, 'node_modules'), full: !!marker.full };
 		} catch {
 			return undefined;
 		}
@@ -66,7 +66,7 @@ export class AdapterInstaller {
 		if (have) {
 			return Promise.resolve(have);
 		}
-		const key = `${profile.id}@${profile.adapter.version}`;
+		const key = `${profile.id}@${npmAdapter(profile).version}`;
 		let p = this.inflight.get(key);
 		if (!p) {
 			p = this.install(profile, options).finally(() => this.inflight.delete(key));
@@ -85,24 +85,24 @@ export class AdapterInstaller {
 			const manifest = shipped && existsSync(join(shipped, 'package.json'))
 				? JSON.parse(readFileSync(join(shipped, 'package.json'), 'utf8')) as { dependencies?: Record<string, string> }
 				: undefined;
-			if (pinnedLock && manifest?.dependencies?.[profile.adapter.npm] === profile.adapter.version) {
+			if (pinnedLock && manifest?.dependencies?.[npmAdapter(profile).npm] === npmAdapter(profile).version) {
 				cpSync(join(shipped, 'package.json'), join(staging, 'package.json'));
 				cpSync(join(shipped, 'package-lock.json'), join(staging, 'package-lock.json'));
 			} else {
-				writeFileSync(join(staging, 'package.json'), JSON.stringify({ private: true, dependencies: { [profile.adapter.npm]: profile.adapter.version } }, null, 2));
+				writeFileSync(join(staging, 'package.json'), JSON.stringify({ private: true, dependencies: { [npmAdapter(profile).npm]: npmAdapter(profile).version } }, null, 2));
 			}
 			const args = [
 				pinnedLock ? 'ci' : 'install',
 				...(options.omitOptional ? ['--omit=optional'] : []),
 				'--ignore-scripts', '--no-audit', '--no-fund', '--loglevel=error',
 			];
-			options.onProgress?.(`Installing ${profile.adapter.npm}@${profile.adapter.version}…`);
+			options.onProgress?.(`Installing ${npmAdapter(profile).npm}@${npmAdapter(profile).version}…`);
 			await this.run(this.npm, args, { cwd: staging, env: { npm_config_update_notifier: 'false' } });
-			const entry = resolveBin(join(staging, 'node_modules'), profile.adapter.npm, profile.adapter.bin);
+			const entry = resolveBin(join(staging, 'node_modules'), npmAdapter(profile).npm, npmAdapter(profile).bin);
 			if (!existsSync(entry)) {
-				throw new Error(`the install has no ${profile.adapter.bin} entry point`);
+				throw new Error(`the install has no ${npmAdapter(profile).bin} entry point`);
 			}
-			writeFileSync(join(staging, MARKER), JSON.stringify({ package: profile.adapter.npm, version: profile.adapter.version, full: !options.omitOptional, at: new Date().toISOString() }));
+			writeFileSync(join(staging, MARKER), JSON.stringify({ package: npmAdapter(profile).npm, version: npmAdapter(profile).version, full: !options.omitOptional, at: new Date().toISOString() }));
 			rmSync(dir, { recursive: true, force: true });
 			renameSync(staging, dir);
 			return this.installed(profile)!;

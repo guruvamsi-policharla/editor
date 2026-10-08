@@ -8,8 +8,14 @@
 // - Permission requests → core's confirmation tool, which can't be auto-approved; Stop → `session/cancel`.
 // - Not logged in → a "Sign in" picker and a warning with a button that runs the harness's login in a terminal.
 // - An adapter crash ends the turn with an error; the next message restarts it and resumes the session.
+// - History: every chat's transcript is saved (history.ts) and listed through the session item controller, with
+//   sessions the agent lists (`session/list`) that we don't have. Reopening shows the saved transcript (or a
+//   `session/load` replay) without starting anything; the next message resumes the session.
+// - Several chats run at once (one adapter per harness, one ACP session per chat); a turn waits while another
+//   chat's turn is running (scheduler.ts).
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { join } from 'node:path';
 import * as vscode from 'vscode';
 import {
 	AdapterInstaller, AgentSupervisor, claudePersistence, codexPersistence, configControls, errorMessage, HarnessClient,
@@ -17,11 +23,14 @@ import {
 	type AcpSession, type acp, type AgentStatus, type ConfigControl, type HarnessProfile, type PermissionPrompt, type ProfileOverride,
 } from '@editor/acp-client';
 import { changedSelections, groupsFromControls, signInGroup, SIGN_IN_GROUP } from './groups.js';
+import type { ChatEntry, ChatHistory } from './history.js';
 import { loginCommand, resolveLaunch } from './launch.js';
 import { HarnessModels } from './models.js';
 import { promptBlocks, type PromptReference } from './prompt.js';
 import { permissionButtons, TurnRenderer } from './render.js';
-import { StreamWriter } from './stream.js';
+import type { Lease, TurnScheduler } from './scheduler.js';
+import { historyTurns, StreamWriter } from './stream.js';
+import { ReplayBuilder, TranscriptBuilder } from './transcript.js';
 
 const CONFIRM_TOOL = 'vscode_get_confirmation_with_options';
 /** Opening a chat this long after activation counts as the user's doing (not a window restore): warm up. */
@@ -36,7 +45,12 @@ export interface ChatEnv {
 	/** Called whenever the user works with a chat (for Cmd/Ctrl+L's "last used" target). */
 	markUsed: () => void;
 	version: string;
+	history: ChatHistory;
+	scheduler: TurnScheduler;
 }
+
+/** Sessions the agent lists that aren't our chats get resources under this path. */
+const LISTED = '/session/';
 
 const icon = (id: string) => new vscode.ThemeIcon(id);
 
@@ -59,6 +73,10 @@ export class HarnessChat implements vscode.Disposable {
 	/** chat session resource → the model picker's selection at its last message */
 	private readonly pickedModels = new Map<string, string>();
 	private controller!: vscode.ChatSessionItemController;
+	/** chat session resource → its transcript (live chats and chats reopened in this window) */
+	private readonly transcripts = new Map<string, TranscriptBuilder>();
+	/** The agent's own sessions (`session/list`), fetched once the adapter runs. */
+	private listed: acp.SessionInfo[] = [];
 	private turns = 0;
 	/** When a turn last showed a crash in the chat (no second notification for the same crash). */
 	private crashShownAt = 0;
@@ -84,10 +102,11 @@ export class HarnessChat implements vscode.Disposable {
 	// Registration
 
 	register(): vscode.Disposable {
-		const controller = this.controller = vscode.chat.createChatSessionItemController(this.type, async () => { /* history: phase D */ });
+		const controller = this.controller = vscode.chat.createChatSessionItemController(this.type, async () => this.refreshItems());
 		controller.newChatSessionItemHandler = async ctx => {
 			const resource = vscode.Uri.from({ scheme: this.type, path: `/${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` });
-			const item = controller.createChatSessionItem(resource, ctx.request.prompt.slice(0, 50) || this.label);
+			const item = controller.createChatSessionItem(resource, titleOf(ctx.request.prompt) || this.label);
+			item.iconPath = this.icon();
 			item.timing = { created: Date.now(), lastRequestStarted: Date.now() };
 			controller.items.add(item);
 			this.items.set(resource.toString(), item);
@@ -96,10 +115,10 @@ export class HarnessChat implements vscode.Disposable {
 		controller.getChatSessionInputState = (resource, ctx) => this.inputState(resource, ctx);
 
 		const participant = vscode.chat.createChatParticipant(this.type, (request, context, stream, token) => this.handle(request, context, stream, token));
-		participant.iconPath = new vscode.ThemeIcon(this.profile.id === 'claude' ? 'sparkle' : 'terminal');
+		participant.iconPath = this.icon();
 		// No provideHandleOptionsChange: with it, core takes a legacy path that leaves the controller's input state stale.
 		const provider: vscode.ChatSessionContentProvider = {
-			provideChatSessionContent: () => ({ history: [], requestHandler: undefined }),
+			provideChatSessionContent: resource => this.content(resource),
 		};
 		this.publishModels();
 		return vscode.Disposable.from(controller, participant, vscode.chat.registerChatSessionContentProvider(this.type, provider, participant), this);
@@ -111,7 +130,7 @@ export class HarnessChat implements vscode.Disposable {
 	private harness(): HarnessClient {
 		if (!this.client) {
 			const supervisor = new AgentSupervisor({
-				launch: progress => resolveLaunch(this.profile, this.override(), this.env.installer, this.cwd(), progress),
+				launch: progress => resolveLaunch(this.profile, this.override(), this.env.installer, this.cwd(), progress, join(this.env.context.extensionPath, 'dist', 'adapters')),
 				clientInfo: { name: 'editor', title: vscode.env.appName, version: this.env.version },
 			});
 			const broker = new PermissionBroker(this.profile.id === 'codex' ? codexPersistence : claudePersistence);
@@ -130,6 +149,7 @@ export class HarnessChat implements vscode.Disposable {
 				break;
 			case 'ready':
 				log.info(`[${this.profile.id}] ready: ${s.agentInfo?.name ?? '?'} ${s.agentInfo?.version ?? ''}`);
+				void this.fetchListed();
 				break;
 			case 'exited':
 				log.error(`[${this.profile.id}] adapter exited (${s.signal ?? `code ${s.code}`}), crash ${s.crashes}\n${s.stderr.slice(-2000)}`);
@@ -213,6 +233,146 @@ export class HarnessChat implements vscode.Disposable {
 		} catch (e) {
 			void vscode.window.showErrorMessage(`Couldn't start the ${this.label} sign-in: ${errorMessage(e)}`);
 		}
+	}
+
+	// ---------------------------------------------------------------------------------------------------------
+	// History
+
+	private icon(): vscode.ThemeIcon {
+		return new vscode.ThemeIcon(this.profile.icon ?? 'comment-discussion');
+	}
+
+	private itemFor(entry: ChatEntry): vscode.ChatSessionItem {
+		const item = this.items.get(entry.resource) ?? this.controller.createChatSessionItem(vscode.Uri.parse(entry.resource), entry.title);
+		item.label = entry.title;
+		item.iconPath = this.icon();
+		item.timing = { created: entry.created, lastRequestStarted: entry.updated, lastRequestEnded: entry.updated };
+		this.items.set(entry.resource, item);
+		return item;
+	}
+
+	/** The controller's items: our saved chats, then the agent's own sessions that aren't one of them. */
+	private refreshItems(): void {
+		const items = this.env.history.list(this.profile.id).map(e => this.itemFor(e));
+		const ours = new Set(this.env.history.list(this.profile.id).map(e => e.sessionId));
+		for (const info of this.listed) {
+			// Untitled ones never had a message (a chat opened and left empty).
+			if (ours.has(info.sessionId) || !info.title?.trim()) {
+				continue;
+			}
+			const resource = vscode.Uri.from({ scheme: this.type, path: `${LISTED}${encodeURIComponent(info.sessionId)}` });
+			const item = this.items.get(resource.toString()) ?? this.controller.createChatSessionItem(resource, info.title);
+			item.iconPath = this.icon();
+			// Listed by the agent, not started here (Claude Code lists its terminal sessions too).
+			item.description = `${this.label}, not opened here yet`;
+			const updated = info.updatedAt ? Date.parse(info.updatedAt) : undefined;
+			if (updated) {
+				item.timing = { created: updated, lastRequestEnded: updated };
+			}
+			this.items.set(resource.toString(), item);
+			items.push(item);
+		}
+		// Chats started in this window that have no saved turn yet.
+		for (const [key, item] of this.items) {
+			if (!items.includes(item) && this.sessions.has(key)) {
+				items.push(item);
+			}
+		}
+		this.controller.items.replace(items);
+	}
+
+	/** The agent's own sessions (Claude Code also lists the ones started in a terminal), once it runs. */
+	private async fetchListed(): Promise<void> {
+		try {
+			this.listed = await this.harness().list();
+			this.refreshItems();
+		} catch (e) {
+			this.env.log.warn(`[${this.profile.id}] session/list: ${errorMessage(e)}`);
+		}
+	}
+
+	/** What an opened chat shows: its saved transcript, or the agent's replay of a listed session. */
+	private async content(resource: vscode.Uri): Promise<vscode.ChatSession> {
+		const key = resource.toString();
+		let turns = this.transcripts.get(key)?.turns ?? this.env.history.transcript(key);
+		if (!turns && resource.path.startsWith(LISTED)) {
+			turns = await this.loadListed(key, decodeURIComponent(resource.path.slice(LISTED.length)));
+		}
+		const entry = this.env.history.get(key);
+		return {
+			history: historyTurns(turns ?? [], this.type, key),
+			requestHandler: undefined,
+			...(entry ? { title: entry.title } : {}),
+		};
+	}
+
+	/** `session/load` a session the agent listed: its replay becomes the transcript, and the chat one of ours. */
+	private async loadListed(key: string, sessionId: string): Promise<TranscriptBuilder['turns']> {
+		const replay = new ReplayBuilder();
+		try {
+			const session = this.harness().restore(sessionId);
+			const off = session.onChange(c => { if (session.replaying) { replay.apply(c); } });
+			try {
+				await this.harness().load(sessionId);
+			} finally {
+				off();
+			}
+			const turns = replay.finish();
+			const transcript = new TranscriptBuilder(turns);
+			this.transcripts.set(key, transcript);
+			this.attach(key, session, this.items.get(key));
+			const info = this.listed.find(i => i.sessionId === sessionId);
+			this.saveChat(key, session, info?.title || titleOf(turns[0]?.prompt ?? '') || `${this.label} session`);
+			return turns;
+		} catch (e) {
+			this.env.log.warn(`[${this.profile.id}] session/load ${sessionId}: ${errorMessage(e)}`);
+			return [{ prompt: '', ops: [{ op: 'markdown', text: `*${this.label} couldn't reopen this session: ${firstLine(errorMessage(e))}*` }] }];
+		}
+	}
+
+	private transcriptFor(key: string): TranscriptBuilder {
+		let t = this.transcripts.get(key);
+		if (!t) {
+			t = new TranscriptBuilder(this.env.history.transcript(key) ?? []);
+			this.transcripts.set(key, t);
+		}
+		return t;
+	}
+
+	private saveChat(key: string, session: AcpSession | undefined, title?: string): void {
+		const transcript = this.transcripts.get(key);
+		const prev = this.env.history.get(key);
+		const item = this.items.get(key);
+		const entry: ChatEntry = {
+			resource: key,
+			harness: this.profile.id,
+			...(session ? { sessionId: session.id } : prev?.sessionId ? { sessionId: prev.sessionId } : {}),
+			title: title ?? item?.label ?? prev?.title ?? this.label,
+			created: prev?.created ?? item?.timing?.created ?? Date.now(),
+			updated: Date.now(),
+			turns: transcript?.turns.length ?? prev?.turns ?? 0,
+		};
+		try {
+			this.env.history.save(entry, transcript?.turns, transcript?.text());
+		} catch (e) {
+			this.env.log.warn(`[${this.profile.id}] couldn't save the chat: ${errorMessage(e)}`);
+		}
+	}
+
+	/** Forget a chat (its transcript; the agent's own session is closed, not deleted). */
+	async removeChat(resource: vscode.Uri): Promise<void> {
+		const key = resource.toString();
+		const session = this.sessions.get(key);
+		this.sessions.delete(key);
+		this.transcripts.delete(key);
+		this.items.delete(key);
+		this.env.history.remove(key);
+		await session?.close();
+		this.refreshItems();
+	}
+
+	owns(resource: vscode.Uri): boolean {
+		return resource.scheme === this.type;
 	}
 
 	// ---------------------------------------------------------------------------------------------------------
@@ -375,10 +535,14 @@ export class HarnessChat implements vscode.Disposable {
 			item.timing = { ...item.timing, created: item.timing?.created ?? Date.now(), lastRequestStarted: Date.now() };
 		}
 
-		// The ACP session behind this chat.
+		// The ACP session behind this chat: a live one, one reopened from history (resumed by ensureLive), or new.
 		let session = this.sessions.get(key);
 		const firstMessage = !session;
-		if (!session) {
+		const saved = session ? undefined : this.env.history.get(key)?.sessionId;
+		if (!session && saved) {
+			session = this.harness().restore(saved, this.env.context.globalState.get<acp.SessionConfigOption[]>(this.cacheKey()));
+			this.attach(key, session, item);
+		} else if (!session) {
 			try {
 				stream.progress(this.client?.supervisor.running ? `Starting a ${this.label} session…` : `Starting ${this.label}…`);
 				session = await this.takeSession();
@@ -386,33 +550,39 @@ export class HarnessChat implements vscode.Disposable {
 				return this.startError(e, stream);
 			}
 			this.auth = 'unknown';
-			this.sessions.set(key, session);
 			this.remember(session);
-			session.onChange(c => {
-				if (c.kind === 'info' && c.title && item) {
-					item.label = c.title;
-				}
-				if (c.kind === 'config' || c.kind === 'mode') {
-					this.remember(session!);
-					this.refresh(session);
-				}
-			});
-			this.refresh(session);
+			this.attach(key, session, item);
 		}
 
 		this.turns++;
 		const turnId = `${Date.now().toString(36)}`;
 		const writer = new StreamWriter(stream, request, token, this.env.log);
 		const renderer = new TurnRenderer(turnId);
+		const transcript = this.transcriptFor(key);
+		transcript.startTurn(request.command ? `/${request.command}${request.prompt ? ` ${request.prompt}` : ''}` : request.prompt);
+		const show = (ops: ReturnType<TurnRenderer['render']>) => {
+			writer.write(ops);
+			transcript.add(ops);
+		};
 		let offChange: (() => void) | undefined;
 		let offAsker: (() => void) | undefined;
-		const cancelSub = token.onCancellationRequested(() => { void session!.cancel(); });
+		let lease: Lease | undefined;
+		const stop = new AbortController();
+		const cancelSub = token.onCancellationRequested(() => {
+			stop.abort();
+			void session!.cancel();
+		});
+		if (item) {
+			item.status = vscode.ChatSessionStatus.InProgress;
+		}
 		try {
 			const { recovery } = await session.ensureLive();
-			if (recovery === 'resumed') {
+			if (recovery === 'resumed' && !firstMessage) {
 				stream.progress(`Reconnected to ${this.label}.`);
 			} else if (recovery === 'new') {
-				stream.warning(`${this.label} restarted, and this chat continues in a new session: earlier messages aren't in its context.`);
+				stream.warning(saved && firstMessage
+					? `${this.label} couldn't reopen the earlier session, so this chat continues in a new one: earlier messages aren't in its context.`
+					: `${this.label} restarted, and this chat continues in a new session: earlier messages aren't in its context.`);
 			}
 
 			// Pickers chosen before the first message (carried over from the untitled chat), then the model picker.
@@ -436,7 +606,25 @@ export class HarnessChat implements vscode.Disposable {
 				this.refresh(session);
 			}
 
-			offChange = session.onChange(c => writer.write(renderer.render(c)));
+			// One agent edits at a time: wait while another chat's turn runs (plan mode never waits).
+			lease = await this.env.scheduler.acquire({ chat: key, label: `${this.label} (“${item?.label ?? 'chat'}”)` }, {
+				readOnly: this.readOnly(session),
+				signal: stop.signal,
+				onWait: (id, blockers) => {
+					const who = blockers.map(b => b.label).join(', ');
+					this.env.log.info(`[${this.profile.id}] waiting for ${who}`);
+					// The line stays in the chat; the spinner below it goes once the turn starts.
+					stream.markdown(`Another chat is working in this workspace: **${who}**. This message starts when it's done, so the two agents don't edit the same files at once.\n\n`);
+					stream.button({ command: 'agentChat.runNow', title: 'Run now', arguments: [id] });
+					stream.progress(`Waiting for ${who} to finish…`);
+				},
+			});
+			if (!lease) {
+				transcript.endTurn(true);
+				return {};
+			}
+
+			offChange = session.onChange(c => show(renderer.render(c)));
 			offAsker = this.harness().broker.setAsker(session.id, (p, signal) => this.askPermission(p, signal, request, token));
 
 			const blocks = promptBlocks({
@@ -449,26 +637,51 @@ export class HarnessChat implements vscode.Disposable {
 			const links = blocks.filter(b => b.type === 'resource_link').map(b => (b.type === 'resource_link' ? b.name : ''));
 			this.env.log.info(`[${this.profile.id}] prompt: text${links.length ? ` + resource_link ${links.join(', ')}` : ''}`);
 			const result = await session.prompt(blocks);
-			writer.write(renderer.finish(result.stopReason === 'cancelled' ? 'stopped' : 'ended'));
+			show(renderer.finish(result.stopReason === 'cancelled' ? 'stopped' : 'ended'));
+			transcript.endTurn(result.stopReason === 'cancelled');
 			// The contract guard, in the app too: the agent must never call fs/* or terminal/* (we don't serve them).
 			const forbidden = this.client?.supervisor.running?.connection.forbiddenInbound() ?? [];
 			this.env.log[forbidden.length ? 'error' : 'info'](`[${this.profile.id}] turn ended: ${result.stopReason}; fs/terminal requests from the agent: ${forbidden.length ? forbidden.join(', ') : 'none'}`);
 			return this.result(result, stream, session);
 		} catch (e) {
-			writer.write(renderer.finish(token.isCancellationRequested ? 'stopped' : 'interrupted'));
+			show(renderer.finish(token.isCancellationRequested ? 'stopped' : 'interrupted'));
+			transcript.endTurn(token.isCancellationRequested);
 			if (token.isCancellationRequested) {
 				return {};
 			}
 			return await this.turnError(e, stream);
 		} finally {
+			lease?.release();
 			offChange?.();
 			offAsker?.();
 			cancelSub.dispose();
 			this.turns--;
 			if (item) {
 				item.timing = { ...item.timing, created: item.timing?.created ?? Date.now(), lastRequestEnded: Date.now() };
+				item.status = vscode.ChatSessionStatus.Completed;
 			}
+			this.saveChat(key, session);
 		}
+	}
+
+	/** Track a chat's session: title and picker updates. */
+	private attach(key: string, session: AcpSession, item: vscode.ChatSessionItem | undefined): void {
+		this.sessions.set(key, session);
+		session.onChange(c => {
+			if (c.kind === 'info' && c.title && item) {
+				item.label = c.title;
+			}
+			if ((c.kind === 'config' || c.kind === 'mode') && !session.replaying) {
+				this.remember(session);
+				this.refresh(session);
+			}
+		});
+		this.refresh(session);
+	}
+
+	/** The session is in a mode that can't edit (plan, read-only): its turns don't wait for other chats. */
+	private readOnly(session: AcpSession): boolean {
+		return this.controlsFor(session).some(c => this.profile.readOnlyValues?.[c.id]?.includes(c.current));
 	}
 
 	private result(result: acp.PromptResponse, stream: vscode.ChatResponseStream, session: AcpSession): vscode.ChatResult {
@@ -572,19 +785,26 @@ export class HarnessChat implements vscode.Disposable {
 	}
 }
 
+/** A chat's title from its first prompt: one line, at most 50 characters. */
+function titleOf(prompt: string): string {
+	const line = prompt.trim().split('\n')[0]!.trim();
+	return line.length > 50 ? `${line.slice(0, 49).trimEnd()}…` : line;
+}
+
 function firstLine(text: string): string {
 	return text.split('\n')[0]!.slice(0, 300);
 }
 
-/** The request's references (attached files, the active editor) as prompt references. */
+/** The request's references (inline pills with their offset in the prompt, attached files, the active editor). */
 function references(request: vscode.ChatRequest): PromptReference[] {
 	const out: PromptReference[] = [];
 	for (const ref of request.references) {
 		const v = ref.value;
+		const at = ref.range ? { at: ref.range[0] } : {};
 		if (v instanceof vscode.Uri && v.scheme === 'file') {
-			out.push({ path: v.fsPath });
+			out.push({ path: v.fsPath, ...at });
 		} else if (v instanceof vscode.Location && v.uri.scheme === 'file') {
-			out.push({ path: v.uri.fsPath, startLine: v.range.start.line + 1, endLine: v.range.end.line + 1 });
+			out.push({ path: v.uri.fsPath, startLine: v.range.start.line + 1, endLine: v.range.end.line + 1, ...at });
 		}
 	}
 	return out;
