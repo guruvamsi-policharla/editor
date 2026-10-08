@@ -67,13 +67,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const uiUri = (abs: string) => vscode.Uri.file(ui.toUi(abs));
   const bridge: CoreBridge = {
     setBaseline: async (uiPath, baseline, kind) => {
-      if (hasCore) await vscode.commands.executeCommand(CORE_SET_BASELINE, vscode.Uri.file(uiPath), baseline, kind);
+      if (hasCore) { await vscode.commands.executeCommand(CORE_SET_BASELINE, vscode.Uri.file(uiPath), baseline, kind); }
     },
     remove: async (uiPath) => {
-      if (hasCore) await vscode.commands.executeCommand(CORE_REMOVE, vscode.Uri.file(uiPath));
+      if (hasCore) { await vscode.commands.executeCommand(CORE_REMOVE, vscode.Uri.file(uiPath)); }
     },
     rejectInEditor: async (uiPath) => {
-      if (!hasCore) return undefined;
+      if (!hasCore) { return undefined; }
       return vscode.commands.executeCommand<'saved' | 'unsaved' | 'deleted' | undefined>(CORE_REJECT, vscode.Uri.file(uiPath));
     },
   };
@@ -83,6 +83,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     isDirty: (abs: string) => vscode.workspace.textDocuments.some((d) => d.uri.scheme === 'file' && d.isDirty && samePath(normalizePath(d.uri.fsPath), abs)),
   };
 
+  // eslint-disable-next-line prefer-const -- the controller's conflict callback is created before the merger it calls
   let conflicts: ConflictMerger | undefined;
   controller = new ReviewController(review, bridge, docs, {
     info: (m) => log.info(m),
@@ -96,7 +97,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.commands.registerCommand('agentReview.ext.onDidHunkAction', async (e: { uri: CoreUri; kind: ReviewAction['kind']; baseline?: string }) => {
       const uri = toUri(e.uri);
-      if (uri.scheme !== 'file') return;
+      if (uri.scheme !== 'file') { return; }
       const action = (e.kind === 'accepted' ? { kind: 'accepted', path: uri.fsPath, baseline: e.baseline ?? '' } : { kind: e.kind, path: uri.fsPath }) as ReviewAction;
       try {
         await ctl.onReviewAction(action);
@@ -109,7 +110,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // Edit logs for user-save attribution.
   const logs = new EditLogs();
-  for (const d of vscode.workspace.textDocuments) if (d.uri.scheme === 'file' && !d.isDirty) logs.markClean(d.uri.toString(), d.getText());
+  for (const d of vscode.workspace.textDocuments) { if (d.uri.scheme === 'file' && !d.isDirty) { logs.markClean(d.uri.toString(), d.getText()); } }
   // Agent writes under unsaved edits: 3-way merge.
   conflicts = new ConflictMerger(ctl, logs, path.join((context.storageUri ?? context.globalStorageUri).fsPath, 'conflicts'), hasCore, log);
   const merger = conflicts;
@@ -117,31 +118,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     merger,
     vscode.commands.registerCommand('agentReview.mergeWithDisk', (uri?: vscode.Uri) => {
       const target = uri ?? vscode.window.activeTextEditor?.document.uri;
-      if (target?.scheme === 'file') return merger.merge(target.fsPath);
+      if (target?.scheme === 'file') { return merger.merge(target.fsPath); }
     }),
     vscode.workspace.onDidOpenTextDocument((d) => {
-      if (d.uri.scheme === 'file' && !d.isDirty) logs.markClean(d.uri.toString(), d.getText());
+      if (d.uri.scheme === 'file' && !d.isDirty) { logs.markClean(d.uri.toString(), d.getText()); }
     }),
     vscode.workspace.onDidCloseTextDocument((d) => {
       logs.forget(d.uri.toString());
-      if (d.uri.scheme === 'file') void ctl.onBufferSettled(d.uri.fsPath);
+      if (d.uri.scheme === 'file') { void ctl.onBufferSettled(d.uri.fsPath); }
     }),
     vscode.workspace.onDidChangeTextDocument((e) => {
-      if (e.document.uri.scheme !== 'file' || e.contentChanges.length === 0) return;
+      if (e.document.uri.scheme !== 'file' || e.contentChanges.length === 0) { return; }
       logs.onChange(e.document.uri.toString(), e.contentChanges, e.document.isDirty, e.document.version, e.document.isDirty ? undefined : e.document.getText());
-      if (!e.document.isDirty) void ctl.onBufferSettled(e.document.uri.fsPath); // reverted or reloaded
+      if (!e.document.isDirty) { void ctl.onBufferSettled(e.document.uri.fsPath); } // reverted or reloaded
     }),
     vscode.workspace.onDidSaveTextDocument((d) => {
-      if (d.uri.scheme !== 'file') return;
+      if (d.uri.scheme !== 'file') { return; }
       logs.markClean(d.uri.toString(), d.getText());
       void ctl.onBufferSettled(d.uri.fsPath);
     }),
     vscode.workspace.onDidDeleteFiles((e) => {
-      for (const f of e.files) if (f.scheme === 'file') void reviewFor(f.fsPath).then((eng) => eng?.reportUserDelete(f.fsPath));
+      for (const f of e.files) { if (f.scheme === 'file') { void reviewFor(f.fsPath).then((eng) => eng?.reportUserDelete(f.fsPath)); } }
     }),
     vscode.workspace.onDidRenameFiles((e) => {
       for (const f of e.files) {
-        if (f.oldUri.scheme === 'file' && f.newUri.scheme === 'file') void reviewFor(f.oldUri.fsPath).then((eng) => eng?.reportUserRename(f.oldUri.fsPath, f.newUri.fsPath));
+        if (f.oldUri.scheme === 'file' && f.newUri.scheme === 'file') { void reviewFor(f.oldUri.fsPath).then((eng) => eng?.reportUserRename(f.oldUri.fsPath, f.newUri.fsPath)); }
       }
     }),
   );
@@ -153,19 +154,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(
       vscode.commands.registerCommand('agentReview.ext.onWillWrite', async (e: { uri: CoreUri; userVersion: number; version: number }) => {
         const uri = toUri(e.uri);
-        if (uri.scheme !== 'file') return;
+        if (uri.scheme !== 'file') { return; }
         const doc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
-        if (!doc) return;
+        if (!doc) { return; }
         // The document has seen every edit core made (events arrive in order); if not, don't trust the versions.
         const inSync = doc.version === e.version;
-        if (!inSync) log.warn(`save of ${uri.fsPath}: document version ${doc.version}, core ${e.version}; attributing all edits to the user`);
+        if (!inSync) { log.warn(`save of ${uri.fsPath}: document version ${doc.version}, core ${e.version}; attributing all edits to the user`); }
         await ctl.onWillSave(uri.fsPath, doc.getText(), logs.get(uri.toString(), inSync ? e.userVersion : undefined));
       }),
     );
   } else {
     context.subscriptions.push(
       vscode.workspace.onWillSaveTextDocument((e) => {
-        if (e.document.uri.scheme !== 'file') return;
+        if (e.document.uri.scheme !== 'file') { return; }
         e.waitUntil(ctl.onWillSave(e.document.uri.fsPath, e.document.getText(), logs.get(e.document.uri.toString())));
       }),
     );
@@ -184,7 +185,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     ctl.handleFsEvents(paths).catch((err) => log.error('handling file events failed', err instanceof Error ? err : String(err)));
   };
   const onFsEvent = (uri: vscode.Uri) => {
-    if (uri.scheme !== 'file') return;
+    if (uri.scheme !== 'file') { return; }
     queued.add(uri.fsPath);
     timer ??= setTimeout(flush, 75);
   };
@@ -207,8 +208,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     view.badge = n > 0 ? { value: n, tooltip: `${n} file(s) with pending changes` } : undefined;
     status.text = `$(diff-multiple) ${n}`;
     status.tooltip = `Agent Review: ${n} file(s) with pending changes`;
-    if (n > 0) status.show();
-    else status.hide();
+    if (n > 0) { status.show(); }
+    else { status.hide(); }
   };
   context.subscriptions.push(
     vscode.workspace.registerTextDocumentContentProvider(BASELINE_SCHEME, baselines),
@@ -220,7 +221,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   const itemPath = (arg?: FileItem | vscode.Uri): string | undefined => {
-    if (!arg) return vscode.window.activeTextEditor?.document.uri.fsPath;
+    if (!arg) { return vscode.window.activeTextEditor?.document.uri.fsPath; }
     return arg instanceof vscode.Uri ? arg.fsPath : arg.file.absPath;
   };
   const run = async (what: string, fn: () => Promise<unknown>) => {
@@ -233,7 +234,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.commands.registerCommand('agentReview.acceptFile', (arg?: FileItem | vscode.Uri) => run('Keep', async () => {
       const p = itemPath(arg);
-      if (p) await ctl.acceptFile(p);
+      if (p) { await ctl.acceptFile(p); }
     })),
     vscode.commands.registerCommand('agentReview.rejectFile', (arg?: FileItem | vscode.Uri) => run('Undo', async () => {
       const p = itemPath(arg);
@@ -243,14 +244,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     })),
     vscode.commands.registerCommand('agentReview.acceptAll', () => run('Keep All', async () => {
       const r = await ctl.acceptAll();
-      if (r.skipped.length) void vscode.window.showWarningMessage(`Agent Review: ${r.skipped.length} file(s) changed while accepting and were skipped.`);
+      if (r.skipped.length) { void vscode.window.showWarningMessage(`Agent Review: ${r.skipped.length} file(s) changed while accepting and were skipped.`); }
     })),
     vscode.commands.registerCommand('agentReview.rejectAll', () => run('Undo All', async () => {
       const n = ctl.pendingFiles.length;
       const ok = await vscode.window.showWarningMessage(`Undo all pending changes in ${n} file(s)? Files go back to their accepted content.`, { modal: true }, 'Undo All');
-      if (ok !== 'Undo All') return;
+      if (ok !== 'Undo All') { return; }
       const r = await ctl.rejectAll();
-      if (r.skipped.length) void vscode.window.showWarningMessage(`Agent Review: skipped ${r.skipped.length} file(s) that changed on disk under unsaved edits, or were created or deleted with unsaved edits.`);
+      if (r.skipped.length) { void vscode.window.showWarningMessage(`Agent Review: skipped ${r.skipped.length} file(s) that changed on disk under unsaved edits, or were created or deleted with unsaved edits.`); }
       if (r.unsaved?.length) {
         void vscode.window.showInformationMessage(`Agent Review: ${r.unsaved.map((p) => path.basename(p)).join(', ')} ${r.unsaved.length === 1 ? 'has' : 'have'} unsaved edits: undone in the editor, not saved yet. Save to write the undo to disk.`);
       }
@@ -258,31 +259,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('agentReview.openChanges', () => run('Open All Changes', async () => {
       const resources: [vscode.Uri, vscode.Uri | undefined, vscode.Uri | undefined][] = ctl.pendingFiles.map((f) => {
         const file = uiUri(f.absPath);
-        if (f.kind === 'created') return [file, undefined, file];
-        if (f.kind === 'deleted') return [file, baselineUri(ui.toUi(f.absPath)), undefined];
-        if (f.kind === 'renamed') return [file, baselineUri(ui.toUi(f.oldAbsPath ?? f.absPath)), file];
+        if (f.kind === 'created') { return [file, undefined, file]; }
+        if (f.kind === 'deleted') { return [file, baselineUri(ui.toUi(f.absPath)), undefined]; }
+        if (f.kind === 'renamed') { return [file, baselineUri(ui.toUi(f.oldAbsPath ?? f.absPath)), file]; }
         return [file, baselineUri(ui.toUi(f.absPath)), file];
       });
       await vscode.commands.executeCommand('vscode.changes', 'Agent Changes', resources);
     })),
     vscode.commands.registerCommand('agentReview.openFileDiff', (arg?: FileItem | vscode.Uri) => run('Open Diff', async () => {
       const p = itemPath(arg);
-      if (!p) return;
+      if (!p) { return; }
       const real = normalizePath(p);
       const f = ctl.pendingFiles.find((x) => x.absPath === real);
       const left = baselineUri(ui.toUi(f?.oldAbsPath ?? real));
       const right = f?.kind === 'deleted' ? undefined : uiUri(real);
-      if (!right) await vscode.window.showTextDocument(left, { preview: true });
-      else await vscode.commands.executeCommand('vscode.diff', left, right, `${path.basename(p)} (accepted ↔ current)`);
+      if (!right) { await vscode.window.showTextDocument(left, { preview: true }); }
+      else { await vscode.commands.executeCommand('vscode.diff', left, right, `${path.basename(p)} (accepted ↔ current)`); }
     })),
     vscode.commands.registerCommand('agentReview.refresh', () => run('Rescan', async () => {
-      for (const e of review!.engines.values()) await e.rescan();
+      for (const e of review!.engines.values()) { await e.rescan(); }
       await ctl.syncAll();
     })),
     vscode.workspace.onDidChangeConfiguration(async (e) => {
       if (e.affectsConfiguration('agentReview.ignore')) {
         const patterns = vscode.workspace.getConfiguration('agentReview').get<string[]>('ignore', []);
-        for (const eng of review!.engines.values()) await eng.setIgnorePatterns(patterns);
+        for (const eng of review!.engines.values()) { await eng.setIgnorePatterns(patterns); }
       }
     }),
   );

@@ -28,7 +28,7 @@ class FakeCore implements CoreBridge {
 class FakeCoreWithEditorUndo extends FakeCore {
   readonly undoneInEditor: string[] = [];
   async rejectInEditor(abs: string): Promise<'saved' | 'unsaved' | 'deleted' | undefined> {
-    if (!this.shown.has(abs)) return undefined;
+    if (!this.shown.has(abs)) { return undefined; }
     this.undoneInEditor.push(abs);
     return 'unsaved'; // the buffer has the user's unsaved edits, so the undo stays in it
   }
@@ -236,7 +236,7 @@ describe('ReviewController', () => {
     };
     change('a=1', 'a=10'); // the user types
     const userVersion = version; // core: save participants start here
-    for (const [from, to] of [['a=10', 'a = 10'], ['b=20', 'b = 20'], ['c=3', 'c = 3'], ['d=4', 'd = 4']]) change(from!, to!); // format on save
+    for (const [from, to] of [['a=10', 'a = 10'], ['b=20', 'b = 20'], ['c=3', 'c = 3'], ['d=4', 'd = 4']]) { change(from!, to!); } // format on save
     dirty.add(abs);
     await userSave(abs, text, [...logs.get(key, userVersion)!]);
     expect(read(abs)).toBe('a = 10\nb = 20\nc = 3\nd = 4\n');

@@ -32,6 +32,6 @@ export function bracketedPaste(text: string): string {
 export function selectionLines(start: { line: number }, end: { line: number; character: number }, isEmpty: boolean): [number, number] {
   const first = start.line + 1;
   let last = end.line + 1;
-  if (!isEmpty && end.character === 0 && end.line > start.line) last -= 1;
+  if (!isEmpty && end.character === 0 && end.line > start.line) { last -= 1; }
   return [first, last];
 }

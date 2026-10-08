@@ -38,6 +38,7 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      - run: npm run lint
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
@@ -101,3 +102,5 @@ jobs:
       - name: Typecheck patched src/ (tsgo)
         working-directory: ${{ runner.temp }}/fork/vscodium/vscode
         run: npm run typecheck-client
+      - name: Lint the core files our patches touch (VS Code's eslint config)
+        run: fork/scripts/lint-core.sh "$RUNNER_TEMP/fork"

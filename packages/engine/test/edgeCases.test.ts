@@ -12,7 +12,7 @@ import { baselineFiles, DiskWorkspace, memWorkspace, rmrf, tmpDir } from './help
 
 function editOf(text: string, find: string, replace: string, origin: TrackedEdit['origin'] = 'user'): TrackedEdit {
   const offset = text.indexOf(find);
-  if (offset < 0) throw new Error(`${find} not in text`);
+  if (offset < 0) { throw new Error(`${find} not in text`); }
   return { offset, length: find.length, text: replace, origin };
 }
 
@@ -314,7 +314,7 @@ describe('§7 multi-root workspaces', () => {
     const r1 = path.join(base, 'one');
     const r2 = path.join(base, 'two');
     const nested = path.join(r1, 'packages', 'inner');
-    for (const d of [r1, r2, nested]) nodeFs.mkdirSync(d, { recursive: true });
+    for (const d of [r1, r2, nested]) { nodeFs.mkdirSync(d, { recursive: true }); }
     nodeFs.writeFileSync(path.join(r1, 'a.txt'), 'one\n');
     nodeFs.writeFileSync(path.join(r2, 'a.txt'), 'two\n');
     nodeFs.writeFileSync(path.join(nested, 'n.txt'), 'n\n');

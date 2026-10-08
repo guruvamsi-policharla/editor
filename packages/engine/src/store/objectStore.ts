@@ -55,15 +55,15 @@ export class ObjectStore {
   }
 
   async has(oid: string): Promise<boolean> {
-    if (this.known.has(oid)) return true;
+    if (this.known.has(oid)) { return true; }
     const exists = (await this.fs.stat(this.objectPath(oid)))?.type === 'file';
-    if (exists) this.known.add(oid);
+    if (exists) { this.known.add(oid); }
     return exists;
   }
 
   /** Store `data` and return its blob id. Idempotent. */
   async write(data: Uint8Array, oid = gitBlobId(data)): Promise<string> {
-    if (await this.has(oid)) return oid;
+    if (await this.has(oid)) { return oid; }
     const header = new TextEncoder().encode(`blob ${data.length}\0`);
     const raw = new Uint8Array(header.length + data.length);
     raw.set(header, 0);

@@ -17,7 +17,7 @@ export class BaselineContentProvider implements vscode.TextDocumentContentProvid
   constructor(private readonly ctl: ReviewController) {
     // Baselines move on accept/save/git ops: refresh any open baseline document of a pending file.
     this.sub = ctl.onDidChangeFiles(() => {
-      for (const d of vscode.workspace.textDocuments) if (d.uri.scheme === BASELINE_SCHEME) this.emitter.fire(d.uri);
+      for (const d of vscode.workspace.textDocuments) { if (d.uri.scheme === BASELINE_SCHEME) { this.emitter.fire(d.uri); } }
     });
   }
 
@@ -37,12 +37,12 @@ export class FileItem extends vscode.TreeItem {
     super(vscode.Uri.file(uiPath), vscode.TreeItemCollapsibleState.None);
     const dir = path.dirname(file.rel);
     const parts: string[] = [];
-    if (dir !== '.') parts.push(dir);
-    if (file.kind === 'renamed' && file.oldAbsPath) parts.push(`renamed from ${path.basename(file.oldAbsPath)}`);
-    else if (file.kind !== 'modified') parts.push(file.kind);
-    if (counts) parts.push(`+${counts.added} −${counts.removed}`);
-    if (file.binary) parts.push('binary');
-    else if (file.large) parts.push('large');
+    if (dir !== '.') { parts.push(dir); }
+    if (file.kind === 'renamed' && file.oldAbsPath) { parts.push(`renamed from ${path.basename(file.oldAbsPath)}`); }
+    else if (file.kind !== 'modified') { parts.push(file.kind); }
+    if (counts) { parts.push(`+${counts.added} −${counts.removed}`); }
+    if (file.binary) { parts.push('binary'); }
+    else if (file.large) { parts.push('large'); }
     this.description = parts.join(' · ');
     this.contextValue = `agentReview.file.${file.kind}`;
     this.tooltip = `${file.rel} (${file.kind})`;
@@ -67,7 +67,7 @@ export class ReviewTree implements vscode.TreeDataProvider<FileItem>, vscode.Dis
   }
 
   async getChildren(item?: FileItem): Promise<FileItem[]> {
-    if (item) return [];
+    if (item) { return []; }
     const files = this.ctl.pendingFiles;
     const withCounts = files.length <= 200;
     return Promise.all(files.map(async (f) => new FileItem(f, withCounts ? await this.ctl.lineCounts(f) : undefined, this.toUi(f.absPath))));

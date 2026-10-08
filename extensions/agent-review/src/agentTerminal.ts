@@ -49,7 +49,7 @@ export class AgentTerminal implements vscode.Disposable {
   /** Ctrl/Cmd+L: send `@path:L42-58` (and optionally the selected text) to the agent terminal. */
   async sendSelection(): Promise<void> {
     const editor = vscode.window.activeTextEditor;
-    if (!editor) return;
+    if (!editor) { return; }
     const config = vscode.workspace.getConfiguration('agentReview.agent');
     const sel = editor.selection;
     const [startLine, endLine] = selectionLines(sel.start, sel.end, sel.isEmpty);
@@ -61,7 +61,7 @@ export class AgentTerminal implements vscode.Disposable {
       endLine,
     });
     let text = `${ref} `;
-    if (config.get<boolean>('includeSelectedText', false) && !sel.isEmpty) text += bracketedPaste(doc.getText(sel));
+    if (config.get<boolean>('includeSelectedText', false) && !sel.isEmpty) { text += bracketedPaste(doc.getText(sel)); }
     // In a terminal created just now, this waits until the agent command has started.
     await this.open(false).session.send(text);
   }
@@ -79,11 +79,11 @@ function terminalIO(terminal: vscode.Terminal): AgentTerminalIO {
     },
     onDidActivateShellIntegration: (listener) =>
       vscode.window.onDidChangeTerminalShellIntegration((e) => {
-        if (e.terminal === terminal) listener();
+        if (e.terminal === terminal) { listener(); }
       }),
     onDidStartExecution: (listener) =>
       vscode.window.onDidStartTerminalShellExecution((e) => {
-        if (e.terminal === terminal) listener();
+        if (e.terminal === terminal) { listener(); }
       }),
     sendText: (text, addNewLine) => terminal.sendText(text, addNewLine),
     get isClosed() {

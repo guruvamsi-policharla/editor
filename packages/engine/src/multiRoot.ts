@@ -49,7 +49,7 @@ export class MultiRootReview {
     const real = await realpathLoose(this.fs, path.resolve(absPath));
     let best: ReviewEngine | undefined;
     for (const [root, engine] of this.engines) {
-      if ((real === root || real.startsWith(root + path.sep)) && (!best || root.length > best.root.length)) best = engine;
+      if ((real === root || real.startsWith(root + path.sep)) && (!best || root.length > best.root.length)) { best = engine; }
     }
     return best;
   }
@@ -60,7 +60,7 @@ export class MultiRootReview {
     for (const ev of events) {
       const p = typeof ev === 'string' ? ev : ev.path;
       const engine = await this.engineFor(p);
-      if (!engine) continue;
+      if (!engine) { continue; }
       const list = byEngine.get(engine) ?? [];
       list.push(ev);
       byEngine.set(engine, list);

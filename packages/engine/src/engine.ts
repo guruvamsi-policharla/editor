@@ -223,7 +223,7 @@ export class ReviewEngine {
     await fs.mkdir(storage);
     const storageDir = await fs.realpath(storage);
     const excludeDirs = [storageDir];
-    for (const d of opts.excludeDirs ?? []) excludeDirs.push(await realpathLoose(fs, path.resolve(d)));
+    for (const d of opts.excludeDirs ?? []) { excludeDirs.push(await realpathLoose(fs, path.resolve(d))); }
     const engine = new ReviewEngine(opts, fs, root, storageDir, excludeDirs);
     await engine.init();
     return engine;
@@ -246,11 +246,11 @@ export class ReviewEngine {
           this.gitIndexStat = state.git.indexStat;
           this.gitIndex = new Map(Object.entries(state.git.index));
           await this.pollGit();
-        } else await this.snapshotGit();
+        } else { await this.snapshotGit(); }
       }
     } else {
       await this.fullScan({ trustStatCache: false, initAll: true });
-      if (this.repo) await this.snapshotGit();
+      if (this.repo) { await this.snapshotGit(); }
     }
     this.dirty = true;
     await this.persist();
@@ -259,7 +259,7 @@ export class ReviewEngine {
   /** Persist and stop. Further calls fail. */
   async close(): Promise<void> {
     await this.run(async () => {
-      if (this.gitRetryTimer) clearTimeout(this.gitRetryTimer);
+      if (this.gitRetryTimer) { clearTimeout(this.gitRetryTimer); }
       this.gitRetryTimer = undefined;
       this.dirty = true;
       await this.persist();
@@ -296,11 +296,11 @@ export class ReviewEngine {
       for (const ev of events) {
         const raw = typeof ev === 'string' ? ev : ev.path;
         const abs = await realpathLoose(this.fs, path.resolve(this.root, raw));
-        if (this.isInGitDir(abs) || this.isInStorage(abs)) continue;
+        if (this.isInGitDir(abs) || this.isInStorage(abs)) { continue; }
         const rel = this.toRel(abs);
-        if (rel === undefined) continue;
-        if (rel === '') fullRescan = true;
-        else rels.add(rel);
+        if (rel === undefined) { continue; }
+        if (rel === '') { fullRescan = true; }
+        else { rels.add(rel); }
       }
       if (fullRescan) {
         await this.rescanInternal();
@@ -309,16 +309,16 @@ export class ReviewEngine {
         const external: string[] = [];
         let ignoreChanged = false;
         for (const rel of rels) {
-          if (path.posix.basename(rel) === '.gitignore') ignoreChanged = true;
+          if (path.posix.basename(rel) === '.gitignore') { ignoreChanged = true; }
           const changed = await this.refreshPath(rel);
-          if (/\.tex$/i.test(rel)) changed.push(...(await this.refreshTexSibling(rel)));
-          for (const p of changed) (this.consumeExpectedWrite(p) ? self : external).push(p);
+          if (/\.tex$/i.test(rel)) { changed.push(...(await this.refreshTexSibling(rel))); }
+          for (const p of changed) { (this.consumeExpectedWrite(p) ? self : external).push(p); }
         }
         this.emit('self', self);
         this.emit('external', external);
-        if (ignoreChanged) await this.reloadIgnoreRules();
+        if (ignoreChanged) { await this.reloadIgnoreRules(); }
       }
-      if (this.repo) await this.pollGit();
+      if (this.repo) { await this.pollGit(); }
       await this.persist();
     });
   }
@@ -327,7 +327,7 @@ export class ReviewEngine {
   rescan(): Promise<void> {
     return this.run(async () => {
       await this.rescanInternal();
-      if (this.repo) await this.pollGit();
+      if (this.repo) { await this.pollGit(); }
       await this.persist();
     });
   }
@@ -351,12 +351,12 @@ export class ReviewEngine {
       const saved = toBytes(content);
       const savedOid = gitBlobId(saved);
       this.expectedWrites.set(rel, savedOid);
-      if (await this.rules.isIgnored(rel)) return { attribution: 'file' as const };
+      if (await this.rules.isIgnored(rel)) { return { attribution: 'file' as const }; }
 
       const diskNow = await this.readDisk(rel);
       const diskBytes = options.base !== undefined ? toBytes(options.base) : diskNow?.data;
-      if (diskNow?.entry.oid !== savedOid) this.inFlightSaves.set(rel, { data: saved, oid: savedOid, before: diskNow?.entry ?? null, until: this.now() + SAVE_IN_FLIGHT_MS });
-      else this.inFlightSaves.delete(rel);
+      if (diskNow?.entry.oid !== savedOid) { this.inFlightSaves.set(rel, { data: saved, oid: savedOid, before: diskNow?.entry ?? null, until: this.now() + SAVE_IN_FLIGHT_MS }); }
+      else { this.inFlightSaves.delete(rel); }
       const baseEntry = this.baseline.get(rel);
       const baseBytes = baseEntry ? await this.store.read(baseEntry.oid) : undefined;
 
@@ -388,11 +388,11 @@ export class ReviewEngine {
         const baseLines = splitLines(baseText);
         const folded = foldUserSave(baseLines, splitLines(diskText), prov);
         // An agent-created file the user saved without folding anything stays a pending creation.
-        if (!baseEntry && folded.length === 0 && saved.length > 0) newBaseline = undefined;
-        else newBaseline = encodeText(joinLines(folded));
+        if (!baseEntry && folded.length === 0 && saved.length > 0) { newBaseline = undefined; }
+        else { newBaseline = encodeText(joinLines(folded)); }
       }
 
-      if (newBaseline) await this.setBaseline(rel, newBaseline);
+      if (newBaseline) { await this.setBaseline(rel, newBaseline); }
       // The host is about to write `saved`; record it so pending is right before the watcher catches up.
       this.disk.set(rel, { oid: savedOid, size: saved.length, binary: isBinary(saved), mtimeMs: 0, ctimeMs: 0, recordedAt: 0 });
       this.updatePending(rel);
@@ -432,8 +432,8 @@ export class ReviewEngine {
         const de = this.disk.get(p);
         this.baseline.delete(p);
         this.disk.delete(p);
-        if (be) this.baseline.set(q, be);
-        if (de) this.disk.set(q, de);
+        if (be) { this.baseline.set(q, be); }
+        if (de) { this.disk.set(q, de); }
         this.updatePending(p);
         this.updatePending(q);
         touched.push(p, q);
@@ -451,7 +451,7 @@ export class ReviewEngine {
     const { newToOld, oldToNew } = this.computeRenames();
     const out: ChangeSummary[] = [];
     for (const rel of [...this.pending].sort()) {
-      if (oldToNew.has(rel)) continue;
+      if (oldToNew.has(rel)) { continue; }
       out.push(this.summarize(rel, newToOld.get(rel)));
     }
     return out;
@@ -490,9 +490,9 @@ export class ReviewEngine {
     return this.run(async () => {
       const rel = await this.relOrThrow(file);
       const loaded = await this.loadChange(rel);
-      if (!loaded) throw new NotPendingError(rel);
+      if (!loaded) { throw new NotPendingError(rel); }
       const hunk = loaded.change.hunks.find((h) => h.id === hunkId);
-      if (!hunk) throw new StaleChangeError(`Hunk ${hunkId} no longer matches ${rel}; re-read the file's changes`);
+      if (!hunk) { throw new StaleChangeError(`Hunk ${hunkId} no longer matches ${rel}; re-read the file's changes`); }
       if (loaded.change.reviewMode === 'file') {
         await this.acceptPath(rel, true);
       } else {
@@ -509,9 +509,9 @@ export class ReviewEngine {
     return this.run(async () => {
       const rel = await this.relOrThrow(file);
       const loaded = await this.loadChange(rel);
-      if (!loaded) throw new NotPendingError(rel);
+      if (!loaded) { throw new NotPendingError(rel); }
       const hunk = loaded.change.hunks.find((h) => h.id === hunkId);
-      if (!hunk) throw new StaleChangeError(`Hunk ${hunkId} no longer matches ${rel}; re-read the file's changes`);
+      if (!hunk) { throw new StaleChangeError(`Hunk ${hunkId} no longer matches ${rel}; re-read the file's changes`); }
       if (loaded.change.reviewMode === 'file') {
         await this.rejectPath(rel, true);
       } else {
@@ -541,14 +541,14 @@ export class ReviewEngine {
   ): Promise<void> {
     return this.run(async () => {
       const rel = await this.relOrThrow(file);
-      if (await this.rules.isIgnored(rel)) throw new Error(`${rel} is ignored; it has no baseline`);
+      if (await this.rules.isIgnored(rel)) { throw new Error(`${rel} is ignored; it has no baseline`); }
       if (options.expectedBaseline !== undefined) {
         const current = this.baseline.get(rel)?.oid ?? null;
         const expected = options.expectedBaseline === null ? null : gitBlobId(toBytes(options.expectedBaseline));
-        if (current !== expected) throw new StaleChangeError(`The baseline of ${rel} changed; re-read it`);
+        if (current !== expected) { throw new StaleChangeError(`The baseline of ${rel} changed; re-read it`); }
       }
       if (content === null) {
-        if (this.baseline.delete(rel)) this.dirty = true;
+        if (this.baseline.delete(rel)) { this.dirty = true; }
       } else {
         let bytes = toBytes(content);
         const text = options.restoreLineEndings ? decodeText(bytes) : undefined;
@@ -556,10 +556,10 @@ export class ReviewEngine {
           const sources: string[] = [];
           const disk = await this.readDisk(rel);
           const diskText = disk ? decodeText(disk.data) : undefined;
-          if (diskText !== undefined) sources.push(diskText);
+          if (diskText !== undefined) { sources.push(diskText); }
           const base = this.baseline.get(rel);
           const baseText = base ? decodeText(await this.store.read(base.oid)) : undefined;
-          if (baseText !== undefined) sources.push(baseText);
+          if (baseText !== undefined) { sources.push(baseText); }
           bytes = encodeText(restoreLineEndings(text, sources));
         }
         await this.setBaseline(rel, bytes);
@@ -575,9 +575,9 @@ export class ReviewEngine {
     return this.run(async () => {
       const rel = await this.relOrThrow(file);
       const paths = this.reviewUnit(rel);
-      if (!paths.some((p) => this.pending.has(p))) throw new NotPendingError(rel);
-      for (const p of paths) if (!(await this.isFresh(p))) throw new StaleChangeError(`${p} changed on disk; re-read its changes`);
-      for (const p of paths) await this.acceptPath(p, false);
+      if (!paths.some((p) => this.pending.has(p))) { throw new NotPendingError(rel); }
+      for (const p of paths) { if (!(await this.isFresh(p))) { throw new StaleChangeError(`${p} changed on disk; re-read its changes`); } }
+      for (const p of paths) { await this.acceptPath(p, false); }
       this.emit('accept', paths);
       await this.persist();
     });
@@ -588,8 +588,8 @@ export class ReviewEngine {
     return this.run(async () => {
       const rel = await this.relOrThrow(file);
       const paths = this.reviewUnit(rel);
-      if (!paths.some((p) => this.pending.has(p))) throw new NotPendingError(rel);
-      for (const p of paths) if (!(await this.isFresh(p))) throw new StaleChangeError(`${p} changed on disk; re-read its changes`);
+      if (!paths.some((p) => this.pending.has(p))) { throw new NotPendingError(rel); }
+      for (const p of paths) { if (!(await this.isFresh(p))) { throw new StaleChangeError(`${p} changed on disk; re-read its changes`); } }
       await this.rejectUnit(paths);
       this.emit('reject', paths);
       await this.persist();
@@ -606,7 +606,7 @@ export class ReviewEngine {
           result.skipped.push(...paths);
           continue;
         }
-        for (const p of paths) await this.acceptPath(p, false);
+        for (const p of paths) { await this.acceptPath(p, false); }
         result.done.push(...paths);
       }
       this.emit('accept', result.done);
@@ -646,14 +646,14 @@ export class ReviewEngine {
   // ---------------------------------------------------------------- internals: serialization & events
 
   private run<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.closed) return Promise.reject(new Error('ReviewEngine is closed'));
+    if (this.closed) { return Promise.reject(new Error('ReviewEngine is closed')); }
     const result = this.queue.then(fn);
     this.queue = result.catch(() => undefined);
     return result;
   }
 
   private emit(reason: ChangeReason, paths: readonly string[]): void {
-    if (paths.length === 0) return;
+    if (paths.length === 0) { return; }
     const event: ChangeEvent = { reason, paths: [...new Set(paths)].sort() };
     for (const l of this.listeners) {
       try {
@@ -665,7 +665,7 @@ export class ReviewEngine {
   }
 
   private async persist(): Promise<void> {
-    if (!this.dirty) return;
+    if (!this.dirty) { return; }
     const state: PersistedState = {
       version: 1,
       root: this.root,
@@ -687,20 +687,20 @@ export class ReviewEngine {
 
   private toRel(abs: string): string | undefined {
     const rel = path.relative(this.root, abs);
-    if (rel === '') return '';
-    if (rel.startsWith('..') || path.isAbsolute(rel)) return undefined;
+    if (rel === '') { return ''; }
+    if (rel.startsWith('..') || path.isAbsolute(rel)) { return undefined; }
     return rel.split(path.sep).join('/');
   }
 
   private async relOrThrow(file: string): Promise<string> {
     const abs = await realpathLoose(this.fs, path.resolve(this.root, file));
     const rel = this.toRel(abs);
-    if (!rel) throw new Error(`${file} is not inside workspace root ${this.root}`);
+    if (!rel) { throw new Error(`${file} is not inside workspace root ${this.root}`); }
     return rel;
   }
 
   private isInGitDir(abs: string): boolean {
-    if (!this.repo) return path.basename(abs) === '.git' || abs.includes(`${path.sep}.git${path.sep}`);
+    if (!this.repo) { return path.basename(abs) === '.git' || abs.includes(`${path.sep}.git${path.sep}`); }
     return [this.repo.gitDir, this.repo.commonDir].some((d) => abs === d || abs.startsWith(d + path.sep));
   }
 
@@ -711,7 +711,7 @@ export class ReviewEngine {
   private trackedUnder(rel: string): string[] {
     const out = new Set<string>();
     for (const m of [this.baseline, this.disk]) {
-      for (const p of m.keys()) if (p === rel || p.startsWith(`${rel}/`)) out.add(p);
+      for (const p of m.keys()) { if (p === rel || p.startsWith(`${rel}/`)) { out.add(p); } }
     }
     return [...out];
   }
@@ -726,14 +726,14 @@ export class ReviewEngine {
   private updatePending(rel: string): void {
     const d = this.disk.get(rel);
     const b = this.baseline.get(rel);
-    if (d?.oid === b?.oid) this.pending.delete(rel);
-    else this.pending.add(rel);
+    if (d?.oid === b?.oid) { this.pending.delete(rel); }
+    else { this.pending.add(rel); }
   }
 
   private async readDisk(rel: string, st?: FileStat): Promise<ReadResult | undefined> {
     const abs = this.abs(rel);
     const stat = st ?? (await this.fs.stat(abs));
-    if (stat?.type !== 'file') return undefined;
+    if (stat?.type !== 'file') { return undefined; }
     let data: Uint8Array;
     try {
       data = await this.fs.readFile(abs);
@@ -785,7 +785,7 @@ export class ReviewEngine {
   }
 
   private consumeExpectedWrite(rel: string): boolean {
-    if (!this.expectedWrites.has(rel)) return false;
+    if (!this.expectedWrites.has(rel)) { return false; }
     const expected = this.expectedWrites.get(rel);
     this.expectedWrites.delete(rel);
     return (this.disk.get(rel)?.oid ?? null) === expected;
@@ -798,9 +798,9 @@ export class ReviewEngine {
   private async isFresh(rel: string): Promise<boolean> {
     const known = this.disk.get(rel);
     const now = await this.readDisk(rel);
-    if (this.saveInFlight(rel, now)) return true; // the reported save just hasn't landed yet
+    if (this.saveInFlight(rel, now)) { return true; } // the reported save just hasn't landed yet
     if ((now?.entry.oid ?? null) === (known?.oid ?? null)) {
-      if (now) this.disk.set(rel, now.entry);
+      if (now) { this.disk.set(rel, now.entry); }
       return true;
     }
     const changed = await this.refreshPath(rel);
@@ -815,18 +815,18 @@ export class ReviewEngine {
    */
   private saveInFlight(rel: string, now: ReadResult | undefined): InFlightSave | undefined {
     const f = this.inFlightSaves.get(rel);
-    if (!f) return undefined;
+    if (!f) { return undefined; }
     const b = f.before;
     const e = now?.entry;
     const unchanged = b && e ? b.oid === e.oid && b.size === e.size && b.mtimeMs === e.mtimeMs && b.ctimeMs === e.ctimeMs : !b && !e;
-    if (unchanged && this.now() <= f.until) return f;
+    if (unchanged && this.now() <= f.until) { return f; }
     this.inFlightSaves.delete(rel);
     return undefined;
   }
 
   private async allFresh(paths: readonly string[]): Promise<boolean> {
     let ok = true;
-    for (const p of paths) if (!(await this.isFresh(p))) ok = false;
+    for (const p of paths) { if (!(await this.isFresh(p))) { ok = false; } }
     return ok;
   }
 
@@ -835,8 +835,8 @@ export class ReviewEngine {
     const changed: string[] = [];
     const st = await this.fs.stat(this.abs(rel));
     const untrack = (p: string) => {
-      if (this.disk.has(p) || this.baseline.has(p)) changed.push(p);
-      if (this.baseline.delete(p)) this.dirty = true;
+      if (this.disk.has(p) || this.baseline.has(p)) { changed.push(p); }
+      if (this.baseline.delete(p)) { this.dirty = true; }
       this.disk.delete(p);
       this.updatePending(p);
     };
@@ -849,17 +849,17 @@ export class ReviewEngine {
     };
 
     // Watcher events are what actually happened on disk: they end any in-flight save of these paths.
-    for (const p of [...this.inFlightSaves.keys()]) if (p === rel || p.startsWith(`${rel}/`)) this.inFlightSaves.delete(p);
+    for (const p of [...this.inFlightSaves.keys()]) { if (p === rel || p.startsWith(`${rel}/`)) { this.inFlightSaves.delete(p); } }
     if (!st || (st.type !== 'file' && st.type !== 'directory')) {
-      for (const p of this.trackedUnder(rel)) drop(p);
+      for (const p of this.trackedUnder(rel)) { drop(p); }
       return changed;
     }
     if (await this.rules.isIgnored(rel, st.type === 'directory')) {
-      for (const p of this.trackedUnder(rel)) untrack(p);
+      for (const p of this.trackedUnder(rel)) { untrack(p); }
       return changed;
     }
     if (st.type === 'file') {
-      for (const p of this.trackedUnder(rel)) if (p !== rel) drop(p); // was a directory
+      for (const p of this.trackedUnder(rel)) { if (p !== rel) { drop(p); } } // was a directory
       const before = this.disk.get(rel)?.oid;
       const r = await this.readDisk(rel, st);
       if (!r) {
@@ -869,23 +869,23 @@ export class ReviewEngine {
       this.disk.set(rel, r.entry);
       this.dirty = true;
       this.updatePending(rel);
-      if (before !== r.entry.oid) changed.push(rel);
+      if (before !== r.entry.oid) { changed.push(rel); }
       return changed;
     }
     // Directory: walk it.
-    if (this.disk.has(rel)) drop(rel); // was a file
+    if (this.disk.has(rel)) { drop(rel); } // was a file
     const seen = new Set<string>();
     await this.walk(rel, async (p, fst) => {
       seen.add(p);
       const before = this.disk.get(p)?.oid;
       const r = await this.readDisk(p, fst);
-      if (!r) return;
+      if (!r) { return; }
       this.disk.set(p, r.entry);
       this.dirty = true;
       this.updatePending(p);
-      if (before !== r.entry.oid) changed.push(p);
+      if (before !== r.entry.oid) { changed.push(p); }
     });
-    for (const p of this.trackedUnder(rel)) if (!seen.has(p) && this.disk.has(p)) drop(p);
+    for (const p of this.trackedUnder(rel)) { if (!seen.has(p) && this.disk.has(p)) { drop(p); } }
     return changed;
   }
 
@@ -894,11 +894,11 @@ export class ReviewEngine {
     const pdf = texRel.replace(/\.tex$/i, '.pdf');
     const wasTracked = this.disk.has(pdf) || this.baseline.has(pdf);
     const ignored = await this.rules.isIgnored(pdf);
-    if (ignored && wasTracked) return this.refreshPath(pdf);
+    if (ignored && wasTracked) { return this.refreshPath(pdf); }
     if (!ignored && !wasTracked) {
       // Previously an ignored build artifact: start tracking it with nothing pending.
       const r = await this.readDisk(pdf);
-      if (!r) return [];
+      if (!r) { return []; }
       this.disk.set(pdf, r.entry);
       await this.setBaseline(pdf, r.data);
       this.updatePending(pdf);
@@ -920,11 +920,11 @@ export class ReviewEngine {
       for (const e of entries) {
         const rel = dir ? `${dir}/${e.name}` : e.name;
         if (e.type === 'directory') {
-          if (!(await this.rules.isIgnoredSelf(rel, true))) stack.push(rel);
+          if (!(await this.rules.isIgnoredSelf(rel, true))) { stack.push(rel); }
         } else if (e.type === 'file') {
-          if (await this.rules.isIgnoredSelf(rel, false)) continue;
+          if (await this.rules.isIgnoredSelf(rel, false)) { continue; }
           const st = await this.fs.stat(this.abs(rel));
-          if (st?.type === 'file') await onFile(rel, st);
+          if (st?.type === 'file') { await onFile(rel, st); }
         }
       }
     }
@@ -946,12 +946,12 @@ export class ReviewEngine {
         cached.recordedAt - st.mtimeMs > RACY_MS;
       const wasIgnored =
         opts.previousRules !== undefined && !previouslyKnown.has(rel) && !this.baseline.has(rel) && (await opts.previousRules.isIgnored(rel));
-      if (trusted && !opts.initAll) return;
+      if (trusted && !opts.initAll) { return; }
       const r = await this.readDisk(rel, st);
-      if (!r) return;
-      if (cached?.oid !== r.entry.oid) changed.push(rel);
+      if (!r) { return; }
+      if (cached?.oid !== r.entry.oid) { changed.push(rel); }
       this.disk.set(rel, r.entry);
-      if (opts.initAll || wasIgnored) await this.setBaseline(rel, r.data);
+      if (opts.initAll || wasIgnored) { await this.setBaseline(rel, r.data); }
     });
     for (const rel of [...this.disk.keys()]) {
       if (!seen.has(rel)) {
@@ -967,7 +967,7 @@ export class ReviewEngine {
       }
     }
     this.pending.clear();
-    for (const rel of new Set([...this.disk.keys(), ...this.baseline.keys()])) this.updatePending(rel);
+    for (const rel of new Set([...this.disk.keys(), ...this.baseline.keys()])) { this.updatePending(rel); }
     this.dirty = true;
     return changed;
   }
@@ -993,14 +993,14 @@ export class ReviewEngine {
     for (const rel of this.pending) {
       const d = this.disk.get(rel);
       const b = this.baseline.get(rel);
-      if (b && !d && b.size > 0) push(deleted, b.oid, rel);
-      else if (d && !b && d.size > 0) push(created, d.oid, rel);
+      if (b && !d && b.size > 0) { push(deleted, b.oid, rel); }
+      else if (d && !b && d.size > 0) { push(created, d.oid, rel); }
     }
     const newToOld = new Map<string, string>();
     const oldToNew = new Map<string, string>();
     for (const [oid, dels] of deleted) {
       const adds = created.get(oid);
-      if (!adds) continue;
+      if (!adds) { continue; }
       dels.sort();
       adds.sort();
       const pair = (o: string, n: string) => {
@@ -1010,11 +1010,11 @@ export class ReviewEngine {
       // Prefer pairs that keep the file name (moves), then pair the rest in path order.
       for (const o of dels) {
         const n = adds.find((a) => !newToOld.has(a) && path.posix.basename(a) === path.posix.basename(o));
-        if (n) pair(o, n);
+        if (n) { pair(o, n); }
       }
       const restDels = dels.filter((o) => !oldToNew.has(o));
       const restAdds = adds.filter((a) => !newToOld.has(a));
-      for (let i = 0; i < Math.min(restDels.length, restAdds.length); i++) pair(restDels[i]!, restAdds[i]!);
+      for (let i = 0; i < Math.min(restDels.length, restAdds.length); i++) { pair(restDels[i]!, restAdds[i]!); }
     }
     return { newToOld, oldToNew };
   }
@@ -1023,9 +1023,9 @@ export class ReviewEngine {
   private reviewUnit(rel: string): string[] {
     const { newToOld, oldToNew } = this.computeRenames();
     const old = newToOld.get(rel);
-    if (old) return [old, rel];
+    if (old) { return [old, rel]; }
     const nw = oldToNew.get(rel);
-    if (nw) return [rel, nw];
+    if (nw) { return [rel, nw]; }
     return [rel];
   }
 
@@ -1035,12 +1035,12 @@ export class ReviewEngine {
     const binary = Boolean(d?.binary || b?.binary);
     const large = (d?.size ?? 0) > this.largeFileThreshold || (b?.size ?? 0) > this.largeFileThreshold;
     let kind: ChangeKind;
-    if (oldPath) kind = 'renamed';
-    else if (!b) kind = 'created';
-    else if (!d) kind = 'deleted';
-    else kind = 'modified';
+    if (oldPath) { kind = 'renamed'; }
+    else if (!b) { kind = 'created'; }
+    else if (!d) { kind = 'deleted'; }
+    else { kind = 'modified'; }
     const summary: ChangeSummary = { path: rel, kind, binary, large, reviewMode: kind === 'modified' && !binary && !large ? 'hunk' : 'file' };
-    if (oldPath) summary.oldPath = oldPath;
+    if (oldPath) { summary.oldPath = oldPath; }
     return summary;
   }
 
@@ -1049,11 +1049,11 @@ export class ReviewEngine {
     rel: string,
   ): Promise<{ change: FileChange; baseLines?: string[]; diskLines?: string[] } | undefined> {
     await this.isFresh(rel); // refreshes the engine's view if the disk moved on; compute from the current disk either way
-    if (!this.pending.has(rel)) return undefined;
+    if (!this.pending.has(rel)) { return undefined; }
     const { newToOld, oldToNew } = this.computeRenames();
-    if (oldToNew.has(rel)) return { change: { ...this.summarize(oldToNew.get(rel)!, rel), hunks: [] } };
+    if (oldToNew.has(rel)) { return { change: { ...this.summarize(oldToNew.get(rel)!, rel), hunks: [] } }; }
     const summary = this.summarize(rel, newToOld.get(rel));
-    if (summary.kind === 'renamed' || summary.binary || summary.large) return { change: { ...summary, hunks: [] } };
+    if (summary.kind === 'renamed' || summary.binary || summary.large) { return { change: { ...summary, hunks: [] } }; }
     const b = this.baseline.get(rel);
     const baseText = b ? decodeText(await this.store.read(b.oid))! : '';
     const diskRead = this.disk.has(rel) ? await this.readDisk(rel) : undefined;
@@ -1065,7 +1065,7 @@ export class ReviewEngine {
   }
 
   private async acceptPath(rel: string, checkFresh: boolean): Promise<void> {
-    if (checkFresh && !(await this.isFresh(rel))) throw new StaleChangeError(`${rel} changed on disk`);
+    if (checkFresh && !(await this.isFresh(rel))) { throw new StaleChangeError(`${rel} changed on disk`); }
     const r = this.disk.has(rel) ? await this.readDisk(rel) : undefined;
     const saving = this.saveInFlight(rel, r);
     if (saving) {
@@ -1080,10 +1080,10 @@ export class ReviewEngine {
   }
 
   private async rejectPath(rel: string, checkFresh: boolean): Promise<void> {
-    if (checkFresh && !(await this.isFresh(rel))) throw new StaleChangeError(`${rel} changed on disk`);
+    if (checkFresh && !(await this.isFresh(rel))) { throw new StaleChangeError(`${rel} changed on disk`); }
     const b = this.baseline.get(rel);
-    if (b) await this.writeDisk(rel, await this.store.read(b.oid));
-    else await this.removeDisk(rel);
+    if (b) { await this.writeDisk(rel, await this.store.read(b.oid)); }
+    else { await this.removeDisk(rel); }
   }
 
   private async rejectUnit(paths: readonly string[]): Promise<void> {
@@ -1108,13 +1108,13 @@ export class ReviewEngine {
         // Fall through to restoring both sides individually.
       }
     }
-    for (const p of paths) if (this.pending.has(p)) await this.rejectPath(p, false);
+    for (const p of paths) { if (this.pending.has(p)) { await this.rejectPath(p, false); } }
   }
 
   // ---------------------------------------------------------------- internals: git
 
   private async snapshotGit(): Promise<void> {
-    if (!this.repo) return;
+    if (!this.repo) { return; }
     this.gitHead = await readHeadState(this.fs, this.repo);
     this.gitIndexStat = await statIndex(this.fs, this.repo);
     this.gitIndex = await readIndex(this.fs, this.repo);
@@ -1122,10 +1122,10 @@ export class ReviewEngine {
   }
 
   private scheduleGitRetry(): void {
-    if (this.gitRetryTimer || this.closed) return;
+    if (this.gitRetryTimer || this.closed) { return; }
     this.gitRetryTimer = setTimeout(() => {
       this.gitRetryTimer = undefined;
-      if (this.closed) return;
+      if (this.closed) { return; }
       void this.run(async () => {
         await this.pollGit();
         await this.persist();
@@ -1137,7 +1137,7 @@ export class ReviewEngine {
   /** Workspace-relative path for a repo-relative index path, or undefined if outside this root. */
   private repoToRel(repoPath: string): string | undefined {
     const prefix = this.repo!.prefix;
-    if (!prefix) return repoPath;
+    if (!prefix) { return repoPath; }
     return repoPath.startsWith(`${prefix}/`) ? repoPath.slice(prefix.length + 1) : undefined;
   }
 
@@ -1148,7 +1148,7 @@ export class ReviewEngine {
 
   private async pollGit(): Promise<GitOperationResult> {
     const repo = this.repo;
-    if (!repo) return { kind: 'none' };
+    if (!repo) { return { kind: 'none' }; }
     if (await isGitBusy(this.fs, repo)) {
       this.scheduleGitRetry();
       return { kind: 'busy' };
@@ -1171,7 +1171,7 @@ export class ReviewEngine {
       this.emit('git-head', accepted);
       return { kind: 'head', accepted };
     }
-    if (!this.gitHead) this.dirty = true;
+    if (!this.gitHead) { this.dirty = true; }
     this.gitHead = head;
 
     const statSame =
@@ -1181,20 +1181,20 @@ export class ReviewEngine {
         idxStat.size === this.gitIndexStat.size &&
         idxStat.mtimeMs === this.gitIndexStat.mtimeMs &&
         idxStat.ctimeMs === this.gitIndexStat.ctimeMs);
-    if (statSame) return { kind: 'none' };
+    if (statSame) { return { kind: 'none' }; }
 
     const next = await readIndex(this.fs, repo);
     const staged: string[] = [];
     for (const p of new Set([...this.gitIndex.keys(), ...next.keys()])) {
-      if (this.gitIndex.get(p) === next.get(p)) continue;
+      if (this.gitIndex.get(p) === next.get(p)) { continue; }
       const rel = this.repoToRel(p);
-      if (rel !== undefined) staged.push(rel);
+      if (rel !== undefined) { staged.push(rel); }
     }
     this.gitIndex = next;
     this.gitIndexStat = idxStat;
     this.dirty = true;
     const accepted = await this.acceptStaged(staged);
-    if (accepted.length) this.emit('git-index', accepted);
+    if (accepted.length) { this.emit('git-index', accepted); }
     return { kind: 'index', staged: staged.sort(), accepted };
   }
 
@@ -1203,12 +1203,12 @@ export class ReviewEngine {
     const repo = this.repo!;
     const accepted: string[] = [];
     for (const rel of staged) {
-      if (!this.pending.has(rel)) continue;
+      if (!this.pending.has(rel)) { continue; }
       const indexOid = this.gitIndex.get(this.relToRepo(rel));
       const d = this.disk.get(rel);
       const b = this.baseline.get(rel);
       const diskRead = d ? await this.readDisk(rel) : undefined;
-      if (diskRead) this.disk.set(rel, diskRead.entry);
+      if (diskRead) { this.disk.set(rel, diskRead.entry); }
       const diskOid = diskRead ? gitBlobId(diskRead.data, repo.objectFormat) : undefined;
 
       if (!diskRead) {
@@ -1219,21 +1219,21 @@ export class ReviewEngine {
         }
         continue;
       }
-      if (indexOid === undefined) continue;
+      if (indexOid === undefined) { continue; }
       if (indexOid === diskOid) {
         await this.acceptPath(rel, false);
         accepted.push(rel);
         continue;
       }
       // Partial staging (`git add -p`): accept only the hunks the index agrees with.
-      if (!b || diskRead.entry.binary || b.binary || diskRead.data.length > this.largeFileThreshold || indexOid.startsWith('conflict:')) continue;
+      if (!b || diskRead.entry.binary || b.binary || diskRead.data.length > this.largeFileThreshold || indexOid.startsWith('conflict:')) { continue; }
       const indexData = await this.gitReader.readBlob(repo, indexOid);
       const indexText = indexData ? decodeText(indexData) : undefined;
-      if (indexText === undefined) continue;
+      if (indexText === undefined) { continue; }
       const baseLines = splitLines(decodeText(await this.store.read(b.oid))!);
       const diskLines = splitLines(decodeText(diskRead.data)!);
       const regions = stagedRegions(baseLines, diskLines, splitLines(indexText));
-      if (regions.length === 0) continue;
+      if (regions.length === 0) { continue; }
       await this.setBaseline(rel, encodeText(joinLines(acceptHunks(baseLines, diskLines, regions))));
       this.updatePending(rel);
       accepted.push(rel);
@@ -1244,8 +1244,8 @@ export class ReviewEngine {
 
 function push<K, V>(m: Map<K, V[]>, k: K, v: V): void {
   const arr = m.get(k);
-  if (arr) arr.push(v);
-  else m.set(k, [v]);
+  if (arr) { arr.push(v); }
+  else { m.set(k, [v]); }
 }
 
 /** realpath that tolerates missing trailing components (e.g. a just-deleted file). */
@@ -1258,7 +1258,7 @@ export async function realpathLoose(fs: FileSystem, p: string): Promise<string> 
       return rest.length ? path.join(real, ...rest.reverse()) : real;
     } catch {
       const parent = path.dirname(cur);
-      if (parent === cur) return p;
+      if (parent === cur) { return p; }
       rest.push(path.basename(cur));
       cur = parent;
     }

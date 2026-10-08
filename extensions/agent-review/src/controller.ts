@@ -116,7 +116,7 @@ export class ReviewController {
 
   dispose(): void {
     this.disposed = true;
-    for (const s of this.subscriptions) s.dispose();
+    for (const s of this.subscriptions) { s.dispose(); }
     this.listeners.clear();
   }
 
@@ -132,7 +132,7 @@ export class ReviewController {
         live.add(f.absPath);
         await this.syncFile(f, undefined);
       }
-      for (const abs of [...this.pushed.keys()]) if (!live.has(abs)) await this.unpush(abs);
+      for (const abs of [...this.pushed.keys()]) { if (!live.has(abs)) { await this.unpush(abs); } }
     });
   }
 
@@ -142,14 +142,14 @@ export class ReviewController {
     for (const rel of e.paths) {
       const abs = toAbs(engine.root, rel);
       const f = this.files.find((x) => x.absPath === abs);
-      if (f) await this.syncFile(f, e.reason);
-      else if (this.pushed.has(abs)) await this.unpush(abs);
+      if (f) { await this.syncFile(f, e.reason); }
+      else if (this.pushed.has(abs)) { await this.unpush(abs); }
     }
   }
 
   private async syncFile(f: PendingFile, reason: ChangeEvent['reason'] | undefined): Promise<void> {
     if (!f.inline) {
-      if (this.pushed.has(f.absPath)) await this.unpush(f.absPath);
+      if (this.pushed.has(f.absPath)) { await this.unpush(f.absPath); }
       return;
     }
     const dirty = this.docs.isDirty(f.absPath);
@@ -166,7 +166,7 @@ export class ReviewController {
     const baseline = f.kind === 'created' ? '' : decode(await engine.getBaselineContent(f.rel));
     // Core's models keep one EOL per file, so a baseline that differs only in line endings looks the same there.
     const pushed = this.pushed.get(f.absPath);
-    if (pushed !== undefined && equalIgnoringEol(pushed, baseline)) return;
+    if (pushed !== undefined && equalIgnoringEol(pushed, baseline)) { return; }
     this.pushed.set(f.absPath, baseline);
     this.deferred.delete(f.absPath);
     try {
@@ -198,7 +198,7 @@ export class ReviewController {
   async onReviewAction(action: ReviewAction): Promise<void> {
     const abs = normalizePath(action.path);
     const engine = await this.review.engineFor(abs);
-    if (!engine) return;
+    if (!engine) { return; }
     try {
       switch (action.kind) {
         case 'accepted':
@@ -220,7 +220,7 @@ export class ReviewController {
           break;
       }
     } catch (err) {
-      if (err instanceof NotPendingError) return;
+      if (err instanceof NotPendingError) { return; }
       if (err instanceof StaleChangeError) {
         this.log.warn(`${abs} changed on disk before ${action.kind}; showing the current state`);
         this.pushed.delete(abs);
@@ -235,7 +235,7 @@ export class ReviewController {
   async onWillSave(absPath: string, content: string, edits: readonly TrackedEdit[] | undefined): Promise<void> {
     const abs = normalizePath(absPath);
     const engine = await this.review.engineFor(abs);
-    if (!engine) return;
+    if (!engine) { return; }
     if (this.conflicted.has(abs)) {
       // The buffer is based on an older disk version. The editor refuses this save ("file is newer") unless the
       // user overwrites; then the write is an external change, reviewed against the baseline like any other.
@@ -253,12 +253,12 @@ export class ReviewController {
   onBufferSettled(absPath: string): Promise<void> {
     const abs = normalizePath(absPath);
     this.conflicted.delete(abs);
-    if (!this.deferred.has(abs)) return Promise.resolve();
+    if (!this.deferred.has(abs)) { return Promise.resolve(); }
     return this.enqueue(async () => {
       this.deferred.delete(abs);
       const f = this.files.find((x) => x.absPath === abs);
-      if (f) await this.syncFile(f, undefined);
-      else if (this.pushed.has(abs)) await this.unpush(abs);
+      if (f) { await this.syncFile(f, undefined); }
+      else if (this.pushed.has(abs)) { await this.unpush(abs); }
     });
   }
 
@@ -280,7 +280,7 @@ export class ReviewController {
     const abs = normalizePath(absPath);
     if (this.docs.isDirty(abs)) {
       const inEditor = await this.rejectInEditor(abs);
-      if (!inEditor) throw new Error('The file has unsaved changes; save or revert it first.');
+      if (!inEditor) { throw new Error('The file has unsaved changes; save or revert it first.'); }
       return inEditor;
     }
     await this.onReviewAction({ kind: 'rejectFile', path: abs });
@@ -321,13 +321,13 @@ export class ReviewController {
           await this.engineForRoot(f.root).rejectFile(f.rel);
           out.done.push(f.absPath);
         } catch (err) {
-          if (!(err instanceof NotPendingError)) out.skipped.push(f.absPath);
+          if (!(err instanceof NotPendingError)) { out.skipped.push(f.absPath); }
         }
       } else {
         const r = await this.rejectInEditor(f.absPath);
-        if (r) out.done.push(f.absPath);
-        else out.skipped.push(f.absPath);
-        if (r === 'unsaved') out.unsaved!.push(f.absPath);
+        if (r) { out.done.push(f.absPath); }
+        else { out.skipped.push(f.absPath); }
+        if (r === 'unsaved') { out.unsaved!.push(f.absPath); }
       }
     }
     return out;
@@ -343,9 +343,9 @@ export class ReviewController {
 
   /** Added/removed line counts for the review list (text files only). */
   async lineCounts(f: PendingFile): Promise<{ added: number; removed: number } | undefined> {
-    if (f.binary || f.large || f.kind === 'renamed') return undefined;
+    if (f.binary || f.large || f.kind === 'renamed') { return undefined; }
     const change = await this.engineForRoot(f.root).getFileChange(f.rel).catch(() => undefined);
-    if (!change) return undefined;
+    if (!change) { return undefined; }
     let added = 0;
     let removed = 0;
     for (const h of change.hunks) {
@@ -370,7 +370,7 @@ export class ReviewController {
           large: c.large,
           inline: (c.kind === 'modified' || c.kind === 'created') && !c.binary && !c.large,
         };
-        if (c.oldPath) f.oldAbsPath = toAbs(engine.root, c.oldPath);
+        if (c.oldPath) { f.oldAbsPath = toAbs(engine.root, c.oldPath); }
         out.push(f);
       }
     }
@@ -379,7 +379,7 @@ export class ReviewController {
 
   private engineForRoot(root: string): ReviewEngine {
     const e = this.review.engines.get(root);
-    if (!e) throw new Error(`no engine for ${root}`);
+    if (!e) { throw new Error(`no engine for ${root}`); }
     return e;
   }
 
@@ -417,8 +417,8 @@ export class UiPaths {
   /** The path VS Code uses for a real path (unchanged outside the workspace folders, or if no folder is a link). */
   toUi(realPath: string): string {
     for (const { ui, real } of this.folders) {
-      if (realPath === real) return ui;
-      if (realPath.startsWith(real + path.sep)) return path.join(ui, path.relative(real, realPath));
+      if (realPath === real) { return ui; }
+      if (realPath.startsWith(real + path.sep)) { return path.join(ui, path.relative(real, realPath)); }
     }
     return realPath;
   }
@@ -438,7 +438,7 @@ export function normalizePath(p: string): string {
       return rest.length ? path.join(real, ...rest.reverse()) : real;
     } catch {
       const parent = path.dirname(cur);
-      if (parent === cur) return path.resolve(p);
+      if (parent === cur) { return path.resolve(p); }
       rest.push(path.basename(cur));
       cur = parent;
     }

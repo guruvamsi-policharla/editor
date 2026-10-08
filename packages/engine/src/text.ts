@@ -13,11 +13,11 @@ export function splitLines(text: string): string[] {
   let start = 0;
   for (;;) {
     const nl = text.indexOf('\n', start);
-    if (nl === -1) break;
+    if (nl === -1) { break; }
     lines.push(text.slice(start, nl + 1));
     start = nl + 1;
   }
-  if (start < text.length) lines.push(text.slice(start));
+  if (start < text.length) { lines.push(text.slice(start)); }
   return lines;
 }
 
@@ -35,7 +35,7 @@ const BINARY_SNIFF_BYTES = 8000;
  */
 export function isBinary(data: Uint8Array): boolean {
   const n = Math.min(data.length, BINARY_SNIFF_BYTES);
-  for (let i = 0; i < n; i++) if (data[i] === 0) return true;
+  for (let i = 0; i < n; i++) { if (data[i] === 0) { return true; } }
   return decodeText(data) === undefined;
 }
 
@@ -57,7 +57,7 @@ export function toBytes(content: string | Uint8Array): Uint8Array {
 }
 
 export function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  if (a.length !== b.length) { return false; }
+  for (let i = 0; i < a.length; i++) { if (a[i] !== b[i]) { return false; } }
   return true;
 }
