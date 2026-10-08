@@ -37,6 +37,8 @@ export interface Logger {
   info(message: string): void;
   warn(message: string): void;
   error(message: string, err?: unknown): void;
+  /** Detailed trace (the `agentReview.trace` setting); optional. */
+  trace?(message: string): void;
 }
 
 export interface PendingFile {
@@ -155,11 +157,13 @@ export class ReviewController {
     }
     const dirty = this.docs.isDirty(f.absPath);
     if (dirty && reason === 'external') {
+      this.log.trace?.(`${f.absPath}: external change under unsaved edits (conflict)`);
       this.conflicted.add(f.absPath);
       this.onConflict?.(this.ui.toUi(f.absPath));
     }
     if (dirty && this.pushed.has(f.absPath)) {
       // The UI shows baseline vs. buffer; moving the baseline under unsaved typing would mislabel it.
+      this.log.trace?.(`${f.absPath}: baseline push deferred (unsaved edits)`);
       this.deferred.add(f.absPath);
       return;
     }
@@ -170,6 +174,7 @@ export class ReviewController {
     if (pushed !== undefined && equalIgnoringEol(pushed, baseline)) { return; }
     this.pushed.set(f.absPath, baseline);
     this.deferred.delete(f.absPath);
+    this.log.trace?.(`${f.absPath}: baseline pushed to the editor (${reason ?? 'sync'})`);
     try {
       await this.bridge.setBaseline(this.ui.toUi(f.absPath), baseline, f.kind as InlineKind);
     } catch (err) {
@@ -179,6 +184,7 @@ export class ReviewController {
   }
 
   private async unpush(abs: string): Promise<void> {
+    this.log.trace?.(`${abs}: removed from the editor's review`);
     this.pushed.delete(abs);
     this.deferred.delete(abs);
     try {
@@ -200,6 +206,7 @@ export class ReviewController {
     const abs = normalizePath(action.path);
     const engine = await this.review.engineFor(abs);
     if (!engine) { return; }
+    this.log.trace?.(`${abs}: review action ${action.kind}`);
     try {
       switch (action.kind) {
         case 'accepted':

@@ -39,6 +39,11 @@
           "default": [],
           "description": "Extra gitignore-style patterns to exclude from review (on top of .gitignore and the built-in defaults: node_modules, build dirs, LaTeX artifacts)."
         },
+        "agentReview.trace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Write a detailed trace to the Agent Review output channel: every baseline change and its reason, what became pending or stopped being pending, how each save was attributed (edit log, formatter edits), watcher events and git operations. For diagnosing review bugs."
+        },
         "agentReview.agent.command": {
           "type": "string",
           "default": "tact",

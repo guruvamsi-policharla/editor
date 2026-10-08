@@ -21,6 +21,8 @@ interface LoggedEdit {
 }
 
 export class EditLogs {
+  /** Optional trace (the `agentReview.trace` setting). */
+  trace: ((message: string) => void) | undefined;
   private readonly logs = new Map<string, LoggedEdit[]>();
   /** The text the buffer last had while it matched the disk: the common ancestor in a merge. */
   private readonly cleanTexts = new Map<string, string>();
@@ -28,7 +30,8 @@ export class EditLogs {
   private readonly held = new Set<string>();
 
   /** The buffer is known to match the disk (opened clean, saved, reloaded, reverted). */
-  markClean(key: string, text?: string): void {
+  markClean(key: string, text?: string, why = 'clean'): void {
+    this.trace?.(`edit log of ${key} restarts (${why})`);
     this.held.delete(key);
     this.logs.set(key, []);
     if (text === undefined) { this.cleanTexts.delete(key); }
@@ -47,6 +50,7 @@ export class EditLogs {
    * so lines that match the disk stay what they are (agent lines stay pending) and only the rest is the user's.
    */
   hold(key: string): void {
+    this.trace?.(`edit log of ${key} held until the next save`);
     this.held.add(key);
     this.logs.delete(key);
   }
@@ -66,11 +70,14 @@ export class EditLogs {
       return;
     }
     if (!isDirtyAfter) {
-      this.markClean(key, textAfter);
+      this.markClean(key, textAfter, 'the buffer matches the disk again');
       return;
     }
     const log = this.logs.get(key);
-    if (!log) { return; } // no clean starting point seen: leave invalid
+    if (!log) { // no clean starting point seen: leave invalid
+      this.trace?.(`edit log of ${key} is invalid (no clean starting point); edit at version ${version} not logged`);
+      return;
+    }
     // VS Code reports multi-range changes in descending offset order, so applying them in order is valid.
     for (const c of changes) { log.push({ edit: { offset: c.rangeOffset, length: c.rangeLength, text: c.text, origin: 'user' }, version }); }
   }
