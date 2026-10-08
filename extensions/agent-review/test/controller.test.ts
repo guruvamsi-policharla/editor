@@ -101,6 +101,19 @@ describe('ReviewController', () => {
     expect(ctl.pendingFiles.map((f) => [f.rel, f.kind, f.inline])).toEqual([['paper.tex', 'modified', true]]);
   });
 
+  it('closing a diff or editor of a pending file (its document closes) changes nothing: still pending, same baseline', async () => {
+    await open();
+    const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\n');
+    const calls = core.calls.length;
+    for (let i = 0; i < 3; i++) { await ctl.onBufferSettled(abs); } // onDidCloseTextDocument, e.g. per closed diff
+    await ctl.idle();
+    expect(core.calls.length).toBe(calls); // nothing removed from or re-pushed to the inline UI
+    expect(core.shown.get(abs)).toEqual({ baseline: 'Intro.\nMethods.\nResults.\n', kind: 'modified' });
+    expect(await ctl.baselineText(abs)).toBe('Intro.\nMethods.\nResults.\n');
+    expect(read(abs)).toBe('Intro.\nNew methods.\nResults.\n');
+    expect(ctl.pendingFiles.map((f) => f.rel)).toEqual(['paper.tex']);
+  });
+
   it('Keep on one hunk moves the baseline (full text from the UI) and keeps the rest pending', async () => {
     await open();
     const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\nDiscussion.\n');
