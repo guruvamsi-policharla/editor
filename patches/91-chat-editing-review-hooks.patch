@@ -668,6 +668,48 @@ index 01fe8016..13568ccd 100644
  			precondition: ContextKeyExpr.and(ctxHasEditorModification, ctxIsCurrentlyBeingModified.negate()),
  			icon: Codicon.checkAll,
  			f1: true,
+diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorOverlay.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorOverlay.ts
+index 6817b7dc..e4bf7eaf 100644
+--- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorOverlay.ts
++++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorOverlay.ts
+@@ -23,7 +23,7 @@ import { Event } from '../../../../../base/common/event.js';
+ import { ServiceCollection } from '../../../../../platform/instantiation/common/serviceCollection.js';
+ import { IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
+ import { EditorResourceAccessor, SideBySideEditor } from '../../../../common/editor.js';
+-import { isEqual } from '../../../../../base/common/resources.js';
++import { basename, isEqual } from '../../../../../base/common/resources.js';
+ import { Codicon } from '../../../../../base/common/codicons.js';
+ import { renderIcon } from '../../../../../base/browser/ui/iconLabel/iconLabels.js';
+ import { ThemeIcon } from '../../../../../base/common/themables.js';
+@@ -190,6 +190,15 @@ class ChatEditorOverlayWidget extends Disposable {
+ 		}));
+ 
+ 
++		// Agent review: the file's Keep/Undo look like a change's Keep/Undo. Say which file they act on.
++		if ((entry as { readonly hunkToolbarRows?: boolean } | undefined)?.hunkToolbarRows) {
++			const fileNode = $('span.agent-review-overlay-file');
++			append(fileNode, renderIcon(Codicon.file));
++			append(fileNode, $('span.agent-review-overlay-file-name')).textContent = basename(entry!.modifiedURI);
++			fileNode.title = localize('agentReview.overlayFile', "Keep or undo all agent changes in {0}", basename(entry!.modifiedURI));
++			this._domNode.appendChild(fileNode);
++			this._showStore.add(toDisposable(() => fileNode.remove()));
++		}
+ 		this._domNode.appendChild(this._toolbarNode);
+ 		this._showStore.add(toDisposable(() => this._toolbarNode.remove()));
+ 
+@@ -378,6 +387,12 @@ class ChatEditingOverlayController {
+ 				);
+ 
+ 				widget.show(session, entry, { entryIndex, changeIndex });
++				// Agent review: at the bottom center, as in Cursor, away from the changes' Keep/Undo at the right.
++				const agentReview = (entry as { readonly hunkToolbarRows?: boolean }).hunkToolbarRows === true;
++				this._domNode.classList.toggle('agent-review', agentReview);
++				this._domNode.style.right = agentReview ? '' : '24px';
++				this._domNode.style.left = agentReview ? '50%' : '';
++				this._domNode.style.transform = agentReview ? 'translateX(-50%)' : '';
+ 				show();
+ 
+ 			} else {
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingServiceImpl.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingServiceImpl.ts
 index c0b57e5f..ccf58dbe 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingServiceImpl.ts

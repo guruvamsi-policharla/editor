@@ -970,10 +970,10 @@ index 00000000..155f9ac4
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css b/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css
 new file mode 100644
-index 00000000..f289a598
+index 00000000..546d6d59
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,118 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -1058,6 +1058,39 @@ index 00000000..f289a598
 +	text-decoration-thickness: 1px;
 +	text-decoration-color: var(--vscode-editorGutter-deletedBackground);
 +	color: var(--vscode-gitDecoration-deletedResourceForeground);
++}
++
++/*
++ * The file overlay (bottom center): Keep/Undo for the whole file. The file's name before them, and larger buttons,
++ * tell them apart from a change's Keep/Undo.
++ */
++.chat-editing-editor-overlay.agent-review .chat-editor-overlay-widget {
++	padding: 3px 6px 3px 10px;
++	gap: 8px;
++}
++
++.chat-editing-editor-overlay.agent-review .agent-review-overlay-file {
++	display: inline-flex;
++	align-items: center;
++	gap: 5px;
++	max-width: 22em;
++	padding-right: 10px;
++	border-right: 1px solid var(--vscode-editorWidget-border);
++	font-size: 12px;
++	white-space: nowrap;
++	color: var(--vscode-descriptionForeground);
++}
++
++.chat-editing-editor-overlay.agent-review .agent-review-overlay-file-name {
++	overflow: hidden;
++	text-overflow: ellipsis;
++	color: var(--vscode-foreground);
++	font-weight: 600;
++}
++
++.chat-editing-editor-overlay.agent-review .chat-editor-overlay-widget .action-item:not(.label-item) > .action-label:not(.codicon):not(.separator) {
++	padding: 4px 12px;
++	font-size: 12px;
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
 new file mode 100644
