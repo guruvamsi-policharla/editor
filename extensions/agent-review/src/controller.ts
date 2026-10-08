@@ -17,6 +17,12 @@ export interface CoreBridge {
   setBaseline(absPath: string, baseline: string, kind: InlineKind): Promise<void>;
   /** Stop showing `absPath` inline. */
   remove(absPath: string): Promise<void>;
+  /**
+   * Undo every pending change of a shown file in its editor buffer, as the editor's own file Undo does: text the
+   * user typed outside the changes stays, and the buffer is saved only if it had no other unsaved edits.
+   * Returns where the undo ended up, or undefined if the file isn't shown. Optional: only the fork has it.
+   */
+  rejectInEditor?(absPath: string): Promise<'saved' | 'unsaved' | 'deleted' | undefined>;
 }
 
 export interface DocumentState {
@@ -54,7 +60,12 @@ export type ReviewAction =
 export interface BulkOutcome {
   done: string[];
   skipped: string[];
+  /** Undone in the editor only: these files have unsaved edits, so the undo reaches the disk with their next save. */
+  unsaved?: string[];
 }
+
+/** Where a file Undo ended up: written to disk, or only in the editor buffer (the user's unsaved edits keep it dirty). */
+export type UndoOutcome = 'saved' | 'unsaved';
 
 export class ReviewController {
   /** absPath -> baseline text last pushed to the core UI. */
@@ -255,9 +266,32 @@ export class ReviewController {
     await this.onReviewAction({ kind: 'acceptFile', path: absPath });
   }
 
-  async rejectFile(absPath: string): Promise<void> {
-    if (this.docs.isDirty(normalizePath(absPath))) throw new Error('The file has unsaved changes; save or revert it first.');
-    await this.onReviewAction({ kind: 'rejectFile', path: absPath });
+  /**
+   * Undo a whole file. Normally the engine writes the baseline back to disk. A file with unsaved edits is never
+   * written behind the editor's back: it is undone in its buffer instead (the user's edits outside the agent's
+   * changes stay), which stays dirty until the user saves.
+   */
+  async rejectFile(absPath: string): Promise<UndoOutcome> {
+    const abs = normalizePath(absPath);
+    if (this.docs.isDirty(abs)) {
+      const inEditor = await this.rejectInEditor(abs);
+      if (!inEditor) throw new Error('The file has unsaved changes; save or revert it first.');
+      return inEditor;
+    }
+    await this.onReviewAction({ kind: 'rejectFile', path: abs });
+    return 'saved';
+  }
+
+  /** Undo a dirty file in its editor buffer, if the editor shows its current pending state. */
+  private async rejectInEditor(abs: string): Promise<UndoOutcome | undefined> {
+    const f = this.files.find((x) => x.absPath === abs);
+    // Not for created/deleted/renamed files (that undo deletes or restores the file), nor when the disk changed under
+    // the unsaved edits (a conflict: the editor shows an older state; merge first).
+    if (!this.bridge.rejectInEditor || !f || f.kind !== 'modified' || !f.inline || !this.pushed.has(abs) || this.conflicted.has(abs)) {
+      return undefined;
+    }
+    const r = await this.bridge.rejectInEditor(abs);
+    return r === 'saved' || r === 'unsaved' ? r : undefined;
   }
 
   async acceptAll(): Promise<BulkOutcome> {
@@ -270,9 +304,12 @@ export class ReviewController {
     return out;
   }
 
-  /** Undo everything, except files with unsaved edits (their buffers would conflict with the disk write). */
+  /**
+   * Undo everything. Files with unsaved edits are undone in their editor buffers (see `rejectFile`), never written
+   * behind the editor; those that can't be (created/deleted files, conflicts) are skipped.
+   */
   async rejectAll(): Promise<BulkOutcome> {
-    const out: BulkOutcome = { done: [], skipped: [] };
+    const out: BulkOutcome = { done: [], skipped: [], unsaved: [] };
     for (const f of [...this.files]) {
       if (f.kind === 'renamed' || !this.docs.isDirty(f.absPath)) {
         try {
@@ -282,7 +319,10 @@ export class ReviewController {
           if (!(err instanceof NotPendingError)) out.skipped.push(f.absPath);
         }
       } else {
-        out.skipped.push(f.absPath);
+        const r = await this.rejectInEditor(f.absPath);
+        if (r) out.done.push(f.absPath);
+        else out.skipped.push(f.absPath);
+        if (r === 'unsaved') out.unsaved!.push(f.absPath);
       }
     }
     return out;

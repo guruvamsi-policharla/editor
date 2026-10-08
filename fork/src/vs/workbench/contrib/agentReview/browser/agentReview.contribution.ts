@@ -44,6 +44,15 @@ CommandsRegistry.registerCommand('_agentReview.clear', (accessor: ServicesAccess
 	accessor.get(IAgentReviewService).clear();
 });
 
+/**
+ * Undo all pending changes of a file in its editor buffer (as the overlay's file Undo). Used by the extension
+ * for files with unsaved edits, which it must not write itself. Returns 'saved', 'unsaved' (the undo is in the
+ * buffer only; the user's unsaved edits keep it dirty), 'deleted' (created file), or undefined (not shown).
+ */
+CommandsRegistry.registerCommand('_agentReview.reject', (accessor: ServicesAccessor, uri: UriComponents): Promise<'saved' | 'unsaved' | 'deleted'> | undefined => {
+	return accessor.get(IAgentReviewService).getEntry(URI.revive(uri))?.rejectFile();
+});
+
 CommandsRegistry.registerCommand('_agentReview.openMerge', (accessor: ServicesAccessor, uri: UriComponents, base: string): Promise<boolean> => {
 	return accessor.get(IAgentReviewService).openMerge(URI.revive(uri), base);
 });

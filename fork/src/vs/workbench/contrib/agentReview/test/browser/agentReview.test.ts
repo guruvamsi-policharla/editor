@@ -11,6 +11,7 @@
 // and hunks stay as granular as the line diff, with word-level inner changes.
 
 import assert from 'assert';
+import { timeout } from '../../../../../base/common/async.js';
 import { Event } from '../../../../../base/common/event.js';
 import { Disposable, DisposableStore, IDisposable, IReference } from '../../../../../base/common/lifecycle.js';
 import { ResourceMap } from '../../../../../base/common/map.js';
@@ -34,6 +35,7 @@ import { ServiceCollection } from '../../../../../platform/instantiation/common/
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
 import { ITextFileSaveOptions, ITextFileService } from '../../../../services/textfile/common/textfiles.js';
 import { workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
+import { INotification, INotificationHandle, INotificationService, Severity } from '../../../../../platform/notification/common/notification.js';
 import { IChatWidgetService } from '../../../chat/browser/chat.js';
 import { IChatEditingExplanationModelManager } from '../../../chat/browser/chatEditing/chatEditingExplanationModelManager.js';
 import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntryChangeHunk } from '../../../chat/common/editing/chatEditingService.js';
@@ -64,6 +66,12 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 	let dirty: boolean;
 	let saves: (ITextFileSaveOptions | undefined)[];
 	let insta: TestInstantiationService;
+	// Opt-in, more realistic saves: dirty until a save of the current buffer finishes; saves can be held or fail.
+	let trackSaves: boolean;
+	let savedVersion: number;
+	let holdSave: Promise<void> | undefined;
+	let saveOutcome: 'ok' | 'cancelled' | 'error';
+	let notifications: INotification[];
 
 	setup(() => {
 		zones = new Map();
@@ -72,6 +80,11 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		hunkEvents = [];
 		dirty = false;
 		saves = [];
+		trackSaves = false;
+		savedVersion = -1;
+		holdSave = undefined;
+		saveOutcome = 'ok';
+		notifications = [];
 
 		const collection = new ServiceCollection();
 		collection.set(IEditorWorkerService, new SyncDescriptor(TestWorkerService));
@@ -94,14 +107,29 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		}());
 		collection.set(ITextFileService, new class extends mock<ITextFileService>() {
 			override isDirty(): boolean {
-				return dirty;
+				return dirty || (trackSaves && model.getAlternativeVersionId() !== savedVersion);
 			}
 			override async save(resource: URI, options?: ITextFileSaveOptions): Promise<URI | undefined> {
 				saves.push(options);
+				const version = model.getAlternativeVersionId();
+				await holdSave;
+				if (saveOutcome === 'error') {
+					throw new Error('disk full');
+				}
+				if (saveOutcome === 'cancelled') {
+					return undefined;
+				}
+				savedVersion = version;
 				return resource;
 			}
 		}());
 		collection.set(IChatWidgetService, new class extends mock<IChatWidgetService>() { }());
+		collection.set(INotificationService, new class extends mock<INotificationService>() {
+			override notify(notification: INotification): INotificationHandle {
+				notifications.push(notification);
+				return new class extends mock<INotificationHandle>() { }();
+			}
+		}());
 		collection.set(IViewsService, new class extends mock<IViewsService>() {
 			override readonly onDidChangeViewVisibility = Event.None;
 		}());
@@ -227,6 +255,72 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		await integration.rejectNearestChange(hunkWidgets()[0]);
 		assert.strictEqual(model.getValue(), BASELINE);
 		assert.deepStrictEqual(saves, []);
+	});
+
+	test('pressing Undo twice quickly saves both (the first save is still running)', async () => {
+		model.setValue('a one\nb TWO\nc three\ne five\n');
+		trackSaves = true;
+		savedVersion = model.getAlternativeVersionId();
+		const baseline = 'a one\nb two\nc three\nd four\ne five\n';
+		const { entry, integration } = await showPending(baseline);
+		assert.strictEqual(entry.changesCount.get(), 2);
+
+		let release!: () => void;
+		holdSave = new Promise<void>(r => release = r);
+		const first = integration.rejectNearestChange(hunkWidgets()[0]);
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 ? d : undefined));
+		for (let i = 0; i < 100 && saves.length === 0; i++) {
+			await timeout(1);
+		}
+		assert.strictEqual(saves.length, 1, 'the first save has started');
+		assert.ok(insta.get(ITextFileService).isDirty(uri), 'dirty while the first save runs');
+
+		const second = integration.rejectNearestChange(hunkWidgets()[0]);
+		release();
+		await Promise.all([first, second]);
+		assert.strictEqual(model.getValue(), baseline);
+		assert.strictEqual(saves.length, 2, 'the second Undo is saved too');
+		assert.strictEqual(insta.get(ITextFileService).isDirty(uri), false, 'disk matches the buffer');
+		assert.deepStrictEqual(notifications, []);
+	});
+
+	test('if the save after Undo fails or is cancelled, the user is told the disk still has the agent text', async () => {
+		trackSaves = true;
+		savedVersion = model.getAlternativeVersionId();
+		for (const outcome of ['cancelled', 'error'] as const) {
+			saveOutcome = outcome;
+			notifications.length = 0;
+			model.setValue(DISK);
+			savedVersion = model.getAlternativeVersionId();
+			const { entry, integration } = await showPending();
+			await integration.rejectNearestChange(hunkWidgets()[0]);
+			assert.strictEqual(model.getValue(), BASELINE, 'the undo is in the buffer');
+			assert.strictEqual(notifications.length, 1, outcome);
+			assert.strictEqual(notifications[0].severity, Severity.Warning);
+			assert.match(String(notifications[0].message), /isn't on disk yet/);
+			integration.dispose();
+			service.remove(uri);
+			assert.ok(!service.getEntry(uri) && entry);
+		}
+	});
+
+	test('file Undo with unsaved user edits stays in the buffer (dirty), keeps those edits, and says so', async () => {
+		const { entry } = await showPending();
+		// the user types on line 1, outside the change: folded into the baseline model, not pending
+		model.applyEdits([EditOperation.replace(new Range(1, 1, 1, 6), 'Opening')]);
+		await waitForState(entry.diffInfo.map(d => entry.originalModel.getValue().startsWith('Opening') ? d : undefined));
+		dirty = true;
+
+		assert.strictEqual(await entry.rejectFile(), 'unsaved');
+		assert.strictEqual(model.getValue(), 'Opening sentence.\nThis sentence was deleted by the agent.\nClosing sentence.\n');
+		assert.deepStrictEqual(saves, [], 'never saved for the user');
+
+		dirty = false;
+		await service.setBaseline(uri, BASELINE);
+		model.setValue(DISK);
+		await waitForState(entry.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
+		assert.strictEqual(await entry.rejectFile(), 'saved');
+		assert.strictEqual(saves.length, 1);
 	});
 
 	test('file Keep reports acceptFile; file Undo restores and saves', async () => {

@@ -19,6 +19,7 @@ import { BASELINE_SCHEME, BaselineContentProvider, baselineUri, ReviewTree, type
 const CORE_SET_BASELINE = '_agentReview.setBaseline';
 const CORE_REMOVE = '_agentReview.remove';
 const CORE_CLEAR = '_agentReview.clear';
+const CORE_REJECT = '_agentReview.reject';
 
 let controller: ReviewController | undefined;
 let review: MultiRootReview | undefined;
@@ -67,6 +68,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
     remove: async (abs) => {
       if (hasCore) await vscode.commands.executeCommand(CORE_REMOVE, vscode.Uri.file(abs));
+    },
+    rejectInEditor: async (abs) => {
+      if (!hasCore) return undefined;
+      return vscode.commands.executeCommand<'saved' | 'unsaved' | 'deleted' | undefined>(CORE_REJECT, vscode.Uri.file(abs));
     },
   };
 
@@ -228,7 +233,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     })),
     vscode.commands.registerCommand('agentReview.rejectFile', (arg?: FileItem | vscode.Uri) => run('Undo', async () => {
       const p = itemPath(arg);
-      if (p) await ctl.rejectFile(p);
+      if (p && (await ctl.rejectFile(p)) === 'unsaved') {
+        void vscode.window.showInformationMessage(`Agent Review: undone in the editor. ${path.basename(p)} has unsaved edits, so it isn't saved yet; save it to write the undo to disk.`);
+      }
     })),
     vscode.commands.registerCommand('agentReview.acceptAll', () => run('Keep All', async () => {
       const r = await ctl.acceptAll();
@@ -239,7 +246,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const ok = await vscode.window.showWarningMessage(`Undo all pending changes in ${n} file(s)? Files go back to their accepted content.`, { modal: true }, 'Undo All');
       if (ok !== 'Undo All') return;
       const r = await ctl.rejectAll();
-      if (r.skipped.length) void vscode.window.showWarningMessage(`Agent Review: skipped ${r.skipped.length} file(s) with unsaved edits or newer changes.`);
+      if (r.skipped.length) void vscode.window.showWarningMessage(`Agent Review: skipped ${r.skipped.length} file(s) that changed on disk under unsaved edits, or were created or deleted with unsaved edits.`);
+      if (r.unsaved?.length) {
+        void vscode.window.showInformationMessage(`Agent Review: ${r.unsaved.map((p) => path.basename(p)).join(', ')} ${r.unsaved.length === 1 ? 'has' : 'have'} unsaved edits: undone in the editor, not saved yet. Save to write the undo to disk.`);
+      }
     })),
     vscode.commands.registerCommand('agentReview.openChanges', () => run('Open All Changes', async () => {
       const resources: [vscode.Uri, vscode.Uri | undefined, vscode.Uri | undefined][] = ctl.pendingFiles.map((f) => {

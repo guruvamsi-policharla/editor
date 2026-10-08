@@ -56,12 +56,25 @@ The engine is authoritative. Core only renders what the extension pushes and rep
 | **Undo** a hunk | Restores the hunk in the buffer, then **saves** if the buffer was clean (save participants skipped, so formatters can't rewrite other agent lines). Emits `rejected` | Nothing to do: the engine sees disk == baseline in that region |
 | Undo a hunk with unsaved edits | Restores in the buffer, no save | Folded with the user's next save through the edit log (attributed as user edits that touch an agent hunk, so the baseline doesn't move) |
 | **Keep** / **Undo** a file (overlay or list) | Keep emits `acceptFile`; Undo restores and saves (modified files) or emits `rejectFile` (created files) | `engine.acceptFile` / `engine.rejectFile` (reject deletes a created file, restores a deleted one) |
+| Undo a file from the list, or **Undo All**, with unsaved edits | `_agentReview.reject` undoes it in the buffer like the overlay's file Undo: text the user typed outside the changes stays, nothing is saved | Never writes the file behind the editor. Says the undo is in the editor only until the user saves. Created/deleted files with unsaved edits, and files whose disk changed under the unsaved edits (merge first), are refused/skipped |
 | Typing + save | Typing outside hunks folds into the baseline model immediately (upstream behavior). Two save participants bracket all others (format on save, code actions, other extensions): the first records the buffer version, the last calls `agentReview.ext.onWillWrite({ uri, userVersion, version })` right before the write | `reportUserSave(content, edits)`, with edits after `userVersion` tagged `formatter`. User lines fold into the baseline; agent lines stay pending; formatter edits stay pending inside agent hunks and fold in elsewhere (line by line) |
 | Agent writes while the buffer is dirty | The buffer is never overwritten. **Merge…** (notification, or *Agent Review: Merge Agent's Version with Unsaved Edits*) runs `_agentReview.openMerge`: both versions are snapshotted, the buffer reloads from disk, and VS Code's 3-way merge editor opens on its own auto-merge (base = the text both sides started from, Agent = disk, Yours = the buffer, result = the file). Nothing is written until **Complete Merge** | Pushes for that file are deferred until save or revert. A save of the stale buffer isn't attributed. The merge result is attributed by diffing against the disk (agent lines stay pending, the user's fold in). Both versions are also copied to `conflicts/` in workspace storage (kept 7 days), and closing the merge without saving points to the user's copy |
 | Git commit / checkout / stage | Nothing | The engine's `checkGit` moves baselines (HEAD move = accept). Entries update or disappear |
 | Restart | `_agentReview.clear` at activation | The engine reopens its persisted state, rescans (stat cache), and re-pushes everything pending |
 
 Created files are reviewed inline (baseline `''`). Deleted and renamed files, and binary or large files, are list-only: the side-by-side diff from the baseline, plus Keep/Undo through the engine.
+
+## What is on disk after Keep and Undo
+
+The rule: after Undo, the file on disk matches what the user sees (as in Cursor), so an agent that reads the file never reads undone text as still there. The one exception is a file the user also has unsaved edits in: it is never saved for them.
+
+| Action | Buffer had no other unsaved edits | Buffer had unsaved user edits |
+|---|---|---|
+| **Keep** (hunk, file, all) | Disk unchanged: the agent's text is already there. Only the baseline moves | Same; the user's edits stay unsaved |
+| **Undo** a hunk, or a file in the editor | The baseline text goes back into the buffer, which is **saved right away** (without save participants, so formatters can't touch other pending lines). Disk = what you see | The undo stays **in the buffer**, which stays dirty; it reaches the disk with the user's next save (and is attributed correctly then). Until then the agent still sees its own text on disk |
+| **Undo** from the list / **Undo All** | The engine writes the baseline (or deletes a created file, restores a deleted one) | Undone in the buffer as above, not saved. Created/deleted files and files in conflict are skipped, with a message |
+
+If the save after an Undo fails or is cancelled (disk full, permissions, a newer version on disk), a warning says the undo isn't on disk yet and offers **Save**. Two Undos in quick succession both get saved, even while the first save is still running.
 
 ## Scope status
 

@@ -24,6 +24,16 @@ class FakeCore implements CoreBridge {
   }
 }
 
+/** The fork's core, which can also undo a file in its editor buffer (`_agentReview.reject`). */
+class FakeCoreWithEditorUndo extends FakeCore {
+  readonly undoneInEditor: string[] = [];
+  async rejectInEditor(abs: string): Promise<'saved' | 'unsaved' | 'deleted' | undefined> {
+    if (!this.shown.has(abs)) return undefined;
+    this.undoneInEditor.push(abs);
+    return 'unsaved'; // the buffer has the user's unsaved edits, so the undo stays in it
+  }
+}
+
 const quiet = { info() {}, warn() {}, error(m: string, e?: unknown) { throw new Error(`${m}: ${String(e)}`); } };
 
 let tmp: string;
@@ -35,9 +45,9 @@ let dirty: Set<string>;
 let conflicts: string[];
 let ctl: ReviewController;
 
-async function open(git = false): Promise<void> {
+async function open(git = false, editorUndo = false): Promise<void> {
   review = await MultiRootReview.open({ roots: [root], storageBase: storage, git });
-  core = new FakeCore();
+  core = editorUndo ? new FakeCoreWithEditorUndo() : new FakeCore();
   ctl = new ReviewController(review, core, { isDirty: (p) => dirty.has(p) }, quiet, (p) => conflicts.push(p));
   await ctl.syncAll();
 }
@@ -299,13 +309,68 @@ describe('ReviewController', () => {
     expect(core.shown.has(abs)).toBe(false);
   });
 
+  it('file Undo writes the baseline to disk, so the agent reads back what the user sees', async () => {
+    await open();
+    const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\n');
+    expect(await ctl.rejectFile(abs)).toBe('saved');
+    expect(read(abs)).toBe('Intro.\nMethods.\nResults.\n');
+    await ctl.idle();
+    expect(ctl.pendingFiles).toEqual([]);
+  });
+
+  it('file Undo with unsaved edits: undone in the editor buffer, never written behind it; the next save writes it', async () => {
+    await open(false, true);
+    const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\n');
+    dirty.add(abs);
+    expect(await ctl.rejectFile(abs)).toBe('unsaved');
+    expect((core as FakeCoreWithEditorUndo).undoneInEditor).toEqual([abs]);
+    expect(read(abs)).toBe('Intro.\nNew methods.\nResults.\n'); // the disk is left to the editor
+    // The user saves: the buffer had the undo (restore "Methods.") plus their own edit on line 1.
+    await userSave(abs, 'Introduction.\nMethods.\nResults.\n', [
+      { offset: 0, length: 6, text: 'Introduction.', origin: 'user' },
+      { offset: 14, length: 12, text: 'Methods.', origin: 'user' },
+    ]);
+    expect(read(abs)).toBe('Introduction.\nMethods.\nResults.\n');
+    expect(ctl.pendingFiles).toEqual([]);
+    expect(await ctl.baselineText(abs)).toBe('Introduction.\nMethods.\nResults.\n');
+  });
+
+  it('file Undo with unsaved edits is refused where the editor cannot do it (stock VS Code, created files)', async () => {
+    await open();
+    const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\n');
+    dirty.add(abs);
+    await expect(ctl.rejectFile(abs)).rejects.toThrow(/unsaved changes/);
+    expect(read(abs)).toBe('Intro.\nNew methods.\nResults.\n');
+
+    ctl.dispose();
+    await review.close();
+    await open(false, true);
+    const created = await agentWrite('notes.tex', 'New notes.\n');
+    dirty.add(created);
+    await expect(ctl.rejectFile(created)).rejects.toThrow(/unsaved changes/);
+    expect(fs.existsSync(created)).toBe(true); // the user's unsaved text is never deleted
+  });
+
+  it('Undo All: clean files on disk, files with unsaved edits in their editor, unsaved created files skipped', async () => {
+    await open(false, true);
+    const a = await agentWrite('paper.tex', 'changed\n');
+    const b = await agentWrite('b.txt', 'new\n');
+    const c = await agentWrite('c.txt', 'also new\n');
+    dirty.add(a);
+    dirty.add(c);
+    const r = await ctl.rejectAll();
+    expect(r).toEqual({ done: [b, a].sort(), skipped: [c], unsaved: [a] });
+    expect(fs.existsSync(b)).toBe(false);
+    expect(read(a)).toBe('changed\n'); // left to the editor's next save
+  });
+
   it('Keep All / Undo All', async () => {
     await open();
     const a = await agentWrite('paper.tex', 'changed\n');
     const b = await agentWrite('b.txt', 'new\n');
     dirty.add(a);
     const r = await ctl.rejectAll();
-    expect(r).toEqual({ done: [b], skipped: [a] }); // dirty buffer skipped
+    expect(r).toEqual({ done: [b], skipped: [a], unsaved: [] }); // dirty buffer skipped (no editor undo: stock VS Code)
     expect(fs.existsSync(b)).toBe(false);
     dirty.delete(a);
     await ctl.acceptAll();

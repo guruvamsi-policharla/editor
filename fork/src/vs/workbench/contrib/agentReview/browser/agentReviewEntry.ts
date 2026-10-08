@@ -13,10 +13,15 @@
 //   Keep hunk  -> original model edited here -> 'accepted' with the full new baseline
 //   Undo hunk  -> buffer edited here -> saved (when it was clean) -> the engine sees disk == baseline there
 //   Keep file  -> 'acceptFile';  Undo file -> buffer restored + saved, or 'rejectFile' for a created file
+// Undo writes the file, so the disk matches what the reviewer sees and the agent can't read the undone text
+// back. The one exception is a buffer with the user's own unsaved edits: it's never saved for them, so the
+// undo stays in the buffer (dirty) until they save. Keep never writes: the agent's text is already on disk.
 
+import { toAction } from '../../../../base/common/actions.js';
 import { Emitter } from '../../../../base/common/event.js';
 import { Disposable, DisposableMap, IReference } from '../../../../base/common/lifecycle.js';
 import { constObservable, derived, IObservable, observableValue } from '../../../../base/common/observable.js';
+import { basename } from '../../../../base/common/resources.js';
 import { URI } from '../../../../base/common/uri.js';
 import { getCodeEditor, ICodeEditor } from '../../../../editor/browser/editorBrowser.js';
 import { IDocumentDiff } from '../../../../editor/common/diff/documentDiffProvider.js';
@@ -27,8 +32,10 @@ import { createTextBufferFactory } from '../../../../editor/common/model/textMod
 import { IModelService } from '../../../../editor/common/services/model.js';
 import { IResolvedTextEditorModel } from '../../../../editor/common/services/resolverService.js';
 import { IModelContentChangedEvent } from '../../../../editor/common/textModelEvents.js';
+import { localize } from '../../../../nls.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
+import { INotificationService, Severity } from '../../../../platform/notification/common/notification.js';
 import { IEditorPane, SaveReason } from '../../../common/editor.js';
 import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
 import { ChatEditingCodeEditorIntegration, IDocumentDiff2 } from '../../chat/browser/chatEditing/chatEditingCodeEditorIntegration.js';
@@ -87,6 +94,9 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 	private readonly _changeService: ChatEditingTextModelChangeService;
 	private readonly _integrations = this._register(new DisposableMap<IEditorPane, IModifiedFileEntryEditorIntegration>());
 
+	/** The save of the last Undo, while it runs, and the buffer version it writes. */
+	private _undoSave: { readonly versionId: number; readonly done: Promise<void> } | undefined;
+
 	private readonly _onDidHunkAction = this._register(new Emitter<IAgentReviewHunkEvent>());
 	readonly onDidHunkAction = this._onDidHunkAction.event;
 
@@ -104,6 +114,7 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 		@IInstantiationService private readonly _instantiationService: IInstantiationService,
 		@ITextFileService private readonly _textFileService: ITextFileService,
 		@ILogService private readonly _logService: ILogService,
+		@INotificationService private readonly _notificationService: INotificationService,
 	) {
 		super();
 		this._kind = kind;
@@ -150,7 +161,7 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 	}
 
 	private async _undoHunk(diff: IDocumentDiff2, change: DetailedLineRangeMapping): Promise<boolean> {
-		const wasDirty = this._textFileService.isDirty(this.modifiedURI);
+		const wasDirty = this._hasUnsavedUserEdits();
 		const done = await diff.undo(change);
 		if (!done) {
 			return false;
@@ -168,15 +179,53 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 	}
 
 	/**
+	 * Whether the buffer has unsaved edits other than an Undo that is being saved right now. (Pressing
+	 * Undo twice quickly must save both: the first one's save makes the buffer dirty until it finishes.)
+	 */
+	private _hasUnsavedUserEdits(): boolean {
+		if (!this._textFileService.isDirty(this.modifiedURI)) {
+			return false;
+		}
+		return this._undoSave?.versionId !== this.modifiedModel.getAlternativeVersionId();
+	}
+
+	/**
 	 * Write the undone text to disk so that the file matches what the reviewer sees. Skips save
 	 * participants: formatters must not rewrite the agent's other pending lines as a side effect.
 	 * Unsaved user edits are never saved for them; in that case the undo is saved with their next save.
+	 * If the write fails, the user is told: the agent would otherwise still read its own text on disk.
 	 */
 	private async _saveUndo(): Promise<void> {
-		try {
-			await this._textFileService.save(this.modifiedURI, { reason: SaveReason.EXPLICIT, skipSaveParticipants: true });
-		} catch (err) {
-			this._logService.error('[agentReview] could not save after undo', err);
+		const previous = this._undoSave?.done;
+		const versionId = this.modifiedModel.getAlternativeVersionId();
+		const done = (async () => {
+			await previous;
+			let error: unknown;
+			try {
+				const saved = await this._textFileService.save(this.modifiedURI, { reason: SaveReason.EXPLICIT, skipSaveParticipants: true });
+				if (saved || !this._textFileService.isDirty(this.modifiedURI)) {
+					return;
+				}
+			} catch (err) {
+				error = err;
+			}
+			this._logService.error('[agentReview] could not save after undo', error);
+			this._notificationService.notify({
+				severity: Severity.Warning,
+				message: localize('agentReview.undoNotSaved', "Undo in {0} isn't on disk yet, so an agent reading the file still sees its own text. Save the file to write it.", basename(this.modifiedURI)),
+				actions: {
+					primary: [toAction({
+						id: 'agentReview.saveUndo',
+						label: localize('agentReview.save', "Save"),
+						run: () => this._textFileService.save(this.modifiedURI, { reason: SaveReason.EXPLICIT, skipSaveParticipants: true }),
+					})],
+				},
+			});
+		})();
+		this._undoSave = { versionId, done };
+		await done;
+		if (this._undoSave?.done === done) {
+			this._undoSave = undefined;
 		}
 	}
 
@@ -207,18 +256,31 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 	}
 
 	async reject(): Promise<void> {
+		await this.rejectFile();
+	}
+
+	/**
+	 * Undo every pending change of the file. Modified files: the buffer goes back to the baseline (text the
+	 * user typed outside the changes stays, it is part of the baseline) and is saved if it had no other
+	 * unsaved edits. Created files: the extension deletes the file.
+	 * @returns where the undo is: `saved` to disk, only in the buffer (`unsaved`, the user's unsaved edits
+	 * keep it dirty), or `deleted` (created file, removed by the extension).
+	 */
+	async rejectFile(): Promise<'saved' | 'unsaved' | 'deleted'> {
 		if (this._kind === 'created') {
 			this._stateObs.set(ModifiedFileEntryState.Rejected, undefined);
 			this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'rejectFile' });
-			return;
+			return 'deleted';
 		}
-		const wasDirty = this._textFileService.isDirty(this.modifiedURI);
+		const wasDirty = this._hasUnsavedUserEdits();
 		this._changeService.undo();
 		this._stateObs.set(ModifiedFileEntryState.Rejected, undefined);
 		this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'rejected' });
-		if (!wasDirty) {
-			await this._saveUndo();
+		if (wasDirty) {
+			return 'unsaved';
 		}
+		await this._saveUndo();
+		return this._textFileService.isDirty(this.modifiedURI) ? 'unsaved' : 'saved';
 	}
 
 	enableReviewModeUntilSettled(): void {
