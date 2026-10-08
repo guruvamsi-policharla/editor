@@ -1,6 +1,6 @@
 # Phase 2: fork + built-in inline review (MVP)
 
-**TL;DR:** The packaged fork ("Editor", binary `editor`, built from VSCodium stable) shows changes that an external agent writes to disk inline in the editor. You get word-level highlights, deleted lines as real rows, and always-visible per-hunk **Keep / Undo** buttons. It also has the file overlay with ↑/↓ navigation, an **Agent Changes** list for all files (including created and deleted ones), and Ctrl/Cmd+Y / Ctrl/Cmd+N. Pending changes persist across restarts. The user's own edits fold into the baseline on save, and git commits and checkouts accept what they move.
+**TL;DR:** The packaged fork ("Editor", binary `editor`, built from VSCodium stable) shows changes that an external agent writes to disk inline in the editor. You get word-level highlights, deleted lines as real rows, and always-visible per-hunk **Keep / Undo** buttons. It also has the file overlay with ↑/↓ navigation, an **Agent Changes** list for all files (including created and deleted ones), and Ctrl/Cmd+Y / Ctrl/Cmd+N. Pending changes persist across restarts. The user's own edits fold into the baseline on save; `git add` accepts the staged files' changes, and anything that moves HEAD (commit, checkout, ...) accepts every pending change in the workspace (PLAN.md §5.1).
 
 The UI is VS Code's chat-editing review UI, fed by our review engine (`packages/engine`) from a built-in extension. VS Code's built-in AI chat stays hidden.
 
@@ -110,7 +110,9 @@ The engine is authoritative. Core only renders what the extension pushes and rep
 | Git commit / checkout / stage | Nothing | The engine's `checkGit` moves baselines (HEAD move = accept). Entries update or disappear |
 | Restart | `_agentReview.clear` at activation | The engine reopens its persisted state, rescans (stat cache), and re-pushes everything pending |
 
-Created files are reviewed inline (baseline `''`). Deleted and renamed files, and binary or large files, are list-only: the side-by-side diff from the baseline, plus Keep/Undo through the engine.
+Created files are reviewed inline (baseline `''`). Deleted and renamed files, and binary or large files, are list-only: the side-by-side diff from the baseline, plus Keep/Undo through the engine. An open tab of a file the agent deleted becomes that deletion's diff ("name (deleted by the agent)") with Keep Deletion / Restore File in its title (fix-1); a save of such a tab with unsaved edits restores the file, attributed against its accepted text, so the deletion is no longer pending.
+
+The entry's state (what hides or shows the overlay, the explorer decoration and the navigation) is derived from its diff since fix-1: pending exactly while baseline and buffer differ. It used to be set to Accepted/Rejected by the last Keep/Undo and could stay there while the engine still had the file pending, hiding later agent writes (#16).
 
 ## What is on disk after Keep and Undo
 
