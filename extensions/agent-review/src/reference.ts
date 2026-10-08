@@ -1,4 +1,4 @@
-/** Formatting of the `@path:L42-58` reference that Ctrl/Cmd+L sends to the agent terminal. */
+/** Formatting of the `@path:L42-58` reference that Ctrl/Cmd+L sends to the agent terminal or chat. */
 
 export interface SelectionInfo {
   relativePath: string;
@@ -34,4 +34,15 @@ export function selectionLines(start: { line: number }, end: { line: number; cha
   let last = end.line + 1;
   if (!isEmpty && end.character === 0 && end.line > start.line) { last -= 1; }
   return [first, last];
+}
+
+export type AgentTarget = 'auto' | 'terminal' | 'chat';
+
+/**
+ * Where Ctrl/Cmd+L sends the reference. `auto`: whichever of the agent terminal and the agent chat was used last
+ * (timestamps; the chat's comes from agent-chat), else the terminal.
+ */
+export function chooseTarget(setting: AgentTarget | undefined, last: { terminal?: number; chat?: number }): 'terminal' | 'chat' {
+  if (setting === 'terminal' || setting === 'chat') { return setting; }
+  return last.chat !== undefined && (last.terminal === undefined || last.chat > last.terminal) ? 'chat' : 'terminal';
 }
