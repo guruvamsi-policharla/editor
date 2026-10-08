@@ -20,6 +20,22 @@ describe('prompt blocks', () => {
 		expect(blocks.slice(1).map(b => (b.type === 'resource_link' ? b.name : ''))).toEqual(['notes.txt']);
 	});
 
+	it('Cmd/Ctrl+L pills: the text keeps them in place; their links follow the text\'s order, before attached files', () => {
+		const prompt = 'In this part @paper/main.tex:L7-8 fold in this argument @paper/main.tex:L13 please';
+		const blocks = promptBlocks({
+			prompt,
+			references: [
+				{ path: '/w/notes.txt' },
+				{ path: '/w/paper/main.tex', startLine: 13, endLine: 13, at: prompt.indexOf('@paper/main.tex:L13') },
+				{ path: '/w/paper/main.tex', startLine: 7, endLine: 8, at: prompt.indexOf('@paper/main.tex:L7-8') },
+			],
+			root: '/w',
+			exists,
+		});
+		expect(blocks[0]).toEqual({ type: 'text', text: prompt });
+		expect(blocks.slice(1).map(b => (b.type === 'resource_link' ? b.name : ''))).toEqual(['paper/main.tex:L7-8', 'paper/main.tex:L13', 'notes.txt']);
+	});
+
 	it('mentions: one line, escaped spaces, absolute paths; e-mail addresses are not mentions', () => {
 		expect(mentions('@notes.txt:L3 and @my\\ dir/a.tex, @/w/paper/main.tex', '/w', exists)).toEqual([
 			{ path: '/w/notes.txt', startLine: 3, endLine: 3 },

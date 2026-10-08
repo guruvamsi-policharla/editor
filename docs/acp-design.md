@@ -1,6 +1,6 @@
 # ACP connector: research and design
 
-*Prepared Oct 8, 2026 (PT) for `guruvamsi-policharla/editor`. Status: approved; A0 (spike) done, A and B built as an MVP (`packages/acp-client`, `extensions/agent-chat`). PLAN.md §5.4 and Phase 4 summarize it. Where the build differs from this doc: the spike report (`kind: 'permissions'` unused, mode is a normal picker; models are the native model picker; no core patch) and `extensions/agent-chat/README.md`.*
+*Prepared Oct 8, 2026 (PT) for `guruvamsi-policharla/editor`. Status: approved; A0 (spike) done, A and B built as an MVP (`packages/acp-client`, `extensions/agent-chat`); history, several chats, waiting between agents, inline Cmd/Ctrl+L and tact (parts of D and E) built in the chat-polish round, §11. PLAN.md §5.4 and Phase 4 summarize it. Where the build differs from this doc: the spike report (`kind: 'permissions'` unused, mode is a normal picker; models are the native model picker; no core patch) and `extensions/agent-chat/README.md`.*
 
 **Decisions (Oct 8, 2026), answering §10:** Claude starts in Accept edits with prompts for commands; Codex starts in Workspace access (not Auto review); Claude's Bypass is hidden and Codex's Full access is behind a confirmation; the chat lives in the secondary side bar (right), with sessions also openable as editor tabs; Cmd/Ctrl+L goes to whichever of chat/terminal was used last (configurable); the user's installed `claude`/`codex` are used when found on PATH, else pinned adapters are downloaded on first use; a webview fallback is acceptable if the native chat needs invasive patches; the PLAN.md wording changes are approved.
 
@@ -490,3 +490,43 @@ Each phase is a PR, and the full Linux build runs before merge, as today.
 6. **Use the user's installed `claude`/`codex` binaries** (shared logins and versions) or the adapters' bundled ones? Proposal: the user's binaries when found on PATH.
 7. Is a **webview fallback** acceptable if the spike shows that un-hiding the native chat without Copilot needs invasive core patches?
 8. **PLAN.md wording:** §1 ("doesn't … speak an agent protocol") and §3's non-goal ("No … model selection") need to change. The editor would forward model, effort and mode choices to the harness, but still contains no agent and calls no models itself. OK?
+
+---
+
+## 11. Chat polish (Oct 8, 2026): history, several chats, one agent at a time, tact, inline references
+
+Built on branch `chat-polish`. User-facing details are in `extensions/agent-chat/README.md`; this section records the decisions.
+
+### 11.1 tact: what it is and how it's integrated
+
+[tact](https://github.com/clabby/tact) (clabby/tact, "A terminal interface for Nanocodex", Rust) is the team's daily driver over [nanocodex](https://github.com/gakonst/nanocodex). Findings at tact `main` @ `89e9d02` (Oct 8, 2026) and release v0.8.3 (Oct 2):
+
+- **No ACP**, in tact or nanocodex: no `agent-client-protocol` dependency, no `acp` subcommand or flag, no branch or open work for it.
+- **No headless session mode.** `tact run <PROMPT>` runs one turn and prints Nanocodex event JSONL (true deltas), but can't resume or continue a session. The interactive UI refuses to start without a terminal on stdin and stdout.
+- **A local web API on `main` only** (merged after v0.8.3, so in no release yet; protocol version 9, documented in tact's `docs/web.md`). Every running tact serves HTTP + SSE while its UI is open: commands (`set_draft`, `submit`, `interrupt`, `set_model` before the first turn, `set_effort`, `set_reasoning_mode`, `set_speed`, `open_session {new|resume|fork}`, `close_session`, `compact`…), queries (`models`, `history`, `files`…), one SSE stream that follows the UI's active session (`snapshot`, `entry` upserts, `draft`, `settings`, `context`, `live`…). Auth: the machine token `$TACT_HOME/web/token` as the `tact` cookie, `X-Tact: 1` on POSTs. Discovery: `$TACT_HOME/web/instances/<pid>.json` (pid, port, workspace); port from `[web] port` (7878, scanning 21 ports).
+- **Launch / install:** `curl -fsSL https://tact.clab.by/install.sh | sh` (to `~/.local/bin`), `cargo install tact --locked`, release tarballs for Linux and macOS (x86_64, aarch64; checksum and minisign signature), `tact update`. The web API needs a build from `main` today (`cargo install --locked --git https://github.com/clabby/tact tact`; it needs Rust ≥ 1.97).
+- **Config:** `$TACT_HOME/config.toml` (default `~/.tact`), or `--config` / `TACT_CONFIG`. `[agent]` `model` (luna / sol / astra, default sol), `thinking` (low…max), `reasoning_mode` (standard / pro), `speed` (standard / fast / ultrafast), `max_subagents`, instructions…; `[web]` `enabled`, `bind`, `port`, `max_live_sessions`. Unknown keys are rejected. Every setting has a flag and a `TACT_*` env var.
+- **No approvals, no sandbox:** Nanocodex hard-codes approval "never" and full access. tact edits files (`apply_patch`) and runs commands (`exec_command`) without asking. So ACP permission prompts never happen for tact; edits in the workspace still show up for review with Keep/Undo.
+- **Auth:** the Codex ChatGPT login in `$CODEX_HOME/auth.json` (written by `tact auth login`), else `OPENAI_API_KEY` / `openai.api_key`. Without credentials tact exits at start ("no ChatGPT credentials found … run `tact auth login`"); a wrong key fails at the first turn (HTTP 401 from the Responses WebSocket).
+
+**Integration chosen: a thin ACP adapter on our side** (`packages/tact-acp`, bundled into agent-chat as `dist/adapters/tact-acp.js`, run with the editor's Node). It runs tact's UI in a pty nobody sees (`script(1)`: util-linux on Linux, BSD on macOS, both preinstalled), one tact process per ACP session (the SSE stream follows the UI's active session, so one process per chat keeps chats independent), and maps ACP to the web API (table in its README). Why not the alternatives: `tact run` can't continue a conversation; driving the TUI's keystrokes would be fragile; and a native `tact acp` doesn't exist. tact's pickers come through the same profile system: the model (fixed after the first message, as tact enforces), thinking, Pro reasoning, speed, plus a fixed "Approvals: Never asks" row so the missing approval mode is visible. Verified with the real tact (main build): install, launch in the hidden pty, handshake, model catalog and pickers, the not-signed-in state, and a turn failing with tact's own 401 (no credentials on the build machine); everything else is tested against a fake tact speaking the same API.
+
+**What upstream would need** for a cleaner integration (either one): a `tact acp` subcommand (stdio ACP, headless, many sessions in one process; it could reuse the web API's protocol types), or a headless `tact serve` running the web API without the UI. A release with the web API (after v0.8.3) is needed either way for users on release builds.
+
+### 11.2 History and reopening
+
+- The extension keeps each chat's transcript (what the chat showed, compacted) and an index, in global storage per workspace folder; the session item controller lists them in core's sessions list, plus the agent's own `session/list`. Core's cache of items doesn't outlive a refresh, so the extension must own this.
+- Reopening shows the saved transcript without starting anything (lazy, as before). The first message then resumes the ACP session (`session/resume`; Claude resumes from its own transcript on disk), else loads it (`session/load`, replay discarded), else starts a new one with a note. Sessions the agent lists but we never showed are opened with `session/load`, and the replay becomes the transcript (user message chunks start turns).
+- Search: core's list filter only matches titles, so **Search Chats** (a quick pick) searches titles and text. The quick pick, not a webview, keeps the native look.
+- Core needed one change: with `chat.disableAIFeatures` on, core resolved no session items at all; now only Copilot's own types are skipped.
+
+### 11.3 Several chats, and one agent at a time
+
+- Several chats run at once (tabs and the side bar, mixed harnesses): ACP multiplexes sessions on one adapter connection; tact gets one process per chat.
+- **Edits from two agents to the same file:** agents write files themselves, so the panel can't hold or merge a write. What it controls is when a turn starts. Decision: **serialize turns per workspace**. A turn waits while another chat's turn runs, says for whom ("Waiting for Claude Code ("Fix the intro") to finish…"), offers **Run now**, gives up on Stop, and starts by itself when the other turn ends (first come, first served). Plan and read-only modes don't wait (profile `readOnlyValues`).
+- **Why not per file:** before a turn runs, the panel only knows the files the prompt mentions; the agent decides what to edit as it goes (tool-call locations arrive mid-turn). A per-file lock would let two turns start and then collide in a file neither prompt named. The review engine's pending files say what was edited, not by whom.
+- **Future ideas:** attribution (record which chat's turn was running when each change arrived, from turn start/end times and tool-call locations, and show it on hunks: "Claude Code, chat 'Fix the intro'"); per-hunk ownership (Keep/Undo all of one agent's changes); per-file waiting once harnesses can declare intent (a plan's file list, or an ACP extension); pausing a running agent at its next tool call when another chat's edit lands in the same file (Claude's `canUseTool` could hold an Edit until the user decides).
+
+### 11.4 Inline Cmd/Ctrl+L references
+
+The reference goes in at the cursor as core's own dynamic-variable pill (the mechanism behind `#file` and `#selection`), so a message can hold several references in place. No extension API inserts at the chat input's cursor (`workbench.action.chat.open` replaces the whole input, and the chat input isn't a `TextEditor` for extensions), so patch 94 adds `_agentChat.insertReference`, modelled on core's own insert-and-decorate code. The request then carries the text with the references in place plus `Location` references with their offsets, sent as `resource_link`s in text order. Core shows prompt references as attachment chips too; ours are excluded, since the pill is already in the text.

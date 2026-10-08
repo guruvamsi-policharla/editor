@@ -4,7 +4,7 @@
 import { accessSync, constants } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
-import { launchFor, type AdapterInstaller, type AgentLaunch, type HarnessProfile, type ProfileOverride } from '@editor/acp-client';
+import { launchFor, npmAdapter, type AdapterInstaller, type AgentLaunch, type HarnessProfile, type ProfileOverride } from '@editor/acp-client';
 
 export function expandHome(p: string): string {
 	return p === '~' || p.startsWith('~/') ? join(homedir(), p.slice(2)) : p;
@@ -40,13 +40,24 @@ export function findHarness(profile: HarnessProfile, override: ProfileOverride |
 /** The editor's node: Electron run as node (the extension host's own binary). */
 export const EDITOR_NODE = { path: process.execPath, env: { ELECTRON_RUN_AS_NODE: '1' } };
 
-export async function resolveLaunch(profile: HarnessProfile, override: ProfileOverride | undefined, installer: AdapterInstaller, cwd: string, progress: (m: string) => void): Promise<AgentLaunch> {
+/**
+ * The adapter's launch. `bundledDir` holds the adapters that ship with the extension (tact's); a bundled
+ * adapter drives the user's CLI, so a missing CLI is an error that says how to install it.
+ */
+export async function resolveLaunch(profile: HarnessProfile, override: ProfileOverride | undefined, installer: AdapterInstaller, cwd: string, progress: (m: string) => void, bundledDir: string): Promise<AgentLaunch> {
 	const harnessPath = findHarness(profile, override);
 	if (override?.adapterPath) {
 		return launchFor(profile, { adapter: { kind: 'command', command: expandHome(override.adapterPath) }, node: EDITOR_NODE, harnessPath, cwd });
 	}
+	if ('bundled' in profile.adapter) {
+		if (!harnessPath) {
+			throw new Error(`${profile.harness.binary} isn't installed (not on PATH). ${profile.install ?? ''}`.trim());
+		}
+		return launchFor(profile, { adapter: { kind: 'script', path: join(bundledDir, profile.adapter.bundled) }, node: EDITOR_NODE, harnessPath, cwd });
+	}
 	if (!installer.installed(profile, !harnessPath)) {
-		progress(`Downloading the ${profile.label} adapter (${profile.adapter.npm}@${profile.adapter.version})…`);
+		const adapter = npmAdapter(profile);
+		progress(`Downloading the ${profile.label} adapter (${adapter.npm}@${adapter.version})…`);
 	}
 	const installed = await installer.ensure(profile, { omitOptional: !!harnessPath, onProgress: progress });
 	return launchFor(profile, { adapter: { kind: 'script', path: installed.entry }, node: EDITOR_NODE, harnessPath, cwd });
@@ -59,7 +70,7 @@ export async function loginCommand(profile: HarnessProfile, override: ProfileOve
 		return { shellPath: cli, shellArgs: [...profile.login.args] };
 	}
 	if (!profile.harness.bundled) {
-		throw new Error(`${profile.harness.binary} isn't on PATH. Install ${profile.label}, or set agentChat.harnesses.${profile.id}.harnessPath.`);
+		throw new Error(`${profile.harness.binary} isn't on PATH. ${profile.install ?? `Install ${profile.label}`}, or set agentChat.harnesses.${profile.id}.harnessPath.`);
 	}
 	const installed = await installer.ensure(profile, { omitOptional: false });
 	return { shellPath: EDITOR_NODE.path, shellArgs: [join(installed.nodeModules, profile.harness.bundled), ...profile.login.args], env: EDITOR_NODE.env };

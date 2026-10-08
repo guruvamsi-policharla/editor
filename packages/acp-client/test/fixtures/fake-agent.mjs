@@ -4,7 +4,13 @@
 //   "permission"  asks permission for a shell command and replies with the outcome
 //   "wait"        streams a chunk, then waits for session/cancel and ends with stopReason "cancelled"
 //   "crash"       exits the process mid-turn
+//   "slow"        streams a chunk, waits 1.5 s (or for session/cancel), then ends
+//   "edit <path>" reports an edit tool call for <path> (locations), writes "edited\n" to it, and ends
 // Env: FAKE_AUTH=1 → session/new fails with authRequired. FAKE_NO_RESUME=1 → no resume capability.
+// FAKE_NO_LOAD=1 → no loadSession/list capability. FAKE_STORE=<dir> → sessions (with their history, replayed by
+// session/load) are kept in <dir>/sessions.json, so they survive a restart.
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import * as acp from '@agentclientprotocol/sdk';
 
@@ -13,6 +19,20 @@ let clientCapabilities;
 let nextSession = 1;
 const sessions = new Map();
 const cancels = new Map();
+/** sessionId → { cwd, title, updatedAt, history: SessionUpdate[] } */
+const stored = new Map();
+const storeFile = process.env.FAKE_STORE ? join(process.env.FAKE_STORE, 'sessions.json') : undefined;
+if (storeFile && existsSync(storeFile)) {
+	for (const [id, v] of Object.entries(JSON.parse(readFileSync(storeFile, 'utf8')))) {
+		stored.set(id, v);
+	}
+}
+function save() {
+	if (storeFile) {
+		mkdirSync(process.env.FAKE_STORE, { recursive: true });
+		writeFileSync(storeFile, JSON.stringify(Object.fromEntries(stored)));
+	}
+}
 
 function options(state) {
 	const list = [
@@ -32,7 +52,10 @@ const connection = acp.agent({ name: 'fake-agent' })
 		clientCapabilities = ctx.params.clientCapabilities;
 		return {
 			protocolVersion: 1,
-			agentCapabilities: { sessionCapabilities: process.env.FAKE_NO_RESUME ? {} : { resume: {}, close: {} } },
+			agentCapabilities: {
+				loadSession: !process.env.FAKE_NO_LOAD,
+				sessionCapabilities: { ...(process.env.FAKE_NO_RESUME ? {} : { resume: {}, close: {} }), ...(process.env.FAKE_NO_LOAD ? {} : { list: {} }) },
+			},
 			authMethods: [],
 			agentInfo: { name: 'fake-agent', version: '1.0.0' },
 		};
@@ -44,7 +67,25 @@ const connection = acp.agent({ name: 'fake-agent' })
 		const sessionId = `s${process.pid}-${nextSession++}`;
 		const state = { mode: 'default', model: 'big', effort: 'high', meta: ctx.params._meta };
 		sessions.set(sessionId, state);
+		stored.set(sessionId, { cwd: ctx.params.cwd, title: null, updatedAt: new Date().toISOString(), history: [] });
+		save();
 		return { sessionId, configOptions: options(state) };
+	})
+	.onRequest(acp.methods.agent.session.list, async ctx => ({
+		sessions: [...stored].filter(([, v]) => !ctx.params.cwd || v.cwd === ctx.params.cwd)
+			.map(([sessionId, v]) => ({ sessionId, cwd: v.cwd, title: v.title, updatedAt: v.updatedAt })),
+	}))
+	.onRequest(acp.methods.agent.session.load, async ctx => {
+		const entry = stored.get(ctx.params.sessionId);
+		if (!entry) {
+			throw acp.RequestError.resourceNotFound(ctx.params.sessionId);
+		}
+		for (const update of entry.history) {
+			await connection.client.notify(acp.methods.client.session.update, { sessionId: ctx.params.sessionId, update });
+		}
+		const state = { mode: 'default', model: 'big', effort: 'high', loaded: true };
+		sessions.set(ctx.params.sessionId, state);
+		return { configOptions: options(state) };
 	})
 	.onRequest(acp.methods.agent.session.resume, async ctx => {
 		const state = { mode: 'default', model: 'big', effort: 'high', resumed: true };
@@ -64,7 +105,25 @@ const connection = acp.agent({ name: 'fake-agent' })
 		const client = connection.client;
 		const sessionId = ctx.params.sessionId;
 		const text = ctx.params.prompt.map(b => (b.type === 'text' ? b.text : '')).join('');
-		const update = u => client.notify(acp.methods.client.session.update, { sessionId, update: u });
+		const entry = stored.get(sessionId);
+		const update = u => {
+			if (entry) {
+				entry.history.push(u);
+				if (u.sessionUpdate === 'session_info_update' && u.title) {
+					entry.title = u.title;
+				}
+				entry.updatedAt = new Date().toISOString();
+				save();
+			}
+			return client.notify(acp.methods.client.session.update, { sessionId, update: u });
+		};
+		if (entry) {
+			for (const block of ctx.params.prompt) {
+				entry.history.push({ sessionUpdate: 'user_message_chunk', content: block.type === 'text' ? block : { type: 'text', text: `@${block.name ?? block.uri}` } });
+			}
+			entry.title ??= text.slice(0, 40);
+			save();
+		}
 
 		if (text === 'hi') {
 			let fsError;
@@ -119,6 +178,21 @@ const connection = acp.agent({ name: 'fake-agent' })
 			await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'working' } });
 			await new Promise(resolve => cancels.set(sessionId, resolve));
 			return { stopReason: 'cancelled' };
+		}
+		if (text === 'slow') {
+			await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'working slowly' } });
+			const cancelled = await new Promise(resolve => {
+				cancels.set(sessionId, () => resolve(true));
+				setTimeout(() => resolve(false), 1500);
+			});
+			return { stopReason: cancelled ? 'cancelled' : 'end_turn' };
+		}
+		if (text.startsWith('edit ')) {
+			const path = text.slice(5).trim();
+			await update({ sessionUpdate: 'tool_call', toolCallId: `e${Date.now()}`, title: `Edit ${path}`, kind: 'edit', status: 'completed', locations: [{ path }] });
+			writeFileSync(path, 'edited\n');
+			await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `edited ${path}` } });
+			return { stopReason: 'end_turn' };
 		}
 		if (text === 'crash') {
 			await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'bye' } });

@@ -1,0 +1,24 @@
+{
+  "name": "@editor/tact-acp",
+  "version": "0.0.1",
+  "private": true,
+  "description": "An ACP agent for tact (https://github.com/clabby/tact): runs tact's terminal UI in a hidden pty and bridges ACP to the local web API every running tact serves. Bundled into agent-chat.",
+  "type": "module",
+  "main": "./src/main.ts",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "node -e \"console.log('tact-acp is source-only: bundled into agent-chat by extensions/agent-chat/build.mjs')\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.3"
+  }
+}

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type * as acp from '@agentclientprotocol/sdk';
-import { CLAUDE, CODEX, configControls, isDangerous, launchFor, optionTiming, pendingDefaults, withOverride } from '../src/index.js';
+import { BUILTIN_PROFILES, CLAUDE, CODEX, configControls, isDangerous, launchFor, npmAdapter, optionTiming, pendingDefaults, TACT, withOverride } from '../src/index.js';
 
 const claudeFixture = JSON.parse(readFileSync(new URL('./fixtures/claude-0.87.0.json', import.meta.url), 'utf8'));
 const claudeOptions: acp.SessionConfigOption[] = claudeFixture.sessionNew.configOptions;
@@ -25,6 +25,15 @@ describe('profiles', () => {
 		expect(launch.env).toEqual({ NO_BROWSER: '1', INITIAL_AGENT_MODE: 'workspace-write' });
 		const custom = withOverride(CODEX, { defaults: { mode: 'read-only' }, env: { X: '1' } });
 		expect(launchFor(custom, { adapter: { kind: 'command', command: 'c' }, node, cwd: '/w' }).env).toMatchObject({ INITIAL_AGENT_MODE: 'read-only', X: '1', NO_BROWSER: '1' });
+	});
+
+	it('tact: its adapter ships with the editor (nothing to install); the user\'s tact and env reach it', () => {
+		expect(BUILTIN_PROFILES.map(p => p.id)).toEqual(['claude', 'codex', 'tact']);
+		expect(TACT.adapter).toEqual({ bundled: 'tact-acp.js' });
+		expect(() => npmAdapter(TACT)).toThrow(/ships with the editor/);
+		expect(npmAdapter(CLAUDE).npm).toBe('@agentclientprotocol/claude-agent-acp');
+		const launch = launchFor(withOverride(TACT, { env: { TACT_HOME: '/t' } }), { adapter: { kind: 'script', path: '/ext/dist/adapters/tact-acp.js' }, node, harnessPath: '/home/u/.cargo/bin/tact', cwd: '/w' });
+		expect(launch).toEqual({ command: '/app/editor', args: ['/ext/dist/adapters/tact-acp.js'], env: { ELECTRON_RUN_AS_NODE: '1', TACT_HOME: '/t', TACT_BIN: '/home/u/.cargo/bin/tact' }, cwd: '/w' });
 	});
 
 	it('timing: Claude is live; Codex applies from the next turn except plan', () => {

@@ -1,7 +1,7 @@
 {
   "name": "agent-chat",
   "displayName": "Agent Chat",
-  "description": "Chat with your agent harness (Claude Code, Codex) in VS Code's native chat, over ACP. The harness edits files itself; edits are reviewed inline with Keep/Undo.",
+  "description": "Chat with your agent harness (Claude Code, Codex, tact) in VS Code's native chat, over ACP. The harness edits files itself; edits are reviewed inline with Keep/Undo.",
   "version": "0.0.1",
   "publisher": "editor",
   "private": true,
@@ -35,7 +35,7 @@
         "id": "agent-chat.default",
         "name": "agent",
         "fullName": "Agent",
-        "description": "Chat with Claude Code or Codex",
+        "description": "Chat with Claude Code, Codex or tact",
         "isDefault": true,
         "modes": [
           "ask",
@@ -113,6 +113,27 @@
             "description": "Review the current changes"
           }
         ]
+      },
+      {
+        "type": "agent-tact",
+        "name": "tact",
+        "displayName": "tact",
+        "icon": "$(rocket)",
+        "welcomeTitle": "tact",
+        "welcomeMessage": "Your own tact (Nanocodex). It runs commands and edits files without asking (tact has no approval mode); every edit in the workspace shows up inline for review with Keep/Undo.",
+        "inputPlaceholder": "Ask tact. @ to reference",
+        "order": 3,
+        "canDelegate": true,
+        "capabilities": {
+          "supportsFileAttachments": true
+        },
+        "requiresCustomModels": true,
+        "commands": [
+          {
+            "name": "compact",
+            "description": "Summarize the conversation to free up context"
+          }
+        ]
       }
     ],
     "configurationDefaults": {
@@ -138,6 +159,11 @@
       {
         "command": "agentChat.newCodex",
         "title": "New Codex Chat",
+        "category": "Agent Chat"
+      },
+      {
+        "command": "agentChat.newTact",
+        "title": "New tact Chat",
         "category": "Agent Chat"
       },
       {
@@ -179,6 +205,32 @@
         "command": "agentChat.restart.codex",
         "title": "Restart Codex",
         "category": "Agent Chat"
+      },
+      {
+        "command": "agentChat.searchChats",
+        "title": "Search Chats\u2026",
+        "category": "Agent Chat",
+        "icon": "$(search)"
+      },
+      {
+        "command": "agentChat.runNow",
+        "title": "Run Now (Don't Wait for the Other Chat)",
+        "category": "Agent Chat"
+      },
+      {
+        "command": "agentChat.removeChat",
+        "title": "Remove from Chat History",
+        "category": "Agent Chat"
+      },
+      {
+        "command": "agentChat.login.tact",
+        "title": "Sign In to tact",
+        "category": "Agent Chat"
+      },
+      {
+        "command": "agentChat.restart.tact",
+        "title": "Restart tact",
+        "category": "Agent Chat"
       }
     ],
     "configuration": {
@@ -187,7 +239,7 @@
         "agentChat.harnesses": {
           "type": "object",
           "default": {},
-          "markdownDescription": "Per-harness overrides, keyed by `claude` / `codex`: `adapterPath` (an installed ACP adapter command instead of the pinned download), `harnessPath` (the `claude`/`codex` CLI instead of the one on PATH), `env` (extra adapter environment), `defaults` (config option values set on new sessions, e.g. `{\"mode\": \"default\"}`).",
+          "markdownDescription": "Per-harness overrides, keyed by `claude` / `codex` / `tact`: `adapterPath` (an installed ACP adapter command instead of the pinned download), `harnessPath` (the `claude`/`codex`/`tact` CLI instead of the one on PATH), `env` (extra adapter environment), `defaults` (config option values set on new sessions, e.g. `{\"mode\": \"default\"}`).",
           "additionalProperties": {
             "type": "object",
             "properties": {
@@ -211,6 +263,11 @@
               }
             }
           }
+        },
+        "agentChat.turns.waitForOtherChats": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "One agent edits at a time: a message in one chat waits (\"Waiting for \u2026 to finish\") while another chat's turn is running, then starts by itself. **Run now** in the waiting chat starts it anyway. Chats in a mode that doesn't edit (plan, read-only) never wait."
         }
       }
     },
@@ -225,6 +282,35 @@
         {
           "command": "agentChat.insertReference",
           "when": "editorTextFocus"
+        },
+        {
+          "command": "agentChat.runNow",
+          "when": "false"
+        },
+        {
+          "command": "agentChat.removeChat",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "agentChat.searchChats",
+          "when": "view == workbench.panel.chat.view.copilot",
+          "group": "navigation@-1"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "agentChat.searchChats",
+          "when": "activeEditor == workbench.editor.chatSession",
+          "group": "navigation@1"
+        }
+      ],
+      "chat/chatSessions": [
+        {
+          "command": "agentChat.removeChat",
+          "when": "chatSessionType =~ /^agent-/",
+          "group": "z_remove"
         }
       ]
     }
