@@ -4,14 +4,66 @@
  *--------------------------------------------------------------------------------------------*/
 
 /*
- * Agent review: the per-hunk Keep/Undo buttons are always visible (the chat UI only shows them on
- * hover). They are slightly dimmed until the pointer or the cursor is in the change.
+ * Agent review: each hunk's Keep/Undo toolbar is always visible, in its own row below the hunk
+ * (`in-own-row`, see ChatEditingCodeEditorIntegration), aligned with the start of the text. Nothing is
+ * under it, so it's drawn as plain buttons rather than a floating box. It's slightly dimmed until the
+ * pointer or the cursor is in the change. (The chat UI floats it over the hunk's first line on hover.)
  */
-.agent-review-editor .chat-diff-change-content-widget {
-	opacity: 0.8;
+.chat-diff-change-content-widget.in-own-row {
+	opacity: 0.85;
+	box-shadow: none;
+	border-radius: 4px;
+	overflow: visible;
 }
 
-.agent-review-editor .chat-diff-change-content-widget.hover,
-.agent-review-editor .chat-diff-change-content-widget:hover {
+.chat-diff-change-content-widget.in-own-row.hover,
+.chat-diff-change-content-widget.in-own-row:hover {
 	opacity: 1;
+}
+
+.chat-diff-change-content-widget.in-own-row .monaco-action-bar {
+	padding: 0;
+	border: none;
+	background-color: transparent;
+}
+
+.chat-diff-change-content-widget.in-own-row .monaco-action-bar .actions-container {
+	gap: 6px;
+}
+
+.chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item .action-label {
+	padding: 1px 8px;
+	font-size: 11px;
+	line-height: 16px;
+	border-radius: 4px;
+	background-color: var(--vscode-button-secondaryBackground);
+	color: var(--vscode-button-secondaryForeground);
+}
+
+.monaco-workbench .chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item .action-label:hover {
+	background-color: var(--vscode-button-secondaryHoverBackground);
+}
+
+.chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item.primary .action-label {
+	background-color: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+}
+
+.monaco-workbench .chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item.primary .action-label:hover {
+	background-color: var(--vscode-button-hoverBackground);
+}
+
+/* The "open diff" icon: a plain icon button, not a pill. */
+.chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item .action-label.codicon:not(.separator) {
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	font-size: 14px;
+	line-height: 18px;
+	background-color: transparent;
+	color: var(--vscode-icon-foreground);
+}
+
+.monaco-workbench .chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item .action-label.codicon:not(.separator):hover {
+	background-color: var(--vscode-toolbar-hoverBackground);
 }

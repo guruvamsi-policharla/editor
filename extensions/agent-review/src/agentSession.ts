@@ -55,7 +55,7 @@ export class AgentSession {
   /** Type `text` into the agent once it has started. Sends keep their order. False if the terminal closed. */
   send(text: string): Promise<boolean> {
     const sent = this.queue.then(() => {
-      if (this.io.isClosed) return false;
+      if (this.io.isClosed) { return false; }
       this.io.sendText(text, false);
       return true;
     });
@@ -65,9 +65,9 @@ export class AgentSession {
 }
 
 async function launch(io: AgentTerminalIO, command: string, t: AgentLaunchTimeouts): Promise<LaunchResult> {
-  if (!io.executeCommand) await waitFor((fire) => io.onDidActivateShellIntegration(fire), t.shellIntegrationMs);
+  if (!io.executeCommand) { await waitFor((fire) => io.onDidActivateShellIntegration(fire), t.shellIntegrationMs); }
   const execute = io.executeCommand;
-  if (io.isClosed) return 'none';
+  if (io.isClosed) { return 'none'; }
   if (!execute) {
     // No shell integration (or it's off): type the command into the shell and give it a moment to start.
     io.sendText(command, true);
@@ -83,10 +83,11 @@ async function launch(io: AgentTerminalIO, command: string, t: AgentLaunchTimeou
 /** Resolves true when the event fires, false after `ms`. */
 function waitFor(subscribe: (fire: () => void) => Disposable, ms: number): Promise<boolean> {
   return new Promise((resolve) => {
+    // eslint-disable-next-line prefer-const -- `finish` can run (event fired synchronously) before `sub` is assigned
     let sub: Disposable | undefined;
     let done = false;
     const finish = (ok: boolean) => {
-      if (done) return;
+      if (done) { return; }
       done = true;
       clearTimeout(timer);
       sub?.dispose();
@@ -94,7 +95,7 @@ function waitFor(subscribe: (fire: () => void) => Disposable, ms: number): Promi
     };
     const timer = setTimeout(() => finish(false), ms);
     sub = subscribe(() => finish(true));
-    if (done) sub.dispose();
+    if (done) { sub.dispose(); }
   });
 }
 

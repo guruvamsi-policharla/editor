@@ -1,0 +1,19 @@
+\section{Introduction}
+Long documents remain hard for language models.
+A typical paper is longer than the context most models are trained on,
+and the parts that matter for a question are often far apart.
+
+Two approaches dominate.
+Full attention over the whole document is accurate but expensive.
+Retrieval is cheap, but it misses answers that need several sections at once.
+
+We take a middle path.
+Each part of the document sees the rest through short summaries,
+so the model can follow references across sections without attending to every token.
+
+Our contributions are:
+\begin{itemize}
+  \item chunked attention with cross-chunk summaries;
+  \item an evaluation on three long-document benchmarks;
+  \item an analysis of when retrieval still wins.
+\end{itemize}

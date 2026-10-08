@@ -8,10 +8,10 @@ import { git, hasGit, rmrf, tmpDir } from './helpers.js';
 function lsFiles(cwd: string): Map<string, string> {
   const out = new Map<string, string>();
   for (const line of git(cwd, 'ls-files', '-s').split('\n')) {
-    if (!line) continue;
+    if (!line) { continue; }
     const [meta, p] = line.split('\t') as [string, string];
     const [, oid, stage] = meta.split(' ');
-    if (stage === '0') out.set(p, oid!);
+    if (stage === '0') { out.set(p, oid!); }
   }
   return out;
 }

@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Package the app from a tree prepared by prepare-vscodium.sh (VSCodium's build steps, minus its
 # release/asset plumbing). Output: ${WORKDIR}/vscodium/VSCode-${OS}-${ARCH} (Linux) or the .app in it (macOS).
+# On macOS the .app is ad-hoc signed (fork/scripts/sign-macos-adhoc.sh) so it launches on Apple Silicon.
 #
 # Usage: fork/scripts/build.sh [WORKDIR]   (default WORKDIR: ~/.cache/editor-fork-build)
-# Env: MAX_OLD_SPACE_SIZE (Node heap in MB for gulp, default 7168), VSCODE_ARCH (default: host arch).
+# Env: MAX_OLD_SPACE_SIZE (Node heap in MB for gulp; default 7168 on Linux, 8192 on macOS),
+#      VSCODE_ARCH (default: host arch).
+# bash 3.2 / BSD userland compatible (it runs on stock macOS).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -12,8 +15,10 @@ WORKDIR="${1:-${XDG_CACHE_HOME:-$HOME/.cache}/editor-fork-build}"
 . "${REPO_ROOT}/fork/branding.env"
 
 case "$(uname -s)" in
-  Linux) OS=linux ;;
-  Darwin) OS=darwin ;;
+  Linux) OS=linux; DEFAULT_HEAP=7168 ;;
+  # macOS swaps dynamically, so the cap can exceed what the 7 GB CI runner has free. 6144 was too low:
+  # compile-src died at the V8 heap limit with 4.8 GB of RAM still available (see build-macos.yml).
+  Darwin) OS=darwin; DEFAULT_HEAP=8192 ;;
   *) echo "unsupported OS: $(uname -s)" >&2; exit 1 ;;
 esac
 if [[ -z "${VSCODE_ARCH:-}" ]]; then
@@ -23,9 +28,17 @@ if [[ -z "${VSCODE_ARCH:-}" ]]; then
     *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
   esac
 fi
+HEAP="${MAX_OLD_SPACE_SIZE:-${DEFAULT_HEAP}}"
 
-export NODE_OPTIONS="--max-old-space-size=${MAX_OLD_SPACE_SIZE:-7168}"
 cd "${WORKDIR}/vscodium/vscode"
+
+# VS Code's `npm run gulp` passes --max-old-space-size on the node command line, and prepare_vscode.sh
+# bakes MAX_OLD_SPACE_SIZE from *prepare* time into package.json. A command-line flag beats NODE_OPTIONS,
+# so set the cap where it is actually read. (Portable sed: write a temp file, no `sed -i`.)
+sed -E "s/--max-old-space-size=[0-9]+/--max-old-space-size=${HEAP}/g" package.json > package.json.tmp
+mv package.json.tmp package.json
+export NODE_OPTIONS="--max-old-space-size=${HEAP}"
+echo "== Node heap cap for gulp: ${HEAP} MB"
 
 # Same steps as `gulp vscode-min-prepack` (what VSCodium runs), but one gulp process per step: the
 # TypeScript compile's heap is released before esbuild bundles everything, which lowers the peak enough
@@ -46,7 +59,14 @@ echo "== package (gulp vscode-${OS}-${VSCODE_ARCH}-min-packing)"
 npm run gulp "vscode-${OS}-${VSCODE_ARCH}-min-packing"
 
 OUT="${WORKDIR}/vscodium/VSCode-${OS}-${VSCODE_ARCH}"
+# As VSCodium's build.sh: give every packaged file a current mtime.
+find "${OUT}" -print0 | xargs -0 touch -c
 du -sh "${OUT}"
+
+if [[ "${OS}" == "darwin" ]]; then
+  echo "== ad-hoc code signing"
+  "${REPO_ROOT}/fork/scripts/sign-macos-adhoc.sh" "${OUT}/${APP_NAME}.app"
+fi
 
 echo "== smoke test"
 if [[ "${OS}" == "linux" ]]; then

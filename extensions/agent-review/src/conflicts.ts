@@ -37,12 +37,12 @@ export class ConflictMerger implements vscode.Disposable {
     this.subs.push(
       vscode.workspace.onDidSaveTextDocument((d) => {
         const m = this.merges.get(d.uri.toString());
-        if (m) m.saved = true;
+        if (m) { m.saved = true; }
       }),
       vscode.window.tabGroups.onDidChangeTabs((e) => {
         for (const tab of e.closed) {
           const result = mergeResult(tab.input);
-          if (result) void this.onMergeClosed(result);
+          if (result) { void this.onMergeClosed(result); }
         }
       }),
     );
@@ -51,7 +51,7 @@ export class ConflictMerger implements vscode.Disposable {
 
   /** An external change hit `absPath` while it has unsaved edits. */
   async onConflict(absPath: string): Promise<void> {
-    if (this.notified.has(absPath)) return;
+    if (this.notified.has(absPath)) { return; }
     this.notified.add(absPath);
     const name = path.basename(absPath);
     try {
@@ -64,7 +64,7 @@ export class ConflictMerger implements vscode.Disposable {
       'Merge…',
     );
     this.notified.delete(absPath);
-    if (choice === 'Merge…') await this.merge(absPath);
+    if (choice === 'Merge…') { await this.merge(absPath); }
   }
 
   /** Open the 3-way merge for `absPath` (also a command, for the editor title and palette). */
@@ -92,23 +92,23 @@ export class ConflictMerger implements vscode.Disposable {
       this.log.error(`could not open the merge editor for ${absPath}`, err instanceof Error ? err : String(err));
       void vscode.window.showErrorMessage(`Agent Review: could not open the merge editor. Your unsaved edits are still in the editor (and in ${backup}).`);
     }
-    if (opened) this.merges.set(key, { backup, saved: false });
+    if (opened) { this.merges.set(key, { backup, saved: false }); }
   }
 
   private async onMergeClosed(result: vscode.Uri): Promise<void> {
     const key = result.toString();
     const m = this.merges.get(key);
-    if (!m) return;
+    if (!m) { return; }
     this.merges.delete(key);
     const doc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === key);
-    if (doc && !doc.isDirty) this.logs.markClean(key, doc.getText());
-    if (m.saved || doc?.isDirty) return;
+    if (doc && !doc.isDirty) { this.logs.markClean(key, doc.getText()); }
+    if (m.saved || doc?.isDirty) { return; }
     // Closed with "Don't Save": the file is the agent's version again. Say where the user's version is.
     const choice = await vscode.window.showInformationMessage(
       `The merge of ${path.basename(result.fsPath)} was closed without saving. Your unsaved version is kept.`,
       'Open Your Version',
     );
-    if (choice === 'Open Your Version') await vscode.window.showTextDocument(vscode.Uri.file(m.backup), { preview: true });
+    if (choice === 'Open Your Version') { await vscode.window.showTextDocument(vscode.Uri.file(m.backup), { preview: true }); }
   }
 
   private async backup(absPath: string, side: 'agent' | 'yours', text: string): Promise<string> {
@@ -125,7 +125,7 @@ export class ConflictMerger implements vscode.Disposable {
       const cutoff = Date.now() - BACKUP_DAYS * 24 * 3600 * 1000;
       for (const name of await fs.readdir(this.backupDir)) {
         const file = path.join(this.backupDir, name);
-        if ((await fs.stat(file)).mtimeMs < cutoff) await fs.rm(file, { force: true });
+        if ((await fs.stat(file)).mtimeMs < cutoff) { await fs.rm(file, { force: true }); }
       }
     } catch {
       // no backups yet
@@ -133,7 +133,7 @@ export class ConflictMerger implements vscode.Disposable {
   }
 
   dispose(): void {
-    for (const s of this.subs) s.dispose();
+    for (const s of this.subs) { s.dispose(); }
   }
 }
 

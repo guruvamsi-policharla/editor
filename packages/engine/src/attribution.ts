@@ -55,12 +55,12 @@ export function provenanceFromDiff(disk: string, saved: string, origin: EditOrig
   let di = 0;
   let si = 0;
   const pushEqualUntil = (dEnd: number) => {
-    while (di < dEnd) lines.push({ text: s[si++]!, src: di++ });
+    while (di < dEnd) { lines.push({ text: s[si++]!, src: di++ }); }
   };
   for (const r of diffRegions(d, s)) {
     pushEqualUntil(r.aStart);
-    for (let i = r.aStart; i < r.aEnd; i++) removedBy.set(i, origin);
-    for (let j = r.bStart; j < r.bEnd; j++) lines.push({ text: s[j]!, src: -1, origin });
+    for (let i = r.aStart; i < r.aEnd; i++) { removedBy.set(i, origin); }
+    for (let j = r.bStart; j < r.bEnd; j++) { lines.push({ text: s[j]!, src: -1, origin }); }
     di = r.aEnd;
     si = r.bEnd;
   }
@@ -78,7 +78,7 @@ export function trackEdits(disk: string, edits: readonly TrackedEdit[]): Provena
 
   for (const edit of edits) {
     const { offset, length, text, origin } = edit;
-    if (offset < 0 || length < 0 || !Number.isInteger(offset) || !Number.isInteger(length)) return undefined;
+    if (offset < 0 || length < 0 || !Number.isInteger(offset) || !Number.isInteger(length)) { return undefined; }
     const end = offset + length;
 
     // Locate the window of lines [i, k) touched by [offset, end].
@@ -100,9 +100,9 @@ export function trackEdits(disk: string, edits: readonly TrackedEdit[]): Provena
     }
     if (i < 0) {
       // Edit starts at end of document.
-      for (let li = 0; li < lines.length; li++) windowStart += lines[li]!.text.length;
-      if (offset !== windowStart) return undefined;
-      if (end !== offset) return undefined;
+      for (let li = 0; li < lines.length; li++) { windowStart += lines[li]!.text.length; }
+      if (offset !== windowStart) { return undefined; }
+      if (end !== offset) { return undefined; }
       i = lines.length;
       k = lines.length;
       // Appending after a last line with no terminator extends that line.
@@ -113,7 +113,7 @@ export function trackEdits(disk: string, edits: readonly TrackedEdit[]): Provena
       }
     } else if (k < 0) {
       // Edit runs to end of document.
-      if (end !== total) return undefined;
+      if (end !== total) { return undefined; }
       k = lines.length;
     }
 
@@ -125,7 +125,7 @@ export function trackEdits(disk: string, edits: readonly TrackedEdit[]): Provena
 
     // Keep lines whose text didn't change at either edge of the window.
     let pre = 0;
-    while (pre < oldWindow.length && pre < newTexts.length && oldWindow[pre]!.text === newTexts[pre]) pre++;
+    while (pre < oldWindow.length && pre < newTexts.length && oldWindow[pre]!.text === newTexts[pre]) { pre++; }
     let suf = 0;
     while (
       suf < oldWindow.length - pre &&
@@ -137,7 +137,7 @@ export function trackEdits(disk: string, edits: readonly TrackedEdit[]): Provena
     const oldMid = oldWindow.slice(pre, oldWindow.length - suf);
     const newMid = newTexts.slice(pre, newTexts.length - suf);
 
-    for (const l of oldMid) if (l.src >= 0) removedBy.set(l.src, origin);
+    for (const l of oldMid) { if (l.src >= 0) { removedBy.set(l.src, origin); } }
     const paired = oldMid.length === newMid.length;
     const replacement: SavedLine[] = newMid.map((t, idx) => {
       // A line the user already rewrote stays the user's even if a formatter touches it again.
@@ -175,7 +175,7 @@ export function foldUserSave(baseline: readonly string[], disk: readonly string[
   let bi = 0;
   let di = 0;
   regions.forEach((r, h) => {
-    while (di < r.bStart) dCommon[di++] = bi++;
+    while (di < r.bStart) { dCommon[di++] = bi++; }
     for (let b = r.aStart; b < r.aEnd; b++) {
       delAt[r.bStart]!.push(b);
       hunkOfB[b] = h;
@@ -187,38 +187,38 @@ export function foldUserSave(baseline: readonly string[], disk: readonly string[
     bi = r.aEnd;
     di = r.bEnd;
   });
-  while (di < nD) dCommon[di++] = bi++;
+  while (di < nD) { dCommon[di++] = bi++; }
 
   // An agent hunk is resolved when the user rewrote every line the agent added in it.
   const resolved = regions.map((r) => {
-    if (r.bEnd === r.bStart) return false;
-    for (let d = r.bStart; d < r.bEnd; d++) if (saved.removedBy.get(d) !== 'user') return false;
+    if (r.bEnd === r.bStart) { return false; }
+    for (let d = r.bStart; d < r.bEnd; d++) { if (saved.removedBy.get(d) !== 'user') { return false; } }
     return true;
   });
   const isAgent = (d: number) => d >= 0 && d < nD && dCommon[d] === -1;
 
   const out: string[] = [];
   const emitDeletions = (q: number) => {
-    for (const b of delAt[q]!) if (!resolved[hunkOfB[b]!]) out.push(baseline[b]!);
+    for (const b of delAt[q]!) { if (!resolved[hunkOfB[b]!]) { out.push(baseline[b]!); } }
   };
 
   const handleGap = (r0: number, r1: number, newLines: readonly SavedLine[]) => {
-    if (r0 === r1 && newLines.length === 0) return;
+    if (r0 === r1 && newLines.length === 0) { return; }
     let insideAgent = false;
     if (r0 === r1) {
       // Pure insertion: inside if it touches agent-added lines or sits on an agent deletion.
       insideAgent = isAgent(r0 - 1) || isAgent(r0) || delAt[r0]!.length > 0;
     } else {
-      for (let d = r0; d < r1 && !insideAgent; d++) if (dCommon[d] === -1) insideAgent = true;
-      for (let q = r0 + 1; q < r1 && !insideAgent; q++) if (delAt[q]!.length > 0) insideAgent = true;
+      for (let d = r0; d < r1 && !insideAgent; d++) { if (dCommon[d] === -1) { insideAgent = true; } }
+      for (let q = r0 + 1; q < r1 && !insideAgent; q++) { if (delAt[q]!.length > 0) { insideAgent = true; } }
     }
     // Removed common lines: drop (fold the removal) unless a formatter removed them inside an agent hunk.
     for (let d = r0; d < r1; d++) {
-      if (dCommon[d] === -1) continue;
-      if (insideAgent && saved.removedBy.get(d) === 'formatter') out.push(disk[d]!);
+      if (dCommon[d] === -1) { continue; }
+      if (insideAgent && saved.removedBy.get(d) === 'formatter') { out.push(disk[d]!); }
     }
     for (const l of newLines) {
-      if (l.origin === 'user' || !insideAgent) out.push(l.text);
+      if (l.origin === 'user' || !insideAgent) { out.push(l.text); }
     }
   };
 
@@ -227,7 +227,7 @@ export function foldUserSave(baseline: readonly string[], disk: readonly string[
   let i = 0; // next S index
   for (;;) {
     let j = i;
-    while (j < S.length && S[j]!.src < 0) j++;
+    while (j < S.length && S[j]!.src < 0) { j++; }
     const nextD = j < S.length ? S[j]!.src : nD;
     const gap = S.slice(i, j);
     if (gap.length > 0 && gap.length === nextD - p && gap.some((l) => l.origin === 'formatter')) {
@@ -236,18 +236,18 @@ export function foldUserSave(baseline: readonly string[], disk: readonly string[
       // line. A rewritten agent line stays pending unless the user wrote it; any other line folds in.
       for (let k = 0; k < gap.length; k++) {
         emitDeletions(p + k);
-        if (dCommon[p + k] !== -1 || gap[k]!.origin === 'user') out.push(gap[k]!.text);
+        if (dCommon[p + k] !== -1 || gap[k]!.origin === 'user') { out.push(gap[k]!.text); }
       }
       emitDeletions(nextD);
     } else {
       // Agent deletions sitting before or inside the gap come first; the one right after it, last.
       emitDeletions(p);
-      for (let q = p + 1; q < nextD; q++) emitDeletions(q);
+      for (let q = p + 1; q < nextD; q++) { emitDeletions(q); }
       handleGap(p, nextD, gap);
-      if (nextD > p) emitDeletions(nextD);
+      if (nextD > p) { emitDeletions(nextD); }
     }
-    if (j >= S.length) break;
-    if (dCommon[nextD] !== -1) out.push(disk[nextD]!); // common line: stays in the baseline
+    if (j >= S.length) { break; }
+    if (dCommon[nextD] !== -1) { out.push(disk[nextD]!); } // common line: stays in the baseline
     // agent-added and untouched: not in the baseline, so it stays pending
     p = nextD + 1;
     i = j + 1;

@@ -32,7 +32,7 @@ const writeViaRename = (rel, text) => {
 };
 const replace = (rel, from, to, viaRename = false) => {
   const before = read(rel);
-  if (!before.includes(from)) throw new Error(`${rel}: text to replace not found: ${from.slice(0, 40)}`);
+  if (!before.includes(from)) { throw new Error(`${rel}: text to replace not found: ${from.slice(0, 40)}`); }
   (viaRename ? writeViaRename : write)(rel, before.replace(from, to));
 };
 
@@ -140,7 +140,7 @@ if (cmd === 'setup') {
   setup();
 } else if (cmd === 'edit') {
   const fn = waves[waveArg ?? '1'];
-  if (!fn) throw new Error(`unknown wave ${waveArg}`);
+  if (!fn) { throw new Error(`unknown wave ${waveArg}`); }
   fn();
 } else if (cmd === 'all') {
   wave1();

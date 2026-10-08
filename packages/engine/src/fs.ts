@@ -38,9 +38,9 @@ export interface FileSystem {
 }
 
 function direntType(d: { isFile(): boolean; isDirectory(): boolean; isSymbolicLink(): boolean }): FileType {
-  if (d.isFile()) return 'file';
-  if (d.isDirectory()) return 'directory';
-  if (d.isSymbolicLink()) return 'symlink';
+  if (d.isFile()) { return 'file'; }
+  if (d.isDirectory()) { return 'directory'; }
+  if (d.isSymbolicLink()) { return 'symlink'; }
   return 'other';
 }
 
@@ -64,7 +64,7 @@ export class NodeFileSystem implements FileSystem {
     try {
       await nodeFs.unlink(p);
     } catch (err) {
-      if (!isMissing(err)) throw err;
+      if (!isMissing(err)) { throw err; }
     }
   }
   async rename(from: string, to: string): Promise<void> {
@@ -75,7 +75,7 @@ export class NodeFileSystem implements FileSystem {
       const s = await nodeFs.lstat(p);
       return { type: direntType(s), size: s.size, mtimeMs: s.mtimeMs, ctimeMs: s.ctimeMs };
     } catch (err) {
-      if (isMissing(err)) return undefined;
+      if (isMissing(err)) { return undefined; }
       throw err;
     }
   }
@@ -115,13 +115,13 @@ export class MemoryFileSystem implements FileSystem {
   }
 
   private norm(p: string): string {
-    if (!path.posix.isAbsolute(p)) throw new Error(`MemoryFileSystem needs absolute paths: ${p}`);
+    if (!path.posix.isAbsolute(p)) { throw new Error(`MemoryFileSystem needs absolute paths: ${p}`); }
     return path.posix.normalize(p).replace(/(.)\/$/, '$1');
   }
 
   /** Resolve symlinks in all components of `p` except (optionally) the last. */
   private resolve(p: string, followLast: boolean, depth = 0): string {
-    if (depth > 40) throw new Error(`ELOOP: ${p}`);
+    if (depth > 40) { throw new Error(`ELOOP: ${p}`); }
     const parts = this.norm(p).split('/').filter(Boolean);
     let cur = '/';
     for (let i = 0; i < parts.length; i++) {
@@ -145,7 +145,7 @@ export class MemoryFileSystem implements FileSystem {
   async readFile(p: string): Promise<Uint8Array> {
     const r = this.resolve(p, true);
     const node = this.nodes.get(r);
-    if (node?.type !== 'file') throw enoent(p);
+    if (node?.type !== 'file') { throw enoent(p); }
     return node.data.slice();
   }
 
@@ -155,9 +155,9 @@ export class MemoryFileSystem implements FileSystem {
 
   writeFileSync(p: string, data: Uint8Array | string): void {
     const r = this.resolve(p, true);
-    if (this.parentDir(r)?.type !== 'directory') throw enoent(p);
+    if (this.parentDir(r)?.type !== 'directory') { throw enoent(p); }
     const existing = this.nodes.get(r);
-    if (existing && existing.type !== 'file') throw new Error(`EISDIR: ${p}`);
+    if (existing && existing.type !== 'file') { throw new Error(`EISDIR: ${p}`); }
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data.slice();
     const t = this.tick();
     this.nodes.set(r, { type: 'file', data: bytes, mtimeMs: t, ctimeMs: t });
@@ -173,36 +173,36 @@ export class MemoryFileSystem implements FileSystem {
     for (const part of parts) {
       cur = this.resolve(`${cur}/${part}`, true);
       const node = this.nodes.get(cur);
-      if (!node) this.nodes.set(cur, { type: 'directory', mtimeMs: this.tick() });
-      else if (node.type !== 'directory') throw new Error(`EEXIST: ${cur}`);
+      if (!node) { this.nodes.set(cur, { type: 'directory', mtimeMs: this.tick() }); }
+      else if (node.type !== 'directory') { throw new Error(`EEXIST: ${cur}`); }
     }
   }
 
   async remove(p: string): Promise<void> {
     const r = this.resolve(p, false);
     const node = this.nodes.get(r);
-    if (!node) return;
-    if (node.type === 'directory') throw new Error(`EISDIR: ${p}`);
+    if (!node) { return; }
+    if (node.type === 'directory') { throw new Error(`EISDIR: ${p}`); }
     this.nodes.delete(r);
   }
 
   /** Remove a file or a whole directory tree. */
   removeTree(p: string): void {
     const r = this.resolve(p, false);
-    for (const key of [...this.nodes.keys()]) if (key === r || key.startsWith(`${r}/`)) this.nodes.delete(key);
+    for (const key of [...this.nodes.keys()]) { if (key === r || key.startsWith(`${r}/`)) { this.nodes.delete(key); } }
   }
 
   async rename(from: string, to: string): Promise<void> {
     const a = this.resolve(from, false);
     const b = this.resolve(to, false);
-    if (!this.nodes.has(a)) throw enoent(from);
-    if (this.parentDir(b)?.type !== 'directory') throw enoent(to);
+    if (!this.nodes.has(a)) { throw enoent(from); }
+    if (this.parentDir(b)?.type !== 'directory') { throw enoent(to); }
     const moved: [string, MemNode][] = [];
     for (const [key, node] of this.nodes) {
-      if (key === a || key.startsWith(`${a}/`)) moved.push([key, node]);
+      if (key === a || key.startsWith(`${a}/`)) { moved.push([key, node]); }
     }
-    for (const [key] of moved) this.nodes.delete(key);
-    for (const [key, node] of moved) this.nodes.set(b + key.slice(a.length), node);
+    for (const [key] of moved) { this.nodes.delete(key); }
+    for (const [key, node] of moved) { this.nodes.set(b + key.slice(a.length), node); }
   }
 
   async stat(p: string): Promise<FileStat | undefined> {
@@ -213,14 +213,14 @@ export class MemoryFileSystem implements FileSystem {
       return undefined;
     }
     const node = this.nodes.get(r);
-    if (!node) return undefined;
-    if (node.type === 'file') return { type: 'file', size: node.data.length, mtimeMs: node.mtimeMs, ctimeMs: node.ctimeMs };
+    if (!node) { return undefined; }
+    if (node.type === 'file') { return { type: 'file', size: node.data.length, mtimeMs: node.mtimeMs, ctimeMs: node.ctimeMs }; }
     return { type: node.type, size: 0, mtimeMs: node.mtimeMs, ctimeMs: node.mtimeMs };
   }
 
   async readdir(p: string): Promise<DirEntry[]> {
     const r = this.resolve(p, true);
-    if (this.nodes.get(r)?.type !== 'directory') throw enoent(p);
+    if (this.nodes.get(r)?.type !== 'directory') { throw enoent(p); }
     const prefix = r === '/' ? '/' : `${r}/`;
     const out: DirEntry[] = [];
     for (const [key, node] of this.nodes) {
@@ -233,14 +233,14 @@ export class MemoryFileSystem implements FileSystem {
 
   async realpath(p: string): Promise<string> {
     const r = this.resolve(p, true);
-    if (!this.nodes.has(r)) throw enoent(p);
+    if (!this.nodes.has(r)) { throw enoent(p); }
     return r;
   }
 
   /** Create a symlink at `p` pointing to `target`. */
   symlinkSync(target: string, p: string): void {
     const r = this.resolve(p, false);
-    if (this.parentDir(r)?.type !== 'directory') throw enoent(p);
+    if (this.parentDir(r)?.type !== 'directory') { throw enoent(p); }
     this.nodes.set(r, { type: 'symlink', target, mtimeMs: this.tick() });
   }
 

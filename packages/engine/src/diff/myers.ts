@@ -47,12 +47,12 @@ function diffInts(a: Int32Array, b: Int32Array, maxD: number): Region[] {
   const m = b.length;
   // Trim common prefix and suffix; Myers only runs on the middle.
   let pre = 0;
-  while (pre < n && pre < m && a[pre] === b[pre]) pre++;
+  while (pre < n && pre < m && a[pre] === b[pre]) { pre++; }
   let suf = 0;
-  while (suf < n - pre && suf < m - pre && a[n - 1 - suf] === b[m - 1 - suf]) suf++;
+  while (suf < n - pre && suf < m - pre && a[n - 1 - suf] === b[m - 1 - suf]) { suf++; }
   const A = a.subarray(pre, n - suf);
   const B = b.subarray(pre, m - suf);
-  if (A.length === 0 && B.length === 0) return [];
+  if (A.length === 0 && B.length === 0) { return []; }
   if (A.length === 0 || B.length === 0) {
     return [{ aStart: pre, aEnd: pre + A.length, bStart: pre, bEnd: pre + B.length }];
   }
@@ -71,8 +71,8 @@ function diffInts(a: Int32Array, b: Int32Array, maxD: number): Region[] {
     trace.push(v.slice(offset - d - 1, offset + d + 2));
     for (let k = -d; k <= d; k += 2) {
       let x: number;
-      if (k === -d || (k !== d && v[offset + k - 1]! < v[offset + k + 1]!)) x = v[offset + k + 1]!;
-      else x = v[offset + k - 1]! + 1;
+      if (k === -d || (k !== d && v[offset + k - 1]! < v[offset + k + 1]!)) { x = v[offset + k + 1]!; }
+      else { x = v[offset + k - 1]! + 1; }
       let y = x - k;
       while (x < N && y < M && A[x] === B[y]) {
         x++;
@@ -107,8 +107,8 @@ function diffInts(a: Int32Array, b: Int32Array, maxD: number): Region[] {
       x--;
       y--;
     }
-    if (x === prevX) ins[prevY] = 1;
-    else del[prevX] = 1;
+    if (x === prevX) { ins[prevY] = 1; }
+    else { del[prevX] = 1; }
     x = prevX;
     y = prevY;
   }
@@ -127,9 +127,9 @@ function diffInts(a: Int32Array, b: Int32Array, maxD: number): Region[] {
     for (;;) {
       const i1 = i;
       const j1 = j;
-      while (i < N && del[i]) i++;
-      while (j < M && ins[j]) j++;
-      if (i === i1 && j === j1) break;
+      while (i < N && del[i]) { i++; }
+      while (j < M && ins[j]) { j++; }
+      if (i === i1 && j === j1) { break; }
     }
     regions.push({ aStart: pre + i0, aEnd: pre + i, bStart: pre + j0, bEnd: pre + j });
   }
@@ -141,11 +141,11 @@ export function applyRegions<T>(a: readonly T[], b: readonly T[], regions: reado
   const out: T[] = [];
   let pos = 0;
   for (const r of regions) {
-    for (let i = pos; i < r.aStart; i++) out.push(a[i]!);
-    for (let j = r.bStart; j < r.bEnd; j++) out.push(b[j]!);
+    for (let i = pos; i < r.aStart; i++) { out.push(a[i]!); }
+    for (let j = r.bStart; j < r.bEnd; j++) { out.push(b[j]!); }
     pos = r.aEnd;
   }
-  for (let i = pos; i < a.length; i++) out.push(a[i]!);
+  for (let i = pos; i < a.length; i++) { out.push(a[i]!); }
   return out;
 }
 
@@ -154,10 +154,10 @@ export function revertRegions<T>(a: readonly T[], b: readonly T[], regions: read
   const out: T[] = [];
   let pos = 0;
   for (const r of regions) {
-    for (let j = pos; j < r.bStart; j++) out.push(b[j]!);
-    for (let i = r.aStart; i < r.aEnd; i++) out.push(a[i]!);
+    for (let j = pos; j < r.bStart; j++) { out.push(b[j]!); }
+    for (let i = r.aStart; i < r.aEnd; i++) { out.push(a[i]!); }
     pos = r.bEnd;
   }
-  for (let j = pos; j < b.length; j++) out.push(b[j]!);
+  for (let j = pos; j < b.length; j++) { out.push(b[j]!); }
   return out;
 }

@@ -1,0 +1,3 @@
+# shellcheck config for fork/ and scripts/: resolve `# shellcheck source=` paths relative to each script.
+source-path=SCRIPTDIR
+disable=SC1091 # VSCodium scripts (get_repo.sh, prepare_vscode.sh, ...) only exist in the clone

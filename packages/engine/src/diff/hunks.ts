@@ -27,9 +27,9 @@ export interface Hunk {
 export function hunkId(region: Region, oldLines: readonly string[], newLines: readonly string[]): string {
   const h = createHash('sha1');
   h.update(`${region.aStart}:${region.bStart}:`);
-  for (let i = region.aStart; i < region.aEnd; i++) h.update(oldLines[i]!);
+  for (let i = region.aStart; i < region.aEnd; i++) { h.update(oldLines[i]!); }
   h.update('\0');
-  for (let j = region.bStart; j < region.bEnd; j++) h.update(newLines[j]!);
+  for (let j = region.bStart; j < region.bEnd; j++) { h.update(newLines[j]!); }
   return h.digest('hex').slice(0, 16);
 }
 

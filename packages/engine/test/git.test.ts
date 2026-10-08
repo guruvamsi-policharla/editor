@@ -173,8 +173,8 @@ describe.runIf(hasGit())('git operations', () => {
       const walk = (d: string) => {
         for (const e of nodeFs.readdirSync(d, { withFileTypes: true })) {
           const p = path.join(d, e.name);
-          if (e.isDirectory()) walk(p);
-          else files[path.relative(g, p)] = nodeFs.readFileSync(p).toString('base64');
+          if (e.isDirectory()) { walk(p); }
+          else { files[path.relative(g, p)] = nodeFs.readFileSync(p).toString('base64'); }
         }
       };
       walk(g);

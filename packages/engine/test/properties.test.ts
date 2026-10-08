@@ -58,11 +58,11 @@ async function expectConsistent(ws: MemWorkspace, engine: ReviewEngine) {
   const disk = reviewable(ws);
   const base = await baselineFiles(engine);
   const differing = new Set<string>();
-  for (const p of new Set([...Object.keys(disk), ...Object.keys(base)])) if (disk[p] !== base[p]) differing.add(p);
+  for (const p of new Set([...Object.keys(disk), ...Object.keys(base)])) { if (disk[p] !== base[p]) { differing.add(p); } }
   const reported = new Set<string>();
   for (const c of engine.listChanges()) {
     reported.add(c.path);
-    if (c.oldPath) reported.add(c.oldPath);
+    if (c.oldPath) { reported.add(c.oldPath); }
   }
   expect([...reported].sort()).toEqual([...differing].sort());
 }
@@ -81,7 +81,7 @@ async function run(initial: Record<string, string | undefined>, ops: Op[]): Prom
     try {
       await p;
     } catch (err) {
-      if (!(err instanceof StaleChangeError) && (err as Error).name !== 'NotPendingError') throw err;
+      if (!(err instanceof StaleChangeError) && (err as Error).name !== 'NotPendingError') { throw err; }
     }
   };
 
@@ -91,16 +91,16 @@ async function run(initial: Record<string, string | undefined>, ops: Op[]): Prom
         undelivered.push(ws.write(o.path, o.content));
         break;
       case 'agentDelete':
-        if (ws.exists(o.path)) undelivered.push(ws.remove(o.path));
+        if (ws.exists(o.path)) { undelivered.push(ws.remove(o.path)); }
         break;
       case 'agentRename':
-        if (o.from !== o.to && ws.exists(o.from) && !ws.exists(o.to)) undelivered.push(...ws.rename(o.from, o.to));
+        if (o.from !== o.to && ws.exists(o.from) && !ws.exists(o.to)) { undelivered.push(...ws.rename(o.from, o.to)); }
         break;
       case 'ignoredWrite':
         undelivered.push(ws.write('out.log', o.content));
         break;
       case 'userSave': {
-        if (undelivered.length) break; // a real editor saves a buffer synced with disk; dirty conflicts are the extension's job
+        if (undelivered.length) { break; } // a real editor saves a buffer synced with disk; dirty conflicts are the extension's job
         let text = ws.read(o.path) ?? '';
         const base = text;
         const edits: TrackedEdit[] = [];
@@ -117,7 +117,7 @@ async function run(initial: Record<string, string | undefined>, ops: Op[]): Prom
       case 'acceptHunk':
       case 'rejectHunk': {
         const change = await engine.getFileChange(o.path);
-        if (!change || change.hunks.length === 0) break;
+        if (!change || change.hunks.length === 0) { break; }
         const hunk = change.hunks[o.pick % change.hunks.length]!;
         await tolerate(o.op === 'acceptHunk' ? engine.acceptHunk(o.path, hunk.id) : engine.rejectHunk(o.path, hunk.id));
         break;
@@ -179,7 +179,7 @@ describe('engine properties (§8)', () => {
         while (engine.listChanges().length && steps < 200) {
           const c = engine.listChanges()[0]!;
           const accept = coin[steps % coin.length]!;
-          if (c.reviewMode === 'file') await (accept ? engine.acceptFile(c.path) : engine.rejectFile(c.path));
+          if (c.reviewMode === 'file') { await (accept ? engine.acceptFile(c.path) : engine.rejectFile(c.path)); }
           else {
             const h = (await engine.getFileChange(c.path))!.hunks[0]!;
             await (accept ? engine.acceptHunk(c.path, h.id) : engine.rejectHunk(c.path, h.id));

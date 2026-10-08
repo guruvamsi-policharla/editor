@@ -31,8 +31,8 @@ export class EditLogs {
   markClean(key: string, text?: string): void {
     this.held.delete(key);
     this.logs.set(key, []);
-    if (text === undefined) this.cleanTexts.delete(key);
-    else this.cleanTexts.set(key, text);
+    if (text === undefined) { this.cleanTexts.delete(key); }
+    else { this.cleanTexts.set(key, text); }
   }
 
   forget(key: string): void {
@@ -62,7 +62,7 @@ export class EditLogs {
    */
   onChange(key: string, changes: readonly ContentChange[], isDirtyAfter: boolean, version = 0, textAfter?: string): void {
     if (this.held.has(key)) {
-      if (!isDirtyAfter && textAfter !== undefined) this.cleanTexts.set(key, textAfter);
+      if (!isDirtyAfter && textAfter !== undefined) { this.cleanTexts.set(key, textAfter); }
       return;
     }
     if (!isDirtyAfter) {
@@ -70,9 +70,9 @@ export class EditLogs {
       return;
     }
     const log = this.logs.get(key);
-    if (!log) return; // no clean starting point seen: leave invalid
+    if (!log) { return; } // no clean starting point seen: leave invalid
     // VS Code reports multi-range changes in descending offset order, so applying them in order is valid.
-    for (const c of changes) log.push({ edit: { offset: c.rangeOffset, length: c.rangeLength, text: c.text, origin: 'user' }, version });
+    for (const c of changes) { log.push({ edit: { offset: c.rangeOffset, length: c.rangeLength, text: c.text, origin: 'user' }, version }); }
   }
 
   /**
@@ -81,7 +81,7 @@ export class EditLogs {
    */
   get(key: string, userVersion?: number): readonly TrackedEdit[] | undefined {
     const log = this.logs.get(key);
-    if (!log) return undefined;
+    if (!log) { return undefined; }
     return log.map(({ edit, version }) => (userVersion !== undefined && version > userVersion ? { ...edit, origin: 'formatter' } : edit));
   }
 }

@@ -64,10 +64,10 @@ function toRanges(tokens: readonly string[], changed: Uint8Array, firstLine: num
     }
     const start = col;
     col += tok.length;
-    if (!changed[i]) continue;
+    if (!changed[i]) { continue; }
     const last = out[out.length - 1];
-    if (last && last.line === line && last.end === start) last.end = col;
-    else out.push({ line, start, end: col });
+    if (last && last.line === line && last.end === start) { last.end = col; }
+    else { out.push({ line, start, end: col }); }
   }
   return out;
 }

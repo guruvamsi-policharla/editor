@@ -26,13 +26,13 @@ export function restoreLineEndings(text: string, sources: readonly string[]): st
   const out: (string | undefined)[] = new Array(lines.length).fill(undefined);
   let missing = lines.length;
   for (const source of sources) {
-    if (missing === 0) break;
+    if (missing === 0) { break; }
     const srcLines = splitLines(source);
     let i = 0;
     let j = 0;
     const take = (iEnd: number) => {
       for (; i < iEnd; i++, j++) {
-        if (out[i] !== undefined) continue;
+        if (out[i] !== undefined) { continue; }
         const own = eolOf(lines[i]!);
         const theirs = eolOf(srcLines[j]!);
         out[i] = own && theirs ? bare[i]! + theirs : lines[i]!;
@@ -58,8 +58,8 @@ export function equalIgnoringEol(a: string, b: string): boolean {
 export function uniformEol(text: string): '\n' | '\r\n' | undefined {
   const crlf = (text.match(/\r\n/g) ?? []).length;
   const lf = (text.match(/\n/g) ?? []).length;
-  if (lf === 0) return undefined;
-  if (crlf === lf) return '\r\n';
+  if (lf === 0) { return undefined; }
+  if (crlf === lf) { return '\r\n'; }
   return crlf === 0 ? '\n' : undefined;
 }
 

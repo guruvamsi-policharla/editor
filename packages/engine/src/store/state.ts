@@ -43,7 +43,7 @@ export interface PersistedState {
 
 export async function loadState(fs: FileSystem, file: string): Promise<PersistedState | undefined> {
   const st = await fs.stat(file);
-  if (st?.type !== 'file') return undefined;
+  if (st?.type !== 'file') { return undefined; }
   const parsed = JSON.parse(new TextDecoder().decode(await fs.readFile(file))) as PersistedState;
   if (parsed.version !== STATE_VERSION) {
     throw new Error(`Unsupported review state version ${parsed.version} in ${file}`);

@@ -11,12 +11,21 @@ import { equalIgnoringEol, NotPendingError, StaleChangeError, type ChangeEvent, 
 
 export type InlineKind = 'modified' | 'created';
 
-/** The core side of the inline review UI (internal commands `_agentReview.*` in the fork). */
+/**
+ * The core side of the inline review UI (internal commands `_agentReview.*` in the fork). Paths are as VS Code knows
+ * them (see UiPaths); everything else in the controller uses real paths.
+ */
 export interface CoreBridge {
   /** Show `absPath` inline as pending against `baseline` (creates or updates the review entry). */
   setBaseline(absPath: string, baseline: string, kind: InlineKind): Promise<void>;
   /** Stop showing `absPath` inline. */
   remove(absPath: string): Promise<void>;
+  /**
+   * Undo every pending change of a shown file in its editor buffer, as the editor's own file Undo does: text the
+   * user typed outside the changes stays, and the buffer is saved only if it had no other unsaved edits.
+   * Returns where the undo ended up, or undefined if the file isn't shown. Optional: only the fork has it.
+   */
+  rejectInEditor?(absPath: string): Promise<'saved' | 'unsaved' | 'deleted' | undefined>;
 }
 
 export interface DocumentState {
@@ -54,7 +63,12 @@ export type ReviewAction =
 export interface BulkOutcome {
   done: string[];
   skipped: string[];
+  /** Undone in the editor only: these files have unsaved edits, so the undo reaches the disk with their next save. */
+  unsaved?: string[];
 }
+
+/** Where a file Undo ended up: written to disk, or only in the editor buffer (the user's unsaved edits keep it dirty). */
+export type UndoOutcome = 'saved' | 'unsaved';
 
 export class ReviewController {
   /** absPath -> baseline text last pushed to the core UI. */
@@ -76,6 +90,8 @@ export class ReviewController {
     private readonly log: Logger,
     /** Called when an external change hits a file with unsaved edits (never overwritten; the user resolves it). */
     private readonly onConflict?: (absPath: string) => void,
+    /** Paths as VS Code knows them (workspace folders opened through symlinks); used for the bridge and onConflict. */
+    readonly ui: UiPaths = new UiPaths([]),
   ) {
     for (const engine of review.engines.values()) {
       this.subscriptions.push(engine.onDidChange((e) => void this.enqueue(() => this.onEngineChange(engine, e))));
@@ -100,7 +116,7 @@ export class ReviewController {
 
   dispose(): void {
     this.disposed = true;
-    for (const s of this.subscriptions) s.dispose();
+    for (const s of this.subscriptions) { s.dispose(); }
     this.listeners.clear();
   }
 
@@ -116,7 +132,7 @@ export class ReviewController {
         live.add(f.absPath);
         await this.syncFile(f, undefined);
       }
-      for (const abs of [...this.pushed.keys()]) if (!live.has(abs)) await this.unpush(abs);
+      for (const abs of [...this.pushed.keys()]) { if (!live.has(abs)) { await this.unpush(abs); } }
     });
   }
 
@@ -126,20 +142,20 @@ export class ReviewController {
     for (const rel of e.paths) {
       const abs = toAbs(engine.root, rel);
       const f = this.files.find((x) => x.absPath === abs);
-      if (f) await this.syncFile(f, e.reason);
-      else if (this.pushed.has(abs)) await this.unpush(abs);
+      if (f) { await this.syncFile(f, e.reason); }
+      else if (this.pushed.has(abs)) { await this.unpush(abs); }
     }
   }
 
   private async syncFile(f: PendingFile, reason: ChangeEvent['reason'] | undefined): Promise<void> {
     if (!f.inline) {
-      if (this.pushed.has(f.absPath)) await this.unpush(f.absPath);
+      if (this.pushed.has(f.absPath)) { await this.unpush(f.absPath); }
       return;
     }
     const dirty = this.docs.isDirty(f.absPath);
     if (dirty && reason === 'external') {
       this.conflicted.add(f.absPath);
-      this.onConflict?.(f.absPath);
+      this.onConflict?.(this.ui.toUi(f.absPath));
     }
     if (dirty && this.pushed.has(f.absPath)) {
       // The UI shows baseline vs. buffer; moving the baseline under unsaved typing would mislabel it.
@@ -150,11 +166,11 @@ export class ReviewController {
     const baseline = f.kind === 'created' ? '' : decode(await engine.getBaselineContent(f.rel));
     // Core's models keep one EOL per file, so a baseline that differs only in line endings looks the same there.
     const pushed = this.pushed.get(f.absPath);
-    if (pushed !== undefined && equalIgnoringEol(pushed, baseline)) return;
+    if (pushed !== undefined && equalIgnoringEol(pushed, baseline)) { return; }
     this.pushed.set(f.absPath, baseline);
     this.deferred.delete(f.absPath);
     try {
-      await this.bridge.setBaseline(f.absPath, baseline, f.kind as InlineKind);
+      await this.bridge.setBaseline(this.ui.toUi(f.absPath), baseline, f.kind as InlineKind);
     } catch (err) {
       this.pushed.delete(f.absPath);
       this.log.error(`could not show ${f.absPath} inline`, err);
@@ -165,7 +181,7 @@ export class ReviewController {
     this.pushed.delete(abs);
     this.deferred.delete(abs);
     try {
-      await this.bridge.remove(abs);
+      await this.bridge.remove(this.ui.toUi(abs));
     } catch (err) {
       this.log.error(`could not remove ${abs} from inline review`, err);
     }
@@ -182,7 +198,7 @@ export class ReviewController {
   async onReviewAction(action: ReviewAction): Promise<void> {
     const abs = normalizePath(action.path);
     const engine = await this.review.engineFor(abs);
-    if (!engine) return;
+    if (!engine) { return; }
     try {
       switch (action.kind) {
         case 'accepted':
@@ -204,7 +220,7 @@ export class ReviewController {
           break;
       }
     } catch (err) {
-      if (err instanceof NotPendingError) return;
+      if (err instanceof NotPendingError) { return; }
       if (err instanceof StaleChangeError) {
         this.log.warn(`${abs} changed on disk before ${action.kind}; showing the current state`);
         this.pushed.delete(abs);
@@ -219,7 +235,7 @@ export class ReviewController {
   async onWillSave(absPath: string, content: string, edits: readonly TrackedEdit[] | undefined): Promise<void> {
     const abs = normalizePath(absPath);
     const engine = await this.review.engineFor(abs);
-    if (!engine) return;
+    if (!engine) { return; }
     if (this.conflicted.has(abs)) {
       // The buffer is based on an older disk version. The editor refuses this save ("file is newer") unless the
       // user overwrites; then the write is an external change, reviewed against the baseline like any other.
@@ -237,12 +253,12 @@ export class ReviewController {
   onBufferSettled(absPath: string): Promise<void> {
     const abs = normalizePath(absPath);
     this.conflicted.delete(abs);
-    if (!this.deferred.has(abs)) return Promise.resolve();
+    if (!this.deferred.has(abs)) { return Promise.resolve(); }
     return this.enqueue(async () => {
       this.deferred.delete(abs);
       const f = this.files.find((x) => x.absPath === abs);
-      if (f) await this.syncFile(f, undefined);
-      else if (this.pushed.has(abs)) await this.unpush(abs);
+      if (f) { await this.syncFile(f, undefined); }
+      else if (this.pushed.has(abs)) { await this.unpush(abs); }
     });
   }
 
@@ -255,9 +271,32 @@ export class ReviewController {
     await this.onReviewAction({ kind: 'acceptFile', path: absPath });
   }
 
-  async rejectFile(absPath: string): Promise<void> {
-    if (this.docs.isDirty(normalizePath(absPath))) throw new Error('The file has unsaved changes; save or revert it first.');
-    await this.onReviewAction({ kind: 'rejectFile', path: absPath });
+  /**
+   * Undo a whole file. Normally the engine writes the baseline back to disk. A file with unsaved edits is never
+   * written behind the editor's back: it is undone in its buffer instead (the user's edits outside the agent's
+   * changes stay), which stays dirty until the user saves.
+   */
+  async rejectFile(absPath: string): Promise<UndoOutcome> {
+    const abs = normalizePath(absPath);
+    if (this.docs.isDirty(abs)) {
+      const inEditor = await this.rejectInEditor(abs);
+      if (!inEditor) { throw new Error('The file has unsaved changes; save or revert it first.'); }
+      return inEditor;
+    }
+    await this.onReviewAction({ kind: 'rejectFile', path: abs });
+    return 'saved';
+  }
+
+  /** Undo a dirty file in its editor buffer, if the editor shows its current pending state. */
+  private async rejectInEditor(abs: string): Promise<UndoOutcome | undefined> {
+    const f = this.files.find((x) => x.absPath === abs);
+    // Not for created/deleted/renamed files (that undo deletes or restores the file), nor when the disk changed under
+    // the unsaved edits (a conflict: the editor shows an older state; merge first).
+    if (!this.bridge.rejectInEditor || !f || f.kind !== 'modified' || !f.inline || !this.pushed.has(abs) || this.conflicted.has(abs)) {
+      return undefined;
+    }
+    const r = await this.bridge.rejectInEditor(this.ui.toUi(abs));
+    return r === 'saved' || r === 'unsaved' ? r : undefined;
   }
 
   async acceptAll(): Promise<BulkOutcome> {
@@ -270,19 +309,25 @@ export class ReviewController {
     return out;
   }
 
-  /** Undo everything, except files with unsaved edits (their buffers would conflict with the disk write). */
+  /**
+   * Undo everything. Files with unsaved edits are undone in their editor buffers (see `rejectFile`), never written
+   * behind the editor; those that can't be (created/deleted files, conflicts) are skipped.
+   */
   async rejectAll(): Promise<BulkOutcome> {
-    const out: BulkOutcome = { done: [], skipped: [] };
+    const out: BulkOutcome = { done: [], skipped: [], unsaved: [] };
     for (const f of [...this.files]) {
       if (f.kind === 'renamed' || !this.docs.isDirty(f.absPath)) {
         try {
           await this.engineForRoot(f.root).rejectFile(f.rel);
           out.done.push(f.absPath);
         } catch (err) {
-          if (!(err instanceof NotPendingError)) out.skipped.push(f.absPath);
+          if (!(err instanceof NotPendingError)) { out.skipped.push(f.absPath); }
         }
       } else {
-        out.skipped.push(f.absPath);
+        const r = await this.rejectInEditor(f.absPath);
+        if (r) { out.done.push(f.absPath); }
+        else { out.skipped.push(f.absPath); }
+        if (r === 'unsaved') { out.unsaved!.push(f.absPath); }
       }
     }
     return out;
@@ -298,9 +343,9 @@ export class ReviewController {
 
   /** Added/removed line counts for the review list (text files only). */
   async lineCounts(f: PendingFile): Promise<{ added: number; removed: number } | undefined> {
-    if (f.binary || f.large || f.kind === 'renamed') return undefined;
+    if (f.binary || f.large || f.kind === 'renamed') { return undefined; }
     const change = await this.engineForRoot(f.root).getFileChange(f.rel).catch(() => undefined);
-    if (!change) return undefined;
+    if (!change) { return undefined; }
     let added = 0;
     let removed = 0;
     for (const h of change.hunks) {
@@ -325,7 +370,7 @@ export class ReviewController {
           large: c.large,
           inline: (c.kind === 'modified' || c.kind === 'created') && !c.binary && !c.large,
         };
-        if (c.oldPath) f.oldAbsPath = toAbs(engine.root, c.oldPath);
+        if (c.oldPath) { f.oldAbsPath = toAbs(engine.root, c.oldPath); }
         out.push(f);
       }
     }
@@ -334,7 +379,7 @@ export class ReviewController {
 
   private engineForRoot(root: string): ReviewEngine {
     const e = this.review.engines.get(root);
-    if (!e) throw new Error(`no engine for ${root}`);
+    if (!e) { throw new Error(`no engine for ${root}`); }
     return e;
   }
 
@@ -356,6 +401,29 @@ export class ReviewController {
   }
 }
 
+/**
+ * Maps the controller's real paths (the engine tracks every file once, under its real path) to the paths VS Code
+ * uses: under each workspace folder as it was opened. A folder opened through a symlink (e.g. /tmp/paper on macOS,
+ * where /tmp is /private/tmp) keeps its link path in VS Code, so its editors, dirty state and watcher events use
+ * that path; pushing the real path to core would review a second, unopened copy of the file.
+ */
+export class UiPaths {
+  private readonly folders: { ui: string; real: string }[];
+
+  constructor(folderPaths: readonly string[]) {
+    this.folders = folderPaths.map((ui) => ({ ui: path.resolve(ui), real: normalizePath(ui) }));
+  }
+
+  /** The path VS Code uses for a real path (unchanged outside the workspace folders, or if no folder is a link). */
+  toUi(realPath: string): string {
+    for (const { ui, real } of this.folders) {
+      if (realPath === real) { return ui; }
+      if (realPath.startsWith(real + path.sep)) { return path.join(ui, path.relative(real, realPath)); }
+    }
+    return realPath;
+  }
+}
+
 export function toAbs(root: string, rel: string): string {
   return path.join(root, ...rel.split('/'));
 }
@@ -370,7 +438,7 @@ export function normalizePath(p: string): string {
       return rest.length ? path.join(real, ...rest.reverse()) : real;
     } catch {
       const parent = path.dirname(cur);
-      if (parent === cur) return path.resolve(p);
+      if (parent === cur) { return path.resolve(p); }
       rest.push(path.basename(cur));
       cur = parent;
     }

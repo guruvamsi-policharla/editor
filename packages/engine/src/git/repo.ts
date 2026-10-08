@@ -25,7 +25,7 @@ const dec = new TextDecoder();
 
 async function readText(fs: FileSystem, p: string): Promise<string | undefined> {
   const st = await fs.stat(p);
-  if (st?.type !== 'file') return undefined;
+  if (st?.type !== 'file') { return undefined; }
   return dec.decode(await fs.readFile(p));
 }
 
@@ -36,11 +36,11 @@ export async function findGitRepo(fs: FileSystem, root: string): Promise<GitRepo
     const dotGit = path.join(dir, '.git');
     const st = await fs.stat(dotGit);
     let gitDir: string | undefined;
-    if (st?.type === 'directory') gitDir = dotGit;
+    if (st?.type === 'directory') { gitDir = dotGit; }
     else if (st?.type === 'file') {
       const text = (await readText(fs, dotGit)) ?? '';
       const m = /^gitdir:\s*(.+?)\s*$/m.exec(text);
-      if (m) gitDir = path.resolve(dir, m[1]!);
+      if (m) { gitDir = path.resolve(dir, m[1]!); }
     }
     if (gitDir && (await fs.stat(path.join(gitDir, 'HEAD')))) {
       const commonRel = (await readText(fs, path.join(gitDir, 'commondir')))?.trim();
@@ -51,7 +51,7 @@ export async function findGitRepo(fs: FileSystem, root: string): Promise<GitRepo
       return { gitDir, commonDir, workTree: dir, prefix, objectFormat };
     }
     const parent = path.dirname(dir);
-    if (parent === dir) return undefined;
+    if (parent === dir) { return undefined; }
     dir = parent;
   }
 }
@@ -66,20 +66,20 @@ export interface HeadState {
 }
 
 async function resolveRef(fs: FileSystem, repo: GitRepoInfo, ref: string, depth = 0): Promise<string | null> {
-  if (depth > 10) return null;
+  if (depth > 10) { return null; }
   // Per-worktree refs live in gitDir; shared refs in commonDir.
   for (const base of [repo.gitDir, repo.commonDir]) {
     const text = (await readText(fs, path.join(base, ...ref.split('/'))))?.trim();
-    if (text === undefined) continue;
-    if (text.startsWith('ref:')) return resolveRef(fs, repo, text.slice(4).trim(), depth + 1);
+    if (text === undefined) { continue; }
+    if (text.startsWith('ref:')) { return resolveRef(fs, repo, text.slice(4).trim(), depth + 1); }
     return text || null;
   }
   const packed = await readText(fs, path.join(repo.commonDir, 'packed-refs'));
   if (packed) {
     for (const line of packed.split('\n')) {
-      if (!line || line.startsWith('#') || line.startsWith('^')) continue;
+      if (!line || line.startsWith('#') || line.startsWith('^')) { continue; }
       const sp = line.indexOf(' ');
-      if (sp > 0 && line.slice(sp + 1).trim() === ref) return line.slice(0, sp);
+      if (sp > 0 && line.slice(sp + 1).trim() === ref) { return line.slice(0, sp); }
     }
   }
   return null;
@@ -119,12 +119,12 @@ export async function statIndex(fs: FileSystem, repo: GitRepoInfo): Promise<Inde
  */
 export function parseIndex(data: Uint8Array, objectFormat: HashAlgorithm = 'sha1'): Map<string, string> {
   const entries = new Map<string, string>();
-  if (data.length < 12) return entries;
+  if (data.length < 12) { return entries; }
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const sig = dec.decode(data.subarray(0, 4));
-  if (sig !== 'DIRC') throw new Error('Not a git index file');
+  if (sig !== 'DIRC') { throw new Error('Not a git index file'); }
   const version = view.getUint32(4);
-  if (version < 2 || version > 4) throw new Error(`Unsupported git index version ${version}`);
+  if (version < 2 || version > 4) { throw new Error(`Unsupported git index version ${version}`); }
   const count = view.getUint32(8);
   const oidLen = objectFormat === 'sha256' ? 32 : 20;
   let pos = 12;
@@ -140,7 +140,7 @@ export function parseIndex(data: Uint8Array, objectFormat: HashAlgorithm = 'sha1
     pos += 2;
     const stage = (flags >> 12) & 0x3;
     const extended = (flags & 0x4000) !== 0;
-    if (version >= 3 && extended) pos += 2;
+    if (version >= 3 && extended) { pos += 2; }
 
     let pathBytes: Uint8Array;
     if (version === 4) {
@@ -168,17 +168,17 @@ export function parseIndex(data: Uint8Array, objectFormat: HashAlgorithm = 'sha1
     prevPath = pathBytes;
     const p = dec.decode(pathBytes);
     const oid = Buffer.from(oidBytes).toString('hex');
-    if (stage === 0) entries.set(p, oid);
-    else if (stage === 2 || !conflicts.has(p)) conflicts.set(p, oid);
+    if (stage === 0) { entries.set(p, oid); }
+    else if (stage === 2 || !conflicts.has(p)) { conflicts.set(p, oid); }
   }
-  for (const [p, oid] of conflicts) if (!entries.has(p)) entries.set(p, `conflict:${oid}`);
+  for (const [p, oid] of conflicts) { if (!entries.has(p)) { entries.set(p, `conflict:${oid}`); } }
   return entries;
 }
 
 export async function readIndex(fs: FileSystem, repo: GitRepoInfo): Promise<Map<string, string>> {
   const file = path.join(repo.gitDir, 'index');
   const st = await fs.stat(file);
-  if (st?.type !== 'file') return new Map();
+  if (st?.type !== 'file') { return new Map(); }
   return parseIndex(await fs.readFile(file), repo.objectFormat);
 }
 
@@ -190,7 +190,7 @@ export interface GitObjectReader {
 /** Default reader: `git cat-file blob <oid>`, read-only, no optional locks. */
 export const gitCliObjectReader: GitObjectReader = {
   readBlob(repo, oid) {
-    if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(oid)) return Promise.resolve(undefined);
+    if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(oid)) { return Promise.resolve(undefined); }
     return new Promise((resolve) => {
       execFile(
         'git',

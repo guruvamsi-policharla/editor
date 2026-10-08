@@ -34,12 +34,12 @@ class FakeTerminal implements AgentTerminalIO {
   /** The shell finished starting and reported shell integration. */
   activateIntegration() {
     this.integrated = true;
-    for (const l of [...this.integrationListeners]) l();
+    for (const l of [...this.integrationListeners]) { l(); }
   }
   /** The shell started the agent command. */
   startAgent() {
     this.agentRunning = true;
-    for (const l of [...this.startListeners]) l();
+    for (const l of [...this.startListeners]) { l(); }
   }
   get listenerCount() {
     return this.integrationListeners.size + this.startListeners.size;

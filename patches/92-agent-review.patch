@@ -1,9 +1,9 @@
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts b/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts
 new file mode 100644
-index 00000000..e5626a30
+index 00000000..2820c19f
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,101 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -18,11 +18,9 @@ index 00000000..e5626a30
 +// A typed proposed API can replace the commands later.
 +
 +import './media/agentReview.css';
-+import { Disposable, DisposableMap, DisposableStore } from '../../../../base/common/lifecycle.js';
++import { Disposable } from '../../../../base/common/lifecycle.js';
 +import { autorun } from '../../../../base/common/observable.js';
 +import { URI, UriComponents } from '../../../../base/common/uri.js';
-+import { ICodeEditor } from '../../../../editor/browser/editorBrowser.js';
-+import { ICodeEditorService } from '../../../../editor/browser/services/codeEditorService.js';
 +import { localize } from '../../../../nls.js';
 +import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 +import { IContextKeyService, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
@@ -52,6 +50,15 @@ index 00000000..e5626a30
 +	accessor.get(IAgentReviewService).clear();
 +});
 +
++/**
++ * Undo all pending changes of a file in its editor buffer (as the overlay's file Undo). Used by the extension
++ * for files with unsaved edits, which it must not write itself. Returns 'saved', 'unsaved' (the undo is in the
++ * buffer only; the user's unsaved edits keep it dirty), 'deleted' (created file), or undefined (not shown).
++ */
++CommandsRegistry.registerCommand('_agentReview.reject', (accessor: ServicesAccessor, uri: UriComponents): Promise<'saved' | 'unsaved' | 'deleted'> | undefined => {
++	return accessor.get(IAgentReviewService).getEntry(URI.revive(uri))?.rejectFile();
++});
++
 +CommandsRegistry.registerCommand('_agentReview.openMerge', (accessor: ServicesAccessor, uri: UriComponents, base: string): Promise<boolean> => {
 +	return accessor.get(IAgentReviewService).openMerge(URI.revive(uri), base);
 +});
@@ -75,60 +82,35 @@ index 00000000..e5626a30
 +// Tells the extension which buffer edits of a save were made by save participants (formatters), not the user.
 +registerWorkbenchContribution2(AgentReviewSaveParticipants.ID, AgentReviewSaveParticipants, WorkbenchPhase.BlockRestore);
 +
-+/**
-+ * Keeps `agentReview.isActive` in sync with the active editor, and marks code editors that show a
-+ * file under review with the `agent-review-editor` class (always-visible hunk buttons, see CSS).
-+ */
++/** Keeps `agentReview.isActive` in sync with the active editor (enables the ↑/↓ navigation without chat). */
 +class AgentReviewEditorState extends Disposable implements IWorkbenchContribution {
 +	static readonly ID = 'workbench.contrib.agentReviewEditorState';
 +
-+	private readonly _editors = this._register(new DisposableMap<ICodeEditor, DisposableStore>());
-+
 +	constructor(
-+		@IAgentReviewService private readonly _agentReviewService: IAgentReviewService,
-+		@IEditorService private readonly _editorService: IEditorService,
-+		@ICodeEditorService codeEditorService: ICodeEditorService,
++		@IAgentReviewService agentReviewService: IAgentReviewService,
++		@IEditorService editorService: IEditorService,
 +		@IContextKeyService contextKeyService: IContextKeyService,
 +	) {
 +		super();
 +		const isActive = ctxAgentReviewIsActive.bindTo(contextKeyService);
 +		const updateActive = () => {
-+			const uri = this._editorService.activeEditor?.resource;
-+			isActive.set(!!uri && !!this._agentReviewService.getEntry(uri));
++			const uri = editorService.activeEditor?.resource;
++			isActive.set(!!uri && !!agentReviewService.getEntry(uri));
 +		};
-+		this._register(this._editorService.onDidActiveEditorChange(updateActive));
-+
-+		const track = (editor: ICodeEditor) => {
-+			const store = new DisposableStore();
-+			store.add(editor.onDidChangeModel(() => this._updateEditor(editor)));
-+			this._editors.set(editor, store);
-+			this._updateEditor(editor);
-+		};
-+		codeEditorService.listCodeEditors().forEach(track);
-+		this._register(codeEditorService.onCodeEditorAdd(track));
-+		this._register(codeEditorService.onCodeEditorRemove(editor => this._editors.deleteAndDispose(editor)));
-+
++		this._register(editorService.onDidActiveEditorChange(updateActive));
 +		this._register(autorun(r => {
-+			this._agentReviewService.entries.read(r);
++			agentReviewService.entries.read(r);
 +			updateActive();
-+			for (const editor of this._editors.keys()) {
-+				this._updateEditor(editor);
-+			}
 +		}));
-+	}
-+
-+	private _updateEditor(editor: ICodeEditor): void {
-+		const uri = editor.getModel()?.uri;
-+		editor.getContainerDomNode().classList.toggle('agent-review-editor', !!uri && !!this._agentReviewService.getEntry(uri));
 +	}
 +}
 +registerWorkbenchContribution2(AgentReviewEditorState.ID, AgentReviewEditorState, WorkbenchPhase.AfterRestored);
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
 new file mode 100644
-index 00000000..77436ac5
+index 00000000..4e1e6787
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
-@@ -0,0 +1,243 @@
+@@ -0,0 +1,307 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -144,10 +126,15 @@ index 00000000..77436ac5
 +//   Keep hunk  -> original model edited here -> 'accepted' with the full new baseline
 +//   Undo hunk  -> buffer edited here -> saved (when it was clean) -> the engine sees disk == baseline there
 +//   Keep file  -> 'acceptFile';  Undo file -> buffer restored + saved, or 'rejectFile' for a created file
++// Undo writes the file, so the disk matches what the reviewer sees and the agent can't read the undone text
++// back. The one exception is a buffer with the user's own unsaved edits: it's never saved for them, so the
++// undo stays in the buffer (dirty) until they save. Keep never writes: the agent's text is already on disk.
 +
++import { toAction } from '../../../../base/common/actions.js';
 +import { Emitter } from '../../../../base/common/event.js';
 +import { Disposable, DisposableMap, IReference } from '../../../../base/common/lifecycle.js';
 +import { constObservable, derived, IObservable, observableValue } from '../../../../base/common/observable.js';
++import { basename } from '../../../../base/common/resources.js';
 +import { URI } from '../../../../base/common/uri.js';
 +import { getCodeEditor, ICodeEditor } from '../../../../editor/browser/editorBrowser.js';
 +import { IDocumentDiff } from '../../../../editor/common/diff/documentDiffProvider.js';
@@ -158,8 +145,10 @@ index 00000000..77436ac5
 +import { IModelService } from '../../../../editor/common/services/model.js';
 +import { IResolvedTextEditorModel } from '../../../../editor/common/services/resolverService.js';
 +import { IModelContentChangedEvent } from '../../../../editor/common/textModelEvents.js';
++import { localize } from '../../../../nls.js';
 +import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 +import { ILogService } from '../../../../platform/log/common/log.js';
++import { INotificationService, Severity } from '../../../../platform/notification/common/notification.js';
 +import { IEditorPane, SaveReason } from '../../../common/editor.js';
 +import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
 +import { ChatEditingCodeEditorIntegration, IDocumentDiff2 } from '../../chat/browser/chatEditing/chatEditingCodeEditorIntegration.js';
@@ -211,10 +200,15 @@ index 00000000..77436ac5
 +	readonly rewriteRatio = constObservable(1);
 +	readonly waitsForLastEdits = constObservable(false);
 +	readonly reviewMode = constObservable(true);
++	/** Read by ChatEditingCodeEditorIntegration: each hunk's Keep/Undo toolbar gets its own row below the hunk. */
++	readonly hunkToolbarRows = true;
 +	readonly autoAcceptController = constObservable<{ total: number; remaining: number; cancel(): void } | undefined>(undefined);
 +
 +	private readonly _changeService: ChatEditingTextModelChangeService;
 +	private readonly _integrations = this._register(new DisposableMap<IEditorPane, IModifiedFileEntryEditorIntegration>());
++
++	/** The save of the last Undo, while it runs, and the buffer version it writes. */
++	private _undoSave: { readonly versionId: number; readonly done: Promise<void> } | undefined;
 +
 +	private readonly _onDidHunkAction = this._register(new Emitter<IAgentReviewHunkEvent>());
 +	readonly onDidHunkAction = this._onDidHunkAction.event;
@@ -233,6 +227,7 @@ index 00000000..77436ac5
 +		@IInstantiationService private readonly _instantiationService: IInstantiationService,
 +		@ITextFileService private readonly _textFileService: ITextFileService,
 +		@ILogService private readonly _logService: ILogService,
++		@INotificationService private readonly _notificationService: INotificationService,
 +	) {
 +		super();
 +		this._kind = kind;
@@ -279,7 +274,7 @@ index 00000000..77436ac5
 +	}
 +
 +	private async _undoHunk(diff: IDocumentDiff2, change: DetailedLineRangeMapping): Promise<boolean> {
-+		const wasDirty = this._textFileService.isDirty(this.modifiedURI);
++		const wasDirty = this._hasUnsavedUserEdits();
 +		const done = await diff.undo(change);
 +		if (!done) {
 +			return false;
@@ -297,15 +292,53 @@ index 00000000..77436ac5
 +	}
 +
 +	/**
++	 * Whether the buffer has unsaved edits other than an Undo that is being saved right now. (Pressing
++	 * Undo twice quickly must save both: the first one's save makes the buffer dirty until it finishes.)
++	 */
++	private _hasUnsavedUserEdits(): boolean {
++		if (!this._textFileService.isDirty(this.modifiedURI)) {
++			return false;
++		}
++		return this._undoSave?.versionId !== this.modifiedModel.getAlternativeVersionId();
++	}
++
++	/**
 +	 * Write the undone text to disk so that the file matches what the reviewer sees. Skips save
 +	 * participants: formatters must not rewrite the agent's other pending lines as a side effect.
 +	 * Unsaved user edits are never saved for them; in that case the undo is saved with their next save.
++	 * If the write fails, the user is told: the agent would otherwise still read its own text on disk.
 +	 */
 +	private async _saveUndo(): Promise<void> {
-+		try {
-+			await this._textFileService.save(this.modifiedURI, { reason: SaveReason.EXPLICIT, skipSaveParticipants: true });
-+		} catch (err) {
-+			this._logService.error('[agentReview] could not save after undo', err);
++		const previous = this._undoSave?.done;
++		const versionId = this.modifiedModel.getAlternativeVersionId();
++		const done = (async () => {
++			await previous;
++			let error: unknown;
++			try {
++				const saved = await this._textFileService.save(this.modifiedURI, { reason: SaveReason.EXPLICIT, skipSaveParticipants: true });
++				if (saved || !this._textFileService.isDirty(this.modifiedURI)) {
++					return;
++				}
++			} catch (err) {
++				error = err;
++			}
++			this._logService.error('[agentReview] could not save after undo', error);
++			this._notificationService.notify({
++				severity: Severity.Warning,
++				message: localize('agentReview.undoNotSaved', "Undo in {0} isn't on disk yet, so an agent reading the file still sees its own text. Save the file to write it.", basename(this.modifiedURI)),
++				actions: {
++					primary: [toAction({
++						id: 'agentReview.saveUndo',
++						label: localize('agentReview.save', "Save"),
++						run: () => this._textFileService.save(this.modifiedURI, { reason: SaveReason.EXPLICIT, skipSaveParticipants: true }),
++					})],
++				},
++			});
++		})();
++		this._undoSave = { versionId, done };
++		await done;
++		if (this._undoSave?.done === done) {
++			this._undoSave = undefined;
 +		}
 +	}
 +
@@ -336,18 +369,31 @@ index 00000000..77436ac5
 +	}
 +
 +	async reject(): Promise<void> {
++		await this.rejectFile();
++	}
++
++	/**
++	 * Undo every pending change of the file. Modified files: the buffer goes back to the baseline (text the
++	 * user typed outside the changes stays, it is part of the baseline) and is saved if it had no other
++	 * unsaved edits. Created files: the extension deletes the file.
++	 * @returns where the undo is: `saved` to disk, only in the buffer (`unsaved`, the user's unsaved edits
++	 * keep it dirty), or `deleted` (created file, removed by the extension).
++	 */
++	async rejectFile(): Promise<'saved' | 'unsaved' | 'deleted'> {
 +		if (this._kind === 'created') {
 +			this._stateObs.set(ModifiedFileEntryState.Rejected, undefined);
 +			this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'rejectFile' });
-+			return;
++			return 'deleted';
 +		}
-+		const wasDirty = this._textFileService.isDirty(this.modifiedURI);
++		const wasDirty = this._hasUnsavedUserEdits();
 +		this._changeService.undo();
 +		this._stateObs.set(ModifiedFileEntryState.Rejected, undefined);
 +		this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'rejected' });
-+		if (!wasDirty) {
-+			await this._saveUndo();
++		if (wasDirty) {
++			return 'unsaved';
 +		}
++		await this._saveUndo();
++		return this._textFileService.isDirty(this.modifiedURI) ? 'unsaved' : 'saved';
 +	}
 +
 +	enableReviewModeUntilSettled(): void {
@@ -781,33 +827,85 @@ index 00000000..ac216fba
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css b/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css
 new file mode 100644
-index 00000000..8d72ddc8
+index 00000000..68180ed8
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,69 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
 + *--------------------------------------------------------------------------------------------*/
 +
 +/*
-+ * Agent review: the per-hunk Keep/Undo buttons are always visible (the chat UI only shows them on
-+ * hover). They are slightly dimmed until the pointer or the cursor is in the change.
++ * Agent review: each hunk's Keep/Undo toolbar is always visible, in its own row below the hunk
++ * (`in-own-row`, see ChatEditingCodeEditorIntegration), aligned with the start of the text. Nothing is
++ * under it, so it's drawn as plain buttons rather than a floating box. It's slightly dimmed until the
++ * pointer or the cursor is in the change. (The chat UI floats it over the hunk's first line on hover.)
 + */
-+.agent-review-editor .chat-diff-change-content-widget {
-+	opacity: 0.8;
++.chat-diff-change-content-widget.in-own-row {
++	opacity: 0.85;
++	box-shadow: none;
++	border-radius: 4px;
++	overflow: visible;
 +}
 +
-+.agent-review-editor .chat-diff-change-content-widget.hover,
-+.agent-review-editor .chat-diff-change-content-widget:hover {
++.chat-diff-change-content-widget.in-own-row.hover,
++.chat-diff-change-content-widget.in-own-row:hover {
 +	opacity: 1;
++}
++
++.chat-diff-change-content-widget.in-own-row .monaco-action-bar {
++	padding: 0;
++	border: none;
++	background-color: transparent;
++}
++
++.chat-diff-change-content-widget.in-own-row .monaco-action-bar .actions-container {
++	gap: 6px;
++}
++
++.chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item .action-label {
++	padding: 1px 8px;
++	font-size: 11px;
++	line-height: 16px;
++	border-radius: 4px;
++	background-color: var(--vscode-button-secondaryBackground);
++	color: var(--vscode-button-secondaryForeground);
++}
++
++.monaco-workbench .chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item .action-label:hover {
++	background-color: var(--vscode-button-secondaryHoverBackground);
++}
++
++.chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item.primary .action-label {
++	background-color: var(--vscode-button-background);
++	color: var(--vscode-button-foreground);
++}
++
++.monaco-workbench .chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item.primary .action-label:hover {
++	background-color: var(--vscode-button-hoverBackground);
++}
++
++/* The "open diff" icon: a plain icon button, not a pill. */
++.chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item .action-label.codicon:not(.separator) {
++	width: 18px;
++	height: 18px;
++	padding: 0;
++	font-size: 14px;
++	line-height: 18px;
++	background-color: transparent;
++	color: var(--vscode-icon-foreground);
++}
++
++.monaco-workbench .chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item .action-label.codicon:not(.separator):hover {
++	background-color: var(--vscode-toolbar-hoverBackground);
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
 new file mode 100644
-index 00000000..69fa9437
+index 00000000..51dad5fc
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
-@@ -0,0 +1,305 @@
+@@ -0,0 +1,474 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -821,6 +919,7 @@ index 00000000..69fa9437
 +// and hunks stay as granular as the line diff, with word-level inner changes.
 +
 +import assert from 'assert';
++import { timeout } from '../../../../../base/common/async.js';
 +import { Event } from '../../../../../base/common/event.js';
 +import { Disposable, DisposableStore, IDisposable, IReference } from '../../../../../base/common/lifecycle.js';
 +import { ResourceMap } from '../../../../../base/common/map.js';
@@ -829,6 +928,7 @@ index 00000000..69fa9437
 +import { mock } from '../../../../../base/test/common/mock.js';
 +import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 +import { IOverlayWidget, IViewZone, IViewZoneChangeAccessor } from '../../../../../editor/browser/editorBrowser.js';
++import { EditorOption } from '../../../../../editor/common/config/editorOptions.js';
 +import { EditOperation } from '../../../../../editor/common/core/editOperation.js';
 +import { Range } from '../../../../../editor/common/core/range.js';
 +import { ITextModel } from '../../../../../editor/common/model.js';
@@ -843,6 +943,7 @@ index 00000000..69fa9437
 +import { IViewsService } from '../../../../services/views/common/viewsService.js';
 +import { ITextFileSaveOptions, ITextFileService } from '../../../../services/textfile/common/textfiles.js';
 +import { workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
++import { INotification, INotificationHandle, INotificationService, Severity } from '../../../../../platform/notification/common/notification.js';
 +import { IChatWidgetService } from '../../../chat/browser/chat.js';
 +import { IChatEditingExplanationModelManager } from '../../../chat/browser/chatEditing/chatEditingExplanationModelManager.js';
 +import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntryChangeHunk } from '../../../chat/common/editing/chatEditingService.js';
@@ -851,6 +952,9 @@ index 00000000..69fa9437
 +import { IResourceDiffEditorInput } from '../../../../common/editor.js';
 +import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
 +import { IAction2Options } from '../../../../../platform/actions/common/actions.js';
++import { IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
++import { ContextKeyService } from '../../../../../platform/contextkey/browser/contextKeyService.js';
++import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 +import { AcceptAction, AcceptAllEditsAction, AcceptHunkAction, NavigateAction, RejectAction, RejectHunkAction, ToggleAccessibleDiffViewAction, ToggleDiffAction } from '../../../chat/browser/chatEditing/chatEditingEditorActions.js';
 +import { AgentReviewKind, IAgentReviewHunkEvent } from '../../browser/agentReviewEntry.js';
 +import { AgentReviewService } from '../../browser/agentReviewService.js';
@@ -873,6 +977,12 @@ index 00000000..69fa9437
 +	let dirty: boolean;
 +	let saves: (ITextFileSaveOptions | undefined)[];
 +	let insta: TestInstantiationService;
++	// Opt-in, more realistic saves: dirty until a save of the current buffer finishes; saves can be held or fail.
++	let trackSaves: boolean;
++	let savedVersion: number;
++	let holdSave: Promise<void> | undefined;
++	let saveOutcome: 'ok' | 'cancelled' | 'error';
++	let notifications: INotification[];
 +
 +	setup(() => {
 +		zones = new Map();
@@ -881,12 +991,17 @@ index 00000000..69fa9437
 +		hunkEvents = [];
 +		dirty = false;
 +		saves = [];
++		trackSaves = false;
++		savedVersion = -1;
++		holdSave = undefined;
++		saveOutcome = 'ok';
++		notifications = [];
 +
 +		const collection = new ServiceCollection();
 +		collection.set(IEditorWorkerService, new SyncDescriptor(TestWorkerService));
 +		collection.set(ITextModelService, new class extends mock<ITextModelService>() {
 +			override async createModelReference(resource: URI): Promise<IReference<IResolvedTextEditorModel>> {
-+				return { dispose: () => { }, object: { textEditorModel: model, getLanguageId: () => 'latex' } as IResolvedTextEditorModel };
++				return { dispose: () => { }, object: { textEditorModel: modelService.getModel(resource) ?? model, getLanguageId: () => 'latex' } as IResolvedTextEditorModel };
 +			}
 +			override registerTextModelContentProvider(_scheme: string, _provider: ITextModelContentProvider): IDisposable {
 +				return Disposable.None;
@@ -903,14 +1018,29 @@ index 00000000..69fa9437
 +		}());
 +		collection.set(ITextFileService, new class extends mock<ITextFileService>() {
 +			override isDirty(): boolean {
-+				return dirty;
++				return dirty || (trackSaves && model.getAlternativeVersionId() !== savedVersion);
 +			}
 +			override async save(resource: URI, options?: ITextFileSaveOptions): Promise<URI | undefined> {
 +				saves.push(options);
++				const version = model.getAlternativeVersionId();
++				await holdSave;
++				if (saveOutcome === 'error') {
++					throw new Error('disk full');
++				}
++				if (saveOutcome === 'cancelled') {
++					return undefined;
++				}
++				savedVersion = version;
 +				return resource;
 +			}
 +		}());
 +		collection.set(IChatWidgetService, new class extends mock<IChatWidgetService>() { }());
++		collection.set(INotificationService, new class extends mock<INotificationService>() {
++			override notify(notification: INotification): INotificationHandle {
++				notifications.push(notification);
++				return new class extends mock<INotificationHandle>() { }();
++			}
++		}());
 +		collection.set(IViewsService, new class extends mock<IViewsService>() {
 +			override readonly onDidChangeViewVisibility = Event.None;
 +		}());
@@ -921,25 +1051,30 @@ index 00000000..69fa9437
 +		model = store.add(modelService.createModel(DISK, null, uri, false));
 +		service = store.add(insta.createInstance(AgentReviewService));
 +
-+		// A code editor without a DOM view: record view zones and overlay widgets instead.
-+		editor = store.add(instantiateTestCodeEditor(insta, model));
++		editor = createEditor(insta);
++
++		store.add(service.onDidHunkAction(e => hunkEvents.push(e)));
++	});
++
++	teardown(() => store.clear());
++
++	/** A code editor without a DOM view: records view zones and overlay widgets instead. */
++	function createEditor(instantiationService: TestInstantiationService): ITestCodeEditor {
++		const e = store.add(instantiateTestCodeEditor(instantiationService, model));
 +		let zoneIds = 0;
 +		const accessor: IViewZoneChangeAccessor = {
 +			addZone: zone => { const id = String(++zoneIds); zones.set(id, zone); return id; },
 +			removeZone: id => { zones.delete(id); },
 +			layoutZone: () => { },
 +		};
-+		editor.changeViewZones = callback => { callback(accessor); };
-+		editor.addOverlayWidget = w => { overlays.add(w); };
-+		editor.removeOverlayWidget = w => { overlays.delete(w); };
-+		editor.layoutOverlayWidget = () => { };
-+		editor.getTopForLineNumber = line => (line - 1) * 20;
-+		editor.getScrollTop = () => 0;
-+
-+		store.add(service.onDidHunkAction(e => hunkEvents.push(e)));
-+	});
-+
-+	teardown(() => store.clear());
++		e.changeViewZones = callback => { callback(accessor); };
++		e.addOverlayWidget = w => { overlays.add(w); };
++		e.removeOverlayWidget = w => { overlays.delete(w); };
++		e.layoutOverlayWidget = () => { };
++		e.getTopForLineNumber = line => (line - 1) * 20;
++		e.getScrollTop = () => 0;
++		return e;
++	}
 +
 +	ensureNoDisposablesAreLeakedInTestSuite();
 +
@@ -964,8 +1099,9 @@ index 00000000..69fa9437
 +	test('deleted baseline lines render as real rows in a view zone, with one Keep/Undo widget', async () => {
 +		await showPending();
 +
-+		assert.strictEqual(zones.size, 1, 'one view zone for the deleted block');
-+		const zone = [...zones.values()][0];
++		const deleted = [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
++		assert.strictEqual(deleted.length, 1, 'one view zone for the deleted block');
++		const zone = deleted[0];
 +		assert.strictEqual(zone.afterLineNumber, 1, 'deleted block sits after line 1');
 +		assert.strictEqual(zone.heightInLines, 1, 'one deleted row');
 +		assert.ok(zone.domNode.classList.contains('line-delete'));
@@ -974,6 +1110,65 @@ index 00000000..69fa9437
 +		assert.ok(zone.domNode.textContent?.replace(/\u00a0/g, ' ').includes('This sentence was deleted by the agent.'));
 +
 +		assert.strictEqual(hunkWidgets().length, 1, 'one per-hunk toolbar');
++	});
++
++	test('each Keep/Undo toolbar has its own row below its hunk, so it never covers text', async () => {
++		model.setValue('a one\nb TWO, rewritten by the agent\nc three\ne five\n');
++		const { entry } = await showPending('a one\nb two\nc three\nd four\ne five\n');
++		assert.strictEqual(entry.diffInfo.get().changes.length, 2, 'a rewrite and a pure deletion');
++
++		const rows = [...zones.values()].filter(z => z.domNode.classList.contains('agent-review-hunk-toolbar-row'));
++		const deleted = [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
++		const widgets = hunkWidgets();
++		assert.strictEqual(rows.length, 2, 'one row per hunk');
++		assert.strictEqual(widgets.length, 2);
++		assert.ok(widgets.every(w => w.getDomNode().classList.contains('in-own-row')));
++
++		// Rewrite of line 2: the row follows the rewritten line. Pure deletion before line 4: the row
++		// follows the deleted rows (same line, higher ordinal).
++		assert.deepStrictEqual(rows.map(r => r.afterLineNumber).sort(), [2, 3]);
++		const deletionRow = rows.find(r => r.afterLineNumber === 3)!;
++		const deletionZone = deleted.find(z => z.afterLineNumber === 3)!;
++		assert.ok(deletionRow.ordinal! > deletionZone.ordinal!, 'row comes after the deleted lines');
++		assert.ok(rows.every(r => r.heightInPx! >= editor.getOption(EditorOption.lineHeight)), 'a full row, not an overlay on text');
++
++		// The toolbar sits where its row is (as the editor reports it while scrolling), at the text's left edge.
++		const row = rows.find(r => r.afterLineNumber === 2)!;
++		row.onDomNodeTop!(137);
++		const position = widgets.map(w => w.getPosition()?.preference).find(p => p && typeof p === 'object' && p.top >= 137);
++		assert.ok(position && typeof position === 'object', 'widget moved to its row');
++		assert.ok(position.top < 137 + row.heightInPx!, 'inside the row');
++		assert.strictEqual(position.left, editor.getLayoutInfo().contentLeft);
++	});
++
++	test('Ctrl+Y/Ctrl+N context: "cursor in a change" follows the file the editor shows, not the last integration created', async () => {
++		// A real (scoped) context key service: the test default (MockContextKeyService) has no scopes.
++		const contextKeys = store.add(new ContextKeyService(new TestConfigurationService()));
++		editor = createEditor(store.add(insta.createChild(new ServiceCollection([IContextKeyService, contextKeys]))));
++		const editorContext = editor.invokeWithinContext(accessor => accessor.get(IContextKeyService));
++		const cursorInChange = () => editorContext.getContextKeyValue<boolean>('chatEdits.cursorInChangeRange');
++		const { entry } = await showPending(); // paper.tex: the deleted line sits before line 2
++		editor.setPosition({ lineNumber: 2, column: 1 });
++		assert.strictEqual(cursorInChange(), true);
++
++		// A second reviewed file is shown in the same editor (another tab in the group), then the first again.
++		const uri2 = URI.parse('test:/notes.tex');
++		const model2 = store.add(modelService.createModel('Kept.\nAgent line.\n', null, uri2, false));
++		const entry2 = (await service.setBaseline(uri2, 'Kept.\n'))!;
++		await waitForState(entry2.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
++		editor.setModel(model2);
++		store.add(entry2.createEditorIntegration(editor));
++		editor.setPosition({ lineNumber: 1, column: 1 });
++		assert.strictEqual(cursorInChange(), false, 'line 1 of notes.tex is unchanged');
++		editor.setPosition({ lineNumber: 2, column: 1 });
++		assert.strictEqual(cursorInChange(), true);
++
++		editor.setModel(model);
++		editor.setPosition({ lineNumber: 2, column: 1 });
++		assert.strictEqual(cursorInChange(), true, 'the integration of the hidden notes.tex must not reset it');
++		editor.setPosition({ lineNumber: 1, column: 1 });
++		assert.strictEqual(cursorInChange(), false);
++		assert.ok(entry);
 +	});
 +
 +	test('Keep folds the hunk into the baseline, reports the full baseline, and leaves the buffer alone', async () => {
@@ -1006,6 +1201,72 @@ index 00000000..69fa9437
 +		await integration.rejectNearestChange(hunkWidgets()[0]);
 +		assert.strictEqual(model.getValue(), BASELINE);
 +		assert.deepStrictEqual(saves, []);
++	});
++
++	test('pressing Undo twice quickly saves both (the first save is still running)', async () => {
++		model.setValue('a one\nb TWO\nc three\ne five\n');
++		trackSaves = true;
++		savedVersion = model.getAlternativeVersionId();
++		const baseline = 'a one\nb two\nc three\nd four\ne five\n';
++		const { entry, integration } = await showPending(baseline);
++		assert.strictEqual(entry.changesCount.get(), 2);
++
++		let release!: () => void;
++		holdSave = new Promise<void>(r => release = r);
++		const first = integration.rejectNearestChange(hunkWidgets()[0]);
++		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 ? d : undefined));
++		for (let i = 0; i < 100 && saves.length === 0; i++) {
++			await timeout(1);
++		}
++		assert.strictEqual(saves.length, 1, 'the first save has started');
++		assert.ok(insta.get(ITextFileService).isDirty(uri), 'dirty while the first save runs');
++
++		const second = integration.rejectNearestChange(hunkWidgets()[0]);
++		release();
++		await Promise.all([first, second]);
++		assert.strictEqual(model.getValue(), baseline);
++		assert.strictEqual(saves.length, 2, 'the second Undo is saved too');
++		assert.strictEqual(insta.get(ITextFileService).isDirty(uri), false, 'disk matches the buffer');
++		assert.deepStrictEqual(notifications, []);
++	});
++
++	test('if the save after Undo fails or is cancelled, the user is told the disk still has the agent text', async () => {
++		trackSaves = true;
++		savedVersion = model.getAlternativeVersionId();
++		for (const outcome of ['cancelled', 'error'] as const) {
++			saveOutcome = outcome;
++			notifications.length = 0;
++			model.setValue(DISK);
++			savedVersion = model.getAlternativeVersionId();
++			const { entry, integration } = await showPending();
++			await integration.rejectNearestChange(hunkWidgets()[0]);
++			assert.strictEqual(model.getValue(), BASELINE, 'the undo is in the buffer');
++			assert.strictEqual(notifications.length, 1, outcome);
++			assert.strictEqual(notifications[0].severity, Severity.Warning);
++			assert.match(String(notifications[0].message), /isn't on disk yet/);
++			integration.dispose();
++			service.remove(uri);
++			assert.ok(!service.getEntry(uri) && entry);
++		}
++	});
++
++	test('file Undo with unsaved user edits stays in the buffer (dirty), keeps those edits, and says so', async () => {
++		const { entry } = await showPending();
++		// the user types on line 1, outside the change: folded into the baseline model, not pending
++		model.applyEdits([EditOperation.replace(new Range(1, 1, 1, 6), 'Opening')]);
++		await waitForState(entry.diffInfo.map(d => entry.originalModel.getValue().startsWith('Opening') ? d : undefined));
++		dirty = true;
++
++		assert.strictEqual(await entry.rejectFile(), 'unsaved');
++		assert.strictEqual(model.getValue(), 'Opening sentence.\nThis sentence was deleted by the agent.\nClosing sentence.\n');
++		assert.deepStrictEqual(saves, [], 'never saved for the user');
++
++		dirty = false;
++		await service.setBaseline(uri, BASELINE);
++		model.setValue(DISK);
++		await waitForState(entry.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
++		assert.strictEqual(await entry.rejectFile(), 'saved');
++		assert.strictEqual(saves.length, 1);
 +	});
 +
 +	test('file Keep reports acceptFile; file Undo restores and saves', async () => {
@@ -1072,7 +1333,7 @@ index 00000000..69fa9437
 +		assert.deepStrictEqual(opened.map(i => i.label), ['paper.tex (agent changes)']);
 +	});
 +
-+	test('review commands use agent-review wording; Keep/Undo labels and keybindings are unchanged', () => {
++	test('review commands use agent-review wording and the Agent Review category; Keep/Undo labels and keybindings are unchanged', () => {
 +		const desc = (action: { desc: Readonly<IAction2Options> }) => {
 +			const kb = action.desc.keybinding;
 +			const title = action.desc.title;
@@ -1082,10 +1343,16 @@ index 00000000..69fa9437
 +				key: (Array.isArray(kb) ? kb[0] : kb)?.primary,
 +			};
 +		};
++		const category = (action: { desc: Readonly<IAction2Options> }) => {
++			const c = action.desc.category;
++			return typeof c === 'string' ? c : c?.value;
++		};
 +		const next = new (class extends NavigateAction { constructor() { super(true); } })();
 +		const prev = new (class extends NavigateAction { constructor() { super(false); } })();
++		const actions = [next, prev, new AcceptAction(), new RejectAction(), new AcceptAllEditsAction(), new AcceptHunkAction(), new RejectHunkAction(), new ToggleDiffAction(), new ToggleAccessibleDiffViewAction()];
++		assert.deepStrictEqual(actions.map(category), actions.map(() => 'Agent Review'), 'listed under "Agent Review", not "Chat"');
 +		assert.deepStrictEqual(
-+			[next, prev, new AcceptAction(), new RejectAction(), new AcceptAllEditsAction(), new AcceptHunkAction(), new RejectHunkAction(), new ToggleDiffAction(), new ToggleAccessibleDiffViewAction()].map(desc),
++			actions.map(desc),
 +			[
 +				{ title: 'Go to Next Agent Change', short: undefined, key: KeyMod.Alt | KeyCode.F5 },
 +				{ title: 'Go to Previous Agent Change', short: undefined, key: KeyMod.Alt | KeyMod.Shift | KeyCode.F5 },

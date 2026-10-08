@@ -12,7 +12,7 @@ import { baselineFiles, DiskWorkspace, memWorkspace, rmrf, tmpDir } from './help
 
 function editOf(text: string, find: string, replace: string, origin: TrackedEdit['origin'] = 'user'): TrackedEdit {
   const offset = text.indexOf(find);
-  if (offset < 0) throw new Error(`${find} not in text`);
+  if (offset < 0) { throw new Error(`${find} not in text`); }
   return { offset, length: find.length, text: replace, origin };
 }
 
@@ -314,7 +314,7 @@ describe('§7 multi-root workspaces', () => {
     const r1 = path.join(base, 'one');
     const r2 = path.join(base, 'two');
     const nested = path.join(r1, 'packages', 'inner');
-    for (const d of [r1, r2, nested]) nodeFs.mkdirSync(d, { recursive: true });
+    for (const d of [r1, r2, nested]) { nodeFs.mkdirSync(d, { recursive: true }); }
     nodeFs.writeFileSync(path.join(r1, 'a.txt'), 'one\n');
     nodeFs.writeFileSync(path.join(r2, 'a.txt'), 'two\n');
     nodeFs.writeFileSync(path.join(nested, 'n.txt'), 'n\n');
@@ -355,6 +355,25 @@ describe('§7 symlinked paths normalize to real paths', () => {
       nodeFs.rmSync(ws.abs('a.txt'));
       await engine.handleFsEvents([path.join(link, 'a.txt')]);
       expect(engine.listChanges().map((c) => [c.path, c.kind])).toEqual([['a.txt', 'deleted']]);
+      await engine.close();
+    } finally {
+      ws.dispose();
+    }
+  });
+
+  it('a write through a file symlink inside the workspace is one change, under the real file', async () => {
+    const ws = DiskWorkspace.create({ 'sections/intro.tex': 'Intro.\n' });
+    nodeFs.symlinkSync(ws.abs('sections/intro.tex'), ws.abs('intro-link.tex'));
+    try {
+      const engine = await ReviewEngine.open({ root: ws.root, storageDir: ws.storage, git: false });
+      expect([...engine.baselineEntries().keys()]).toEqual(['sections/intro.tex']); // tracked once
+      nodeFs.writeFileSync(ws.abs('intro-link.tex'), 'Intro, by the agent.\n');
+      await engine.handleFsEvents([ws.abs('intro-link.tex')]); // reported under the link path
+      await engine.handleFsEvents([ws.abs('sections/intro.tex')]); // and under the real one
+      expect(engine.listChanges().map((c) => [c.path, c.kind])).toEqual([['sections/intro.tex', 'modified']]);
+      await engine.rejectFile(ws.abs('intro-link.tex')); // Undo through the link path restores the real file
+      expect(nodeFs.readFileSync(ws.abs('sections/intro.tex'), 'utf8')).toBe('Intro.\n');
+      expect(nodeFs.lstatSync(ws.abs('intro-link.tex')).isSymbolicLink()).toBe(true); // the link itself is untouched
       await engine.close();
     } finally {
       ws.dispose();

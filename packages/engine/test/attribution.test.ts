@@ -9,13 +9,13 @@ const J = (lines: string[]) => joinLines(lines);
 
 function edit(text: string, find: string, replace: string, origin: EditOrigin = 'user'): TrackedEdit {
   const offset = text.indexOf(find);
-  if (offset < 0) throw new Error(`"${find}" not found`);
+  if (offset < 0) { throw new Error(`"${find}" not found`); }
   return { offset, length: find.length, text: replace, origin };
 }
 
 /** Apply edits sequentially and return the final text. */
 function applyEdits(text: string, edits: TrackedEdit[]): string {
-  for (const e of edits) text = text.slice(0, e.offset) + e.text + text.slice(e.offset + e.length);
+  for (const e of edits) { text = text.slice(0, e.offset) + e.text + text.slice(e.offset + e.length); }
   return text;
 }
 
@@ -88,7 +88,7 @@ describe('trackEdits', () => {
         const d = splitLines(start);
         let last = -1;
         for (const l of p.lines) {
-          if (l.src < 0) continue;
+          if (l.src < 0) { continue; }
           expect(l.text).toBe(d[l.src]);
           expect(l.src).toBeGreaterThan(last);
           expect(p.removedBy.has(l.src)).toBe(false);
@@ -156,7 +156,7 @@ describe('foldUserSave', () => {
       text = applyEdits(text, [e]);
     };
     apply('a=1', 'a=10', 'user');
-    for (const [from, to] of [['a=10', 'a = 10'], ['b=20', 'b = 20'], ['c=3', 'c = 3'], ['d=4', 'd = 4']] as const) apply(from, to, 'formatter');
+    for (const [from, to] of [['a=10', 'a = 10'], ['b=20', 'b = 20'], ['c=3', 'c = 3'], ['d=4', 'd = 4']] as const) { apply(from, to, 'formatter'); }
     expect(text).toBe('a = 10\nb = 20\nc = 3\nd = 4\n');
     const next = foldUserSave(B, D, trackEdits(J(D), edits)!);
     // User line (formatted) and the formatted common line fold in; the agent's lines stay pending, formatted.
@@ -220,15 +220,15 @@ describe('foldUserSave', () => {
         lines.forEach((kind, i) => {
           const c = `common${i}\n`;
           if (kind === 'agent' || kind === 'fmtInside') {
-            B.push(`old${i}\n`), D.push(`agent${i}\n`), expected.push(`old${i}\n`);
-            if (kind === 'fmtInside') fmtEdits.push([`agent${i}\n`, `agentfmt${i}\n`]);
+            B.push(`old${i}\n`); D.push(`agent${i}\n`); expected.push(`old${i}\n`);
+            if (kind === 'fmtInside') { fmtEdits.push([`agent${i}\n`, `agentfmt${i}\n`]); }
             return;
           }
-          B.push(c), D.push(c);
-          if (kind === 'same') expected.push(c);
-          if (kind === 'fmtOutside') expected.push(`fmt${i}\n`), fmtEdits.push([c, `fmt${i}\n`]);
-          if (kind === 'user') expected.push(`user${i}\n`), userEdits.push([c, `user${i}\n`]);
-          if (kind === 'userFmt') expected.push(`userfmt${i}\n`), userEdits.push([c, `user${i}\n`]), fmtEdits.push([`user${i}\n`, `userfmt${i}\n`]);
+          B.push(c); D.push(c);
+          if (kind === 'same') { expected.push(c); }
+          if (kind === 'fmtOutside') { expected.push(`fmt${i}\n`); fmtEdits.push([c, `fmt${i}\n`]); }
+          if (kind === 'user') { expected.push(`user${i}\n`); userEdits.push([c, `user${i}\n`]); }
+          if (kind === 'userFmt') { expected.push(`userfmt${i}\n`); userEdits.push([c, `user${i}\n`]); fmtEdits.push([`user${i}\n`, `userfmt${i}\n`]); }
         });
         let text = J(D);
         const tracked: TrackedEdit[] = [];
@@ -274,21 +274,21 @@ describe('foldUserSave', () => {
             const c = `common${i}\n`;
             switch (kind) {
               case 'same':
-                B.push(c), D.push(c), expected.push(c), saved.push(c);
+                B.push(c); D.push(c); expected.push(c); saved.push(c);
                 break;
               case 'agent':
-                B.push(`old${i}\n`), D.push(`agent${i}\n`), expected.push(`old${i}\n`), saved.push(`agent${i}\n`);
+                B.push(`old${i}\n`); D.push(`agent${i}\n`); expected.push(`old${i}\n`); saved.push(`agent${i}\n`);
                 break;
               case 'user':
-                B.push(c), D.push(c), expected.push(`user${i}\n`), saved.push(`user${i}\n`);
+                B.push(c); D.push(c); expected.push(`user${i}\n`); saved.push(`user${i}\n`);
                 edits.push({ block: i, from: c, to: `user${i}\n`, origin: 'user' });
                 break;
               case 'fmtOutside':
-                B.push(c), D.push(c), expected.push(`fmt${i}\n`), saved.push(`fmt${i}\n`);
+                B.push(c); D.push(c); expected.push(`fmt${i}\n`); saved.push(`fmt${i}\n`);
                 edits.push({ block: i, from: c, to: `fmt${i}\n`, origin: 'formatter' });
                 break;
               case 'fmtInside':
-                B.push(`old${i}\n`), D.push(`agent${i}\n`), expected.push(`old${i}\n`), saved.push(`agentfmt${i}\n`);
+                B.push(`old${i}\n`); D.push(`agent${i}\n`); expected.push(`old${i}\n`); saved.push(`agentfmt${i}\n`);
                 edits.push({ block: i, from: `agent${i}\n`, to: `agentfmt${i}\n`, origin: 'formatter' });
                 break;
               case 'partial':
@@ -299,11 +299,11 @@ describe('foldUserSave', () => {
                 edits.push({ block: i, from: `add${i}b\n`, to: `mine${i}\n`, origin: 'user' });
                 break;
               case 'agentDelete':
-                B.push(`gone${i}\n`), expected.push(`gone${i}\n`);
+                B.push(`gone${i}\n`); expected.push(`gone${i}\n`);
                 break;
               case 'userThenDelete':
                 // The user edits a common line that sits right before an agent deletion.
-                B.push(c, `gone${i}\n`), D.push(c), expected.push(`user${i}\n`, `gone${i}\n`), saved.push(`user${i}\n`);
+                B.push(c, `gone${i}\n`); D.push(c); expected.push(`user${i}\n`, `gone${i}\n`); saved.push(`user${i}\n`);
                 edits.push({ block: i, from: c, to: `user${i}\n`, origin: 'user' });
                 break;
             }
@@ -319,7 +319,7 @@ describe('foldUserSave', () => {
           }
           expect(text).toBe(J(saved));
           const hasFormatter = blocks.some((b) => b === 'fmtInside' || b === 'fmtOutside');
-          if (useDiffAttribution && hasFormatter) return; // diff attribution can't tell formatter from user
+          if (useDiffAttribution && hasFormatter) { return; } // diff attribution can't tell formatter from user
           const prov = useDiffAttribution ? provenanceFromDiff(d, text) : trackEdits(d, tracked)!;
           const next = foldUserSave(B, D, prov);
           expect(J(next)).toBe(J(expected));

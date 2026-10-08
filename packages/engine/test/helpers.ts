@@ -12,7 +12,7 @@ export function memWorkspace(files: Record<string, string | Uint8Array> = {}): M
   const fs = new MemoryFileSystem();
   fs.mkdirSync(ROOT);
   const ws = new MemWorkspace(fs);
-  for (const [rel, content] of Object.entries(files)) ws.write(rel, content);
+  for (const [rel, content] of Object.entries(files)) { ws.write(rel, content); }
   return ws;
 }
 
@@ -49,7 +49,7 @@ export class MemWorkspace {
   /** rel -> content for every file under the root (no ignore filtering). */
   files(): Record<string, string> {
     const out: Record<string, string> = {};
-    for (const abs of this.fs.listFilesSync(ROOT)) out[path.posix.relative(ROOT, abs)] = this.fs.readTextSync(abs)!;
+    for (const abs of this.fs.listFilesSync(ROOT)) { out[path.posix.relative(ROOT, abs)] = this.fs.readTextSync(abs)!; }
     return out;
   }
   open(opts: Partial<ReviewEngineOptions> = {}): Promise<ReviewEngine> {
@@ -123,7 +123,7 @@ export class DiskWorkspace {
     const root = path.join(base, 'ws');
     nodeFs.mkdirSync(root);
     const ws = new DiskWorkspace(root, path.join(base, 'storage'));
-    for (const [rel, content] of Object.entries(files)) ws.write(rel, content);
+    for (const [rel, content] of Object.entries(files)) { ws.write(rel, content); }
     return ws;
   }
   abs(rel: string): string {

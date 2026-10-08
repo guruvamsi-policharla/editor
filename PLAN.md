@@ -105,12 +105,17 @@ For agents that speak [ACP](https://agentclientprotocol.com), offer a native cha
 - Baseline store, attribution, line + word diff, accept/reject, file lifecycle, ignore rules, git-op detection, persistence.
 - **Exit criteria (met):** comprehensive unit/integration tests (see §8) passing headlessly.
 
-### Phase 2: Fork + built-in extension MVP (about 3–5 weeks)
+### Phase 2: Fork + built-in extension MVP (done)
 
 - VSCodium-based build with branding, the built-in extension, and the core rendering patches.
 - Inline rendering, Accept/Reject, review list, keybindings, dirty-buffer merge view, agent terminal, Cmd+L.
 - CI: VSCodium-based packaging and an automated monthly upstream merge with patch-conflict alerts.
-- **Exit criteria:** Cursor-quality inline review, usable daily.
+- **Exit criteria (met on the packaged Linux build):** Cursor-quality inline review, usable daily. Details: [docs/phase2.md](docs/phase2.md).
+- **Left over:**
+  - The macOS build (`fork/scripts/build-macos.sh`, ad-hoc signed) is untested on real hardware. Only its logic was checked, under bash 3.2 with stubbed macOS tools; the release-only macOS CI workflow hasn't run since its out-of-memory fix.
+  - Signing and notarization (Apple Developer ID), installers and auto-update.
+  - Windows builds.
+  - The typed proposed API for the review hook moves to Phase 4; Phase 2 uses internal commands.
 
 ### Phase 3: Dogfood (about 2 weeks)
 
@@ -122,7 +127,7 @@ For agents that speak [ACP](https://agentclientprotocol.com), offer a native cha
 
 - "Restore to before" checkpoints.
 - Optional ACP chat panel; `tact acp`.
-- Upstream the rendering hook as a VS Code proposed API.
+- Upstream the rendering hook as a VS Code proposed API (replacing Phase 2's internal `_agentReview.*` commands).
 
 ## 7. Edge cases checklist
 

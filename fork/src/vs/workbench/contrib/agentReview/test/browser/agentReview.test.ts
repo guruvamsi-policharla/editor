@@ -11,6 +11,7 @@
 // and hunks stay as granular as the line diff, with word-level inner changes.
 
 import assert from 'assert';
+import { timeout } from '../../../../../base/common/async.js';
 import { Event } from '../../../../../base/common/event.js';
 import { Disposable, DisposableStore, IDisposable, IReference } from '../../../../../base/common/lifecycle.js';
 import { ResourceMap } from '../../../../../base/common/map.js';
@@ -19,6 +20,7 @@ import { URI } from '../../../../../base/common/uri.js';
 import { mock } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { IOverlayWidget, IViewZone, IViewZoneChangeAccessor } from '../../../../../editor/browser/editorBrowser.js';
+import { EditorOption } from '../../../../../editor/common/config/editorOptions.js';
 import { EditOperation } from '../../../../../editor/common/core/editOperation.js';
 import { Range } from '../../../../../editor/common/core/range.js';
 import { ITextModel } from '../../../../../editor/common/model.js';
@@ -33,6 +35,7 @@ import { ServiceCollection } from '../../../../../platform/instantiation/common/
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
 import { ITextFileSaveOptions, ITextFileService } from '../../../../services/textfile/common/textfiles.js';
 import { workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
+import { INotification, INotificationHandle, INotificationService, Severity } from '../../../../../platform/notification/common/notification.js';
 import { IChatWidgetService } from '../../../chat/browser/chat.js';
 import { IChatEditingExplanationModelManager } from '../../../chat/browser/chatEditing/chatEditingExplanationModelManager.js';
 import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntryChangeHunk } from '../../../chat/common/editing/chatEditingService.js';
@@ -41,6 +44,9 @@ import { IEditorService } from '../../../../services/editor/common/editorService
 import { IResourceDiffEditorInput } from '../../../../common/editor.js';
 import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
 import { IAction2Options } from '../../../../../platform/actions/common/actions.js';
+import { IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
+import { ContextKeyService } from '../../../../../platform/contextkey/browser/contextKeyService.js';
+import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { AcceptAction, AcceptAllEditsAction, AcceptHunkAction, NavigateAction, RejectAction, RejectHunkAction, ToggleAccessibleDiffViewAction, ToggleDiffAction } from '../../../chat/browser/chatEditing/chatEditingEditorActions.js';
 import { AgentReviewKind, IAgentReviewHunkEvent } from '../../browser/agentReviewEntry.js';
 import { AgentReviewService } from '../../browser/agentReviewService.js';
@@ -63,6 +69,12 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 	let dirty: boolean;
 	let saves: (ITextFileSaveOptions | undefined)[];
 	let insta: TestInstantiationService;
+	// Opt-in, more realistic saves: dirty until a save of the current buffer finishes; saves can be held or fail.
+	let trackSaves: boolean;
+	let savedVersion: number;
+	let holdSave: Promise<void> | undefined;
+	let saveOutcome: 'ok' | 'cancelled' | 'error';
+	let notifications: INotification[];
 
 	setup(() => {
 		zones = new Map();
@@ -71,12 +83,17 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		hunkEvents = [];
 		dirty = false;
 		saves = [];
+		trackSaves = false;
+		savedVersion = -1;
+		holdSave = undefined;
+		saveOutcome = 'ok';
+		notifications = [];
 
 		const collection = new ServiceCollection();
 		collection.set(IEditorWorkerService, new SyncDescriptor(TestWorkerService));
 		collection.set(ITextModelService, new class extends mock<ITextModelService>() {
 			override async createModelReference(resource: URI): Promise<IReference<IResolvedTextEditorModel>> {
-				return { dispose: () => { }, object: { textEditorModel: model, getLanguageId: () => 'latex' } as IResolvedTextEditorModel };
+				return { dispose: () => { }, object: { textEditorModel: modelService.getModel(resource) ?? model, getLanguageId: () => 'latex' } as IResolvedTextEditorModel };
 			}
 			override registerTextModelContentProvider(_scheme: string, _provider: ITextModelContentProvider): IDisposable {
 				return Disposable.None;
@@ -93,14 +110,29 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		}());
 		collection.set(ITextFileService, new class extends mock<ITextFileService>() {
 			override isDirty(): boolean {
-				return dirty;
+				return dirty || (trackSaves && model.getAlternativeVersionId() !== savedVersion);
 			}
 			override async save(resource: URI, options?: ITextFileSaveOptions): Promise<URI | undefined> {
 				saves.push(options);
+				const version = model.getAlternativeVersionId();
+				await holdSave;
+				if (saveOutcome === 'error') {
+					throw new Error('disk full');
+				}
+				if (saveOutcome === 'cancelled') {
+					return undefined;
+				}
+				savedVersion = version;
 				return resource;
 			}
 		}());
 		collection.set(IChatWidgetService, new class extends mock<IChatWidgetService>() { }());
+		collection.set(INotificationService, new class extends mock<INotificationService>() {
+			override notify(notification: INotification): INotificationHandle {
+				notifications.push(notification);
+				return new class extends mock<INotificationHandle>() { }();
+			}
+		}());
 		collection.set(IViewsService, new class extends mock<IViewsService>() {
 			override readonly onDidChangeViewVisibility = Event.None;
 		}());
@@ -111,25 +143,30 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		model = store.add(modelService.createModel(DISK, null, uri, false));
 		service = store.add(insta.createInstance(AgentReviewService));
 
-		// A code editor without a DOM view: record view zones and overlay widgets instead.
-		editor = store.add(instantiateTestCodeEditor(insta, model));
+		editor = createEditor(insta);
+
+		store.add(service.onDidHunkAction(e => hunkEvents.push(e)));
+	});
+
+	teardown(() => store.clear());
+
+	/** A code editor without a DOM view: records view zones and overlay widgets instead. */
+	function createEditor(instantiationService: TestInstantiationService): ITestCodeEditor {
+		const e = store.add(instantiateTestCodeEditor(instantiationService, model));
 		let zoneIds = 0;
 		const accessor: IViewZoneChangeAccessor = {
 			addZone: zone => { const id = String(++zoneIds); zones.set(id, zone); return id; },
 			removeZone: id => { zones.delete(id); },
 			layoutZone: () => { },
 		};
-		editor.changeViewZones = callback => { callback(accessor); };
-		editor.addOverlayWidget = w => { overlays.add(w); };
-		editor.removeOverlayWidget = w => { overlays.delete(w); };
-		editor.layoutOverlayWidget = () => { };
-		editor.getTopForLineNumber = line => (line - 1) * 20;
-		editor.getScrollTop = () => 0;
-
-		store.add(service.onDidHunkAction(e => hunkEvents.push(e)));
-	});
-
-	teardown(() => store.clear());
+		e.changeViewZones = callback => { callback(accessor); };
+		e.addOverlayWidget = w => { overlays.add(w); };
+		e.removeOverlayWidget = w => { overlays.delete(w); };
+		e.layoutOverlayWidget = () => { };
+		e.getTopForLineNumber = line => (line - 1) * 20;
+		e.getScrollTop = () => 0;
+		return e;
+	}
 
 	ensureNoDisposablesAreLeakedInTestSuite();
 
@@ -154,8 +191,9 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 	test('deleted baseline lines render as real rows in a view zone, with one Keep/Undo widget', async () => {
 		await showPending();
 
-		assert.strictEqual(zones.size, 1, 'one view zone for the deleted block');
-		const zone = [...zones.values()][0];
+		const deleted = [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
+		assert.strictEqual(deleted.length, 1, 'one view zone for the deleted block');
+		const zone = deleted[0];
 		assert.strictEqual(zone.afterLineNumber, 1, 'deleted block sits after line 1');
 		assert.strictEqual(zone.heightInLines, 1, 'one deleted row');
 		assert.ok(zone.domNode.classList.contains('line-delete'));
@@ -164,6 +202,65 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.ok(zone.domNode.textContent?.replace(/\u00a0/g, ' ').includes('This sentence was deleted by the agent.'));
 
 		assert.strictEqual(hunkWidgets().length, 1, 'one per-hunk toolbar');
+	});
+
+	test('each Keep/Undo toolbar has its own row below its hunk, so it never covers text', async () => {
+		model.setValue('a one\nb TWO, rewritten by the agent\nc three\ne five\n');
+		const { entry } = await showPending('a one\nb two\nc three\nd four\ne five\n');
+		assert.strictEqual(entry.diffInfo.get().changes.length, 2, 'a rewrite and a pure deletion');
+
+		const rows = [...zones.values()].filter(z => z.domNode.classList.contains('agent-review-hunk-toolbar-row'));
+		const deleted = [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
+		const widgets = hunkWidgets();
+		assert.strictEqual(rows.length, 2, 'one row per hunk');
+		assert.strictEqual(widgets.length, 2);
+		assert.ok(widgets.every(w => w.getDomNode().classList.contains('in-own-row')));
+
+		// Rewrite of line 2: the row follows the rewritten line. Pure deletion before line 4: the row
+		// follows the deleted rows (same line, higher ordinal).
+		assert.deepStrictEqual(rows.map(r => r.afterLineNumber).sort(), [2, 3]);
+		const deletionRow = rows.find(r => r.afterLineNumber === 3)!;
+		const deletionZone = deleted.find(z => z.afterLineNumber === 3)!;
+		assert.ok(deletionRow.ordinal! > deletionZone.ordinal!, 'row comes after the deleted lines');
+		assert.ok(rows.every(r => r.heightInPx! >= editor.getOption(EditorOption.lineHeight)), 'a full row, not an overlay on text');
+
+		// The toolbar sits where its row is (as the editor reports it while scrolling), at the text's left edge.
+		const row = rows.find(r => r.afterLineNumber === 2)!;
+		row.onDomNodeTop!(137);
+		const position = widgets.map(w => w.getPosition()?.preference).find(p => p && typeof p === 'object' && p.top >= 137);
+		assert.ok(position && typeof position === 'object', 'widget moved to its row');
+		assert.ok(position.top < 137 + row.heightInPx!, 'inside the row');
+		assert.strictEqual(position.left, editor.getLayoutInfo().contentLeft);
+	});
+
+	test('Ctrl+Y/Ctrl+N context: "cursor in a change" follows the file the editor shows, not the last integration created', async () => {
+		// A real (scoped) context key service: the test default (MockContextKeyService) has no scopes.
+		const contextKeys = store.add(new ContextKeyService(new TestConfigurationService()));
+		editor = createEditor(store.add(insta.createChild(new ServiceCollection([IContextKeyService, contextKeys]))));
+		const editorContext = editor.invokeWithinContext(accessor => accessor.get(IContextKeyService));
+		const cursorInChange = () => editorContext.getContextKeyValue<boolean>('chatEdits.cursorInChangeRange');
+		const { entry } = await showPending(); // paper.tex: the deleted line sits before line 2
+		editor.setPosition({ lineNumber: 2, column: 1 });
+		assert.strictEqual(cursorInChange(), true);
+
+		// A second reviewed file is shown in the same editor (another tab in the group), then the first again.
+		const uri2 = URI.parse('test:/notes.tex');
+		const model2 = store.add(modelService.createModel('Kept.\nAgent line.\n', null, uri2, false));
+		const entry2 = (await service.setBaseline(uri2, 'Kept.\n'))!;
+		await waitForState(entry2.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
+		editor.setModel(model2);
+		store.add(entry2.createEditorIntegration(editor));
+		editor.setPosition({ lineNumber: 1, column: 1 });
+		assert.strictEqual(cursorInChange(), false, 'line 1 of notes.tex is unchanged');
+		editor.setPosition({ lineNumber: 2, column: 1 });
+		assert.strictEqual(cursorInChange(), true);
+
+		editor.setModel(model);
+		editor.setPosition({ lineNumber: 2, column: 1 });
+		assert.strictEqual(cursorInChange(), true, 'the integration of the hidden notes.tex must not reset it');
+		editor.setPosition({ lineNumber: 1, column: 1 });
+		assert.strictEqual(cursorInChange(), false);
+		assert.ok(entry);
 	});
 
 	test('Keep folds the hunk into the baseline, reports the full baseline, and leaves the buffer alone', async () => {
@@ -196,6 +293,72 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		await integration.rejectNearestChange(hunkWidgets()[0]);
 		assert.strictEqual(model.getValue(), BASELINE);
 		assert.deepStrictEqual(saves, []);
+	});
+
+	test('pressing Undo twice quickly saves both (the first save is still running)', async () => {
+		model.setValue('a one\nb TWO\nc three\ne five\n');
+		trackSaves = true;
+		savedVersion = model.getAlternativeVersionId();
+		const baseline = 'a one\nb two\nc three\nd four\ne five\n';
+		const { entry, integration } = await showPending(baseline);
+		assert.strictEqual(entry.changesCount.get(), 2);
+
+		let release!: () => void;
+		holdSave = new Promise<void>(r => release = r);
+		const first = integration.rejectNearestChange(hunkWidgets()[0]);
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 ? d : undefined));
+		for (let i = 0; i < 100 && saves.length === 0; i++) {
+			await timeout(1);
+		}
+		assert.strictEqual(saves.length, 1, 'the first save has started');
+		assert.ok(insta.get(ITextFileService).isDirty(uri), 'dirty while the first save runs');
+
+		const second = integration.rejectNearestChange(hunkWidgets()[0]);
+		release();
+		await Promise.all([first, second]);
+		assert.strictEqual(model.getValue(), baseline);
+		assert.strictEqual(saves.length, 2, 'the second Undo is saved too');
+		assert.strictEqual(insta.get(ITextFileService).isDirty(uri), false, 'disk matches the buffer');
+		assert.deepStrictEqual(notifications, []);
+	});
+
+	test('if the save after Undo fails or is cancelled, the user is told the disk still has the agent text', async () => {
+		trackSaves = true;
+		savedVersion = model.getAlternativeVersionId();
+		for (const outcome of ['cancelled', 'error'] as const) {
+			saveOutcome = outcome;
+			notifications.length = 0;
+			model.setValue(DISK);
+			savedVersion = model.getAlternativeVersionId();
+			const { entry, integration } = await showPending();
+			await integration.rejectNearestChange(hunkWidgets()[0]);
+			assert.strictEqual(model.getValue(), BASELINE, 'the undo is in the buffer');
+			assert.strictEqual(notifications.length, 1, outcome);
+			assert.strictEqual(notifications[0].severity, Severity.Warning);
+			assert.match(String(notifications[0].message), /isn't on disk yet/);
+			integration.dispose();
+			service.remove(uri);
+			assert.ok(!service.getEntry(uri) && entry);
+		}
+	});
+
+	test('file Undo with unsaved user edits stays in the buffer (dirty), keeps those edits, and says so', async () => {
+		const { entry } = await showPending();
+		// the user types on line 1, outside the change: folded into the baseline model, not pending
+		model.applyEdits([EditOperation.replace(new Range(1, 1, 1, 6), 'Opening')]);
+		await waitForState(entry.diffInfo.map(d => entry.originalModel.getValue().startsWith('Opening') ? d : undefined));
+		dirty = true;
+
+		assert.strictEqual(await entry.rejectFile(), 'unsaved');
+		assert.strictEqual(model.getValue(), 'Opening sentence.\nThis sentence was deleted by the agent.\nClosing sentence.\n');
+		assert.deepStrictEqual(saves, [], 'never saved for the user');
+
+		dirty = false;
+		await service.setBaseline(uri, BASELINE);
+		model.setValue(DISK);
+		await waitForState(entry.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
+		assert.strictEqual(await entry.rejectFile(), 'saved');
+		assert.strictEqual(saves.length, 1);
 	});
 
 	test('file Keep reports acceptFile; file Undo restores and saves', async () => {
@@ -262,7 +425,7 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.deepStrictEqual(opened.map(i => i.label), ['paper.tex (agent changes)']);
 	});
 
-	test('review commands use agent-review wording; Keep/Undo labels and keybindings are unchanged', () => {
+	test('review commands use agent-review wording and the Agent Review category; Keep/Undo labels and keybindings are unchanged', () => {
 		const desc = (action: { desc: Readonly<IAction2Options> }) => {
 			const kb = action.desc.keybinding;
 			const title = action.desc.title;
@@ -272,10 +435,16 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 				key: (Array.isArray(kb) ? kb[0] : kb)?.primary,
 			};
 		};
+		const category = (action: { desc: Readonly<IAction2Options> }) => {
+			const c = action.desc.category;
+			return typeof c === 'string' ? c : c?.value;
+		};
 		const next = new (class extends NavigateAction { constructor() { super(true); } })();
 		const prev = new (class extends NavigateAction { constructor() { super(false); } })();
+		const actions = [next, prev, new AcceptAction(), new RejectAction(), new AcceptAllEditsAction(), new AcceptHunkAction(), new RejectHunkAction(), new ToggleDiffAction(), new ToggleAccessibleDiffViewAction()];
+		assert.deepStrictEqual(actions.map(category), actions.map(() => 'Agent Review'), 'listed under "Agent Review", not "Chat"');
 		assert.deepStrictEqual(
-			[next, prev, new AcceptAction(), new RejectAction(), new AcceptAllEditsAction(), new AcceptHunkAction(), new RejectHunkAction(), new ToggleDiffAction(), new ToggleAccessibleDiffViewAction()].map(desc),
+			actions.map(desc),
 			[
 				{ title: 'Go to Next Agent Change', short: undefined, key: KeyMod.Alt | KeyCode.F5 },
 				{ title: 'Go to Previous Agent Change', short: undefined, key: KeyMod.Alt | KeyMod.Shift | KeyCode.F5 },

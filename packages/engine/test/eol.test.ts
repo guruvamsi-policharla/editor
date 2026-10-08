@@ -25,7 +25,7 @@ describe('restoreLineEndings (text from an EOL-normalizing editor buffer)', () =
     fc.assert(
       fc.property(fc.array(line, { maxLength: 20 }), fc.boolean(), (lines, cutLast) => {
         let original = lines.map(([t, e]) => t + e).join('');
-        if (cutLast && original.length) original = original.replace(/\r?\n$/, '');
+        if (cutLast && original.length) { original = original.replace(/\r?\n$/, ''); }
         expect(restoreLineEndings(lf(original), [original])).toBe(original);
         expect(restoreLineEndings(original.replace(/\r?\n/g, '\r\n'), [original])).toBe(original);
       }),
