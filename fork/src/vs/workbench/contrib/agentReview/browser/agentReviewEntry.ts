@@ -40,6 +40,7 @@ import { IModelService } from '../../../../editor/common/services/model.js';
 import { IResolvedTextEditorModel, ITextModelService } from '../../../../editor/common/services/resolverService.js';
 import { IModelContentChangedEvent } from '../../../../editor/common/textModelEvents.js';
 import { localize } from '../../../../nls.js';
+import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
@@ -132,8 +133,21 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 	readonly originalModel: ITextModel;
 	readonly modifiedModel: ITextModel;
 
+	/**
+	 * The change service's state. Always Modified: the service diffs only Modified entries, and an entry exists only
+	 * while the engine has something pending, so a new agent write must always show (see `state`).
+	 */
 	private readonly _stateObs = observableValue<ModifiedFileEntryState>(this, ModifiedFileEntryState.Modified);
-	readonly state: IObservable<ModifiedFileEntryState> = this._stateObs;
+	/** How the last change in view was resolved (shown while nothing is left to review). */
+	private readonly _resolution = observableValue<ModifiedFileEntryState.Accepted | ModifiedFileEntryState.Rejected>(this, ModifiedFileEntryState.Accepted);
+	/**
+	 * What the UI shows (overlay, explorer decoration, navigation, the diff editor): pending exactly while the review
+	 * has a change to show, i.e. derived from the same diff that draws the hunks and counts them. Kept or undone
+	 * everything in view is not a state the entry can get stuck in: an unsaved Undo, a revert or a Keep the engine
+	 * didn't follow used to leave the entry Rejected/Accepted, which hid every later agent write to the file while
+	 * Agent Changes still listed it (#16).
+	 */
+	readonly state: IObservable<ModifiedFileEntryState>;
 
 	// The chat-specific parts of IModifiedFileEntry are constant for agent review:
 	// there is no streaming request, no auto-accept timer, and review mode is always on.
@@ -176,6 +190,7 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 		@ILogService private readonly _logService: ILogService,
 		@INotificationService private readonly _notificationService: INotificationService,
 		@ITextModelService textModelService: ITextModelService,
+		@IDialogService private readonly _dialogService: IDialogService,
 	) {
 		super();
 		this._kind = kind;
@@ -214,8 +229,9 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 		this._changeService.preserveShortMatchingLines = true;
 		this._changeService.alignSimilarLines = true;
 
+		this.state = derived(r => this._changeService.diffInfo.read(r).changes.length > 0 ? ModifiedFileEntryState.Modified : this._resolution.read(r));
 		this._register(this._changeService.onDidAcceptOrRejectAllHunks(state => {
-			this._stateObs.set(state, undefined);
+			this._resolution.set(state, undefined);
 		}));
 
 		// Hunk actions from the widgets, keybindings and commands all go through diffInfo.keep/undo.
@@ -236,6 +252,9 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 	}
 
 	private async _undoHunk(diff: IDocumentDiff2, change: DetailedLineRangeMapping): Promise<boolean> {
+		if (!await this._confirmUndoOfTyping([this._changeService.userTextIn(change)])) {
+			return false;
+		}
 		const wasDirty = this._hasUnsavedUserEdits();
 		const before = this.modifiedModel.getValue();
 		const done = await diff.undo(change);
@@ -255,6 +274,25 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 		return true;
 	}
 
+	/**
+	 * Text the user typed inside a change is part of it (a change is undone as a whole), so undoing the change would
+	 * remove that text as well (#15). Ask first; nothing is changed if the user cancels.
+	 */
+	private async _confirmUndoOfTyping(typed: readonly string[]): Promise<boolean> {
+		const text = typed.filter(t => t.length > 0).join(' … ');
+		if (!text) {
+			return true;
+		}
+		const shown = text.length > 80 ? `${text.slice(0, 77)}…` : text;
+		const { confirmed } = await this._dialogService.confirm({
+			type: 'warning',
+			message: localize('agentReview.undoTyping', "Undo the agent's change and what you typed in it?"),
+			detail: localize('agentReview.undoTypingDetail', "You typed \"{0}\" inside this change in {1}. Undo puts back the text from before the agent's change, so your typing goes too. Ctrl+Z brings both back.", shown, basename(this.modifiedURI)),
+			primaryButton: localize({ key: 'agentReview.undoTypingButton', comment: ['&& denotes a mnemonic'] }, "&&Undo Change and My Typing"),
+		});
+		return confirmed;
+	}
+
 	private _rememberUndo(before: string, saved: boolean): void {
 		this._undoHistory.remember(this.modifiedModel, before, saved);
 	}
@@ -264,11 +302,7 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 	 * pending, not folded into the baseline. (The service saves it if the Undo was saved.)
 	 */
 	private _isEditorUndoOfUndo(e: IModelContentChangedEvent): boolean {
-		if (!this._undoHistory.match(this.modifiedModel, e)) {
-			return false;
-		}
-		this._stateObs.set(ModifiedFileEntryState.Modified, undefined); // e.g. after Undo of the last hunk
-		return true;
+		return !!this._undoHistory.match(this.modifiedModel, e);
 	}
 
 	/**
@@ -334,10 +368,8 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 	async setBaseline(baseline: string, kind: AgentReviewKind): Promise<void> {
 		baseline = await this._instantiationService.invokeFunction(baselineWithUnsavedEdits, this.modifiedURI, baseline);
 		this._kind = kind;
-		const stateChanged = this._stateObs.get() !== ModifiedFileEntryState.Modified;
-		this._stateObs.set(ModifiedFileEntryState.Modified, undefined);
 		// Models keep one EOL, so a baseline that differs only in line endings (mixed CRLF/LF files) is the same here.
-		if (!stateChanged && this.originalModel.getValue(EndOfLinePreference.LF) === baseline.replace(/\r\n/g, '\n')) {
+		if (this.originalModel.getValue(EndOfLinePreference.LF) === baseline.replace(/\r\n/g, '\n')) {
 			return; // e.g. the echo of a Keep that this entry reported itself
 		}
 		await this._changeService.resetDocumentValues(baseline, undefined);
@@ -345,8 +377,8 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 
 	async accept(): Promise<void> {
 		const previousBaseline = this._kind === 'created' ? null : this.originalModel.getValue();
+		this._resolution.set(ModifiedFileEntryState.Accepted, undefined);
 		this._changeService.keep();
-		this._stateObs.set(ModifiedFileEntryState.Accepted, undefined);
 		this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'acceptFile', previousBaseline });
 	}
 
@@ -359,11 +391,15 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 	 * user typed outside the changes stays, it is part of the baseline) and is saved if it had no other
 	 * unsaved edits. Created files: the extension deletes the file.
 	 * @returns where the undo is: `saved` to disk, only in the buffer (`unsaved`, the user's unsaved edits
-	 * keep it dirty), or `deleted` (created file, removed by the extension).
+	 * keep it dirty), `deleted` (created file, removed by the extension), or `cancelled` (the user kept the changes
+	 * rather than lose what they typed inside them).
 	 */
-	async rejectFile(): Promise<'saved' | 'unsaved' | 'deleted'> {
+	async rejectFile(): Promise<'saved' | 'unsaved' | 'deleted' | 'cancelled'> {
+		if (this._kind !== 'created' && !await this._confirmUndoOfTyping(this._changeService.diffInfo.get().changes.map(c => this._changeService.userTextIn(c)))) {
+			return 'cancelled';
+		}
+		this._resolution.set(ModifiedFileEntryState.Rejected, undefined);
 		if (this._kind === 'created') {
-			this._stateObs.set(ModifiedFileEntryState.Rejected, undefined);
 			this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'rejectFile' });
 			return 'deleted';
 		}
@@ -371,7 +407,6 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 		const before = this.modifiedModel.getValue();
 		this._changeService.undo();
 		this._rememberUndo(before, !wasDirty);
-		this._stateObs.set(ModifiedFileEntryState.Rejected, undefined);
 		this._onDidHunkAction.fire({ uri: this.modifiedURI, kind: 'rejected' });
 		if (wasDirty) {
 			return 'unsaved';

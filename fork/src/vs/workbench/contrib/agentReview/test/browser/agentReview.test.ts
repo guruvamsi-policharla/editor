@@ -22,6 +22,7 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/tes
 import { IOverlayWidget, IViewZone, IViewZoneChangeAccessor } from '../../../../../editor/browser/editorBrowser.js';
 import { EditorLayoutInfo, EditorOption } from '../../../../../editor/common/config/editorOptions.js';
 import { EditOperation } from '../../../../../editor/common/core/editOperation.js';
+import { Position } from '../../../../../editor/common/core/position.js';
 import { Range } from '../../../../../editor/common/core/range.js';
 import { ITextModel } from '../../../../../editor/common/model.js';
 import { IEditorWorkerService } from '../../../../../editor/common/services/editorWorker.js';
@@ -38,7 +39,7 @@ import { workbenchInstantiationService } from '../../../../test/browser/workbenc
 import { INotification, INotificationHandle, INotificationService, Severity } from '../../../../../platform/notification/common/notification.js';
 import { IChatWidgetService } from '../../../chat/browser/chat.js';
 import { IChatEditingExplanationModelManager } from '../../../chat/browser/chatEditing/chatEditingExplanationModelManager.js';
-import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntryChangeHunk } from '../../../chat/common/editing/chatEditingService.js';
+import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntryChangeHunk, ModifiedFileEntryState } from '../../../chat/common/editing/chatEditingService.js';
 import { TestWorkerService } from '../../../inlineChat/test/browser/testWorkerService.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { IEditorPane, IResourceDiffEditorInput } from '../../../../common/editor.js';
@@ -52,6 +53,7 @@ import { AGENT_REVIEW_BASELINE_SCHEME, AgentReviewKind, foldUnsavedEdits, IAgent
 import { IFileContent, IFileService } from '../../../../../platform/files/common/files.js';
 import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { AgentReviewService } from '../../browser/agentReviewService.js';
+import { IConfirmation, IConfirmationResult, IDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 
 suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 
@@ -79,6 +81,9 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 	let notifications: INotification[];
 	/** The file on disk, for the entry's view of unsaved edits (disk -> buffer). */
 	let diskContent: string;
+	/** Confirmation dialogs shown, and the answer to give. */
+	let confirms: IConfirmation[];
+	let confirmAnswer: boolean;
 
 	setup(() => {
 		diskContent = DISK;
@@ -93,6 +98,8 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		holdSave = undefined;
 		saveOutcome = 'ok';
 		notifications = [];
+		confirms = [];
+		confirmAnswer = true;
 
 		const workbench = store.add(workbenchInstantiationService(undefined, store));
 		// The real resolver for the baseline models: reference counted, and it disposes a model it resolved when the
@@ -151,6 +158,12 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 			override notify(notification: INotification): INotificationHandle {
 				notifications.push(notification);
 				return new class extends mock<INotificationHandle>() { }();
+			}
+		}());
+		collection.set(IDialogService, new class extends mock<IDialogService>() {
+			override async confirm(confirmation: IConfirmation): Promise<IConfirmationResult> {
+				confirms.push(confirmation);
+				return { confirmed: confirmAnswer };
 			}
 		}());
 		collection.set(IViewsService, new class extends mock<IViewsService>() {
@@ -765,5 +778,85 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		model.applyEdits([EditOperation.replace(new Range(1, 1, 1, 6), 'Opening')]);
 		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 && entry.originalModel.getValue().startsWith('Opening') ? d : undefined));
 		assert.ok(entry.originalModel.getValue().startsWith('Opening sentence.'));
+	});
+	/** Type `text` at the end of `line`, one keystroke (one model edit) at a time, without waiting for the diff. */
+	function typeAtEndOf(line: number, text: string): void {
+		for (const ch of text) {
+			const col = model.getLineMaxColumn(line);
+			model.applyEdits([EditOperation.insert(new Position(line, col), ch)]);
+		}
+	}
+
+	test('#15: typing right after text the agent inserted stays where it was typed, and Undo takes out only the agent text', async () => {
+		model.setValue('The router is a softmax. The gate is learned.\nThis paper asks how the routing works.\n');
+		const { entry, integration } = await showPending('The router is a softmax.\nThis paper asks how the routing works.\n');
+		typeAtEndOf(1, ' ABC');
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && entry.originalModel.getValue().includes('ABC') ? d : undefined));
+		assert.strictEqual(entry.originalModel.getValue(), 'The router is a softmax. ABC\nThis paper asks how the routing works.\n', 'the typing is in the baseline at the place it was typed, not in the next line');
+		await timeout(0); // the toolbars follow the new diff
+
+		await integration.rejectNearestChange(hunkWidgets()[0]);
+		assert.strictEqual(model.getValue(), 'The router is a softmax. ABC\nThis paper asks how the routing works.\n');
+		assert.deepStrictEqual(confirms, [], 'nothing of the user\'s is undone, so no question');
+	});
+
+	test('#15: text typed inside an agent change goes with it, so its Undo asks first; cancelling changes nothing', async () => {
+		model.setValue('Results.\nThe random seed was fixed to 7.\n');
+		const { entry, integration } = await showPending('Results.\n');
+		typeAtEndOf(2, ' QQQ');
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(2).endsWith('QQQ') ? d : undefined));
+		await timeout(0);
+
+		confirmAnswer = false;
+		await integration.rejectNearestChange(hunkWidgets()[0]);
+		assert.strictEqual(confirms.length, 1);
+		assert.ok(String(confirms[0].detail).includes('"QQQ"'), `the dialog shows what would be lost, once: ${confirms[0].detail}`);
+		assert.strictEqual(model.getValue(), 'Results.\nThe random seed was fixed to 7. QQQ\n', 'cancelled: the buffer is untouched');
+		assert.deepStrictEqual(hunkEvents, []);
+
+		confirmAnswer = true;
+		await integration.rejectNearestChange(hunkWidgets()[0]);
+		assert.strictEqual(model.getValue(), 'Results.\n');
+		assert.strictEqual(confirms.length, 2);
+
+		// File Undo asks too.
+		await model.undo();
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 ? d : undefined));
+		confirmAnswer = false;
+		assert.strictEqual(await entry.rejectFile(), 'cancelled');
+		assert.ok(model.getValue().includes('QQQ'));
+	});
+
+	test('#16: after the last change is undone in an unsaved buffer, a later agent write still shows (the entry is never stuck hidden)', async () => {
+		const { entry, integration } = await showPending();
+		dirty = true;
+		await integration.rejectNearestChange(hunkWidgets()[0]);
+		assert.strictEqual(model.getValue(), BASELINE);
+		assert.notStrictEqual(entry.state.get(), ModifiedFileEntryState.Modified, 'nothing left to review');
+
+		// The user reverts the buffer (it is the disk again), then the agent writes once more.
+		dirty = false;
+		modelService.updateModel(model, DISK, EditSources.reloadFromDisk());
+		modelService.updateModel(model, DISK + 'Agent line.\n', EditSources.reloadFromDisk());
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 ? d : undefined));
+		assert.strictEqual(entry.state.get(), ModifiedFileEntryState.Modified);
+		assert.strictEqual(entry.changesCount.get(), 2);
+	});
+
+	test('#16: after the file is kept in the editor, the next agent write to it is pending again without a new push', async () => {
+		const { entry } = await showPending();
+		await entry.accept();
+		assert.strictEqual(entry.state.get(), ModifiedFileEntryState.Accepted);
+		modelService.updateModel(model, DISK + 'Agent line.\n', EditSources.reloadFromDisk());
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 ? d : undefined));
+		assert.strictEqual(entry.state.get(), ModifiedFileEntryState.Modified);
+	});
+
+	test('#19: agent-review lines carry their own classes (high contrast styles them)', async () => {
+		model.setValue('a one\nb TWO, rewritten by the agent completely\nc three\nnew line\n');
+		await showPending('a one\nb two\nc three\n');
+		const inserted = model.getAllDecorations().filter(d => d.options.className?.includes('agent-review-inserted-line'));
+		assert.ok(inserted.length >= 1);
+		assert.ok([...zones.values()].some(z => z.domNode.classList.contains('agent-review-deleted-lines')));
 	});
 });

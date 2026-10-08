@@ -4,10 +4,10 @@
  * saves with and without a formatter (JSON and LaTeX), Keep/Undo, editor undo, restarts and git operations.
  *
  * The invariant checked after every step: an agent-written line is never folded into the baseline except by an
- * explicit Keep, a HEAD move, or staging that file. Agent text is made of unique words (`ag7`); base text has unique
- * words too (`b12`), so:
- *  - an agent word on disk is not in the baseline, unless it was kept, committed or staged, or the user typed on its
- *    line (the user's edit of a line wins, by design);
+ * explicit Keep, staging that file, or a HEAD move whose diff (old HEAD tree -> new HEAD tree) includes that file.
+ * Agent text is made of unique words (`ag7`); base text has unique words too (`b12`), so:
+ *  - an agent word on disk is not in the baseline, unless it was kept, staged or committed with a change to its file,
+ *    or the user typed on its line (the user's edit of a line wins, by design);
  *  - a base word the agent deleted is still in the baseline while it is absent from disk, with the same exceptions
  *    (for a replaced word: the user typed on the line that replaced it).
  *
@@ -108,6 +108,8 @@ export class Stress {
   private readonly exempt = new Set<string>();
   /** Base words the agent deleted -> the agent words of the same write (their touch exempts the deletion). */
   private readonly agentDeleted = new Map<string, string[]>();
+  /** Each file's content in HEAD, to tell which files a commit changed. */
+  private readonly committed = new Map<string, string>();
   private nextAgent = 1;
   private nextUser = 1;
   readonly trail: string[] = [];
@@ -119,7 +121,10 @@ export class Stress {
     private readonly rels: readonly string[],
     private readonly opts: StressOptions,
   ) {
-    for (const rel of rels) { this.buffers.set(rel, { text: files.read(rel), dirty: false, log: [], undo: undefined }); }
+    for (const rel of rels) {
+      this.buffers.set(rel, { text: files.read(rel), dirty: false, log: [], undo: undefined });
+      this.committed.set(rel, files.read(rel));
+    }
   }
 
   /** Initial files: a JSON config and a LaTeX section, every word unique. */
@@ -178,7 +183,7 @@ export class Stress {
         return;
       }
       case 'keep-file':
-        if (await this.backend.keepFile(rel)) { this.exemptAll(this.files.read(rel)); }
+        if (await this.backend.keepFile(rel)) { this.exemptAll(rel, this.files.read(rel)); }
         return;
       case 'undo-hunk':
         if (buf.dirty) { return; }
@@ -206,14 +211,22 @@ export class Stress {
       case 'git-stage':
         if (this.backend.git) {
           await this.backend.git('add', rel);
-          this.exemptAll(this.files.read(rel));
+          this.exemptAll(rel, this.files.read(rel));
         }
         return;
       case 'git-commit':
         if (this.backend.git) {
-          await this.backend.git('commit', '-qam', 'wip', '--allow-empty');
-          for (const r of this.rels) { this.exemptAll(this.files.read(r)); }
-          for (const w of this.agentDeleted.keys()) { this.exempt.add(w); }
+          // Everything (`-a`), or only this file: a commit accepts only the files whose content it changed (#12).
+          const all = this.rng.chance(0.5);
+          if (all) { await this.backend.git('commit', '-qam', 'wip', '--allow-empty'); }
+          else { await this.backend.git('commit', '-qm', 'wip', '--allow-empty', '--', rel); }
+          const inCommit = all ? this.rels : [rel];
+          const changed = inCommit.filter((r) => this.files.read(r) !== this.committed.get(r));
+          this.trail.push(`  committed ${inCommit.join(', ')}; changed: ${changed.join(', ') || 'nothing'}`);
+          for (const r of changed) {
+            this.committed.set(r, this.files.read(r));
+            this.exemptAll(r, this.files.read(r));
+          }
         }
         return;
       case 'git-stash':
@@ -226,9 +239,12 @@ export class Stress {
     }
   }
 
-  private exemptAll(text: string): void {
+  /** `rel` was accepted whole as `text`: its agent words, and base words the agent deleted from it, may be in the baseline. */
+  private exemptAll(rel: string, text: string): void {
     for (const w of words(text)) { this.exempt.add(w); }
-    for (const [w, by] of this.agentDeleted) { if (!text.includes(w) || by.some((a) => this.exempt.has(a))) { this.exempt.add(w); } }
+    for (const [w, by] of this.agentDeleted) {
+      if ((this.wasIn(rel, w) && !text.includes(w)) || by.some((a) => this.exempt.has(a))) { this.exempt.add(w); }
+    }
   }
 
   // ------------------------------------------------------------- agent

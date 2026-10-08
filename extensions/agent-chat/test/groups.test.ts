@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { CLAUDE, CODEX, configControls, type acp } from '@editor/acp-client';
-import { changedSelections, groupsFromControls, signInGroup, SIGN_IN_GROUP } from '../src/groups.js';
+import { changedSelections, groupsFromControls, modelChoices, signInGroup, SIGN_IN_GROUP } from '../src/groups.js';
 
 // Recorded from claude-agent-acp 0.87.0 (session/new with Bypass disabled).
 const fixture = JSON.parse(readFileSync(new URL('../../../packages/acp-client/test/fixtures/claude-0.87.0.json', import.meta.url), 'utf8'));
@@ -46,6 +46,22 @@ describe('pickers from config controls', () => {
 		expect(changedSelections(groups, controls)).toEqual([]);
 		const changed = groups.map(g => (g.id === 'mode' ? { ...g, selected: g.items.find(i => i.id === 'plan') } : g));
 		expect(changedSelections(changed, controls)).toEqual([{ id: 'mode', value: 'plan', previous: 'default' }]);
+	});
+
+	it('the footer pickers show which setting they are: each choice has its group\'s icon (the footer shows the selected item\'s)', () => {
+		const groups = groupsFromControls(configControls(claude, CLAUDE), id => ({ id }) as never);
+		expect(groups.map(g => g.selected!.name)).toEqual(['Manual', 'Default', 'Off']);
+		expect(groups.map(g => (g.selected!.icon as { id?: string } | undefined)?.id)).toEqual(['shield', 'lightbulb', 'zap']);
+		expect(groups.map(g => g.name)).toEqual(['Mode', 'Effort', 'Fast mode']);
+	});
+
+	it('the model picker names the model a "Default (recommended)" choice stands for', () => {
+		const model = claude.find(o => o.id === 'model')! as acp.SessionConfigOption & { options: { value: string; name: string; description?: string }[] };
+		const choices = modelChoices(model.options.map(o => ({ id: o.value, name: o.name, ...(o.description ? { description: o.description } : {}) })));
+		expect(choices[0]).toEqual({ id: 'default', name: 'Opus 5.5 (default)', description: 'Default (recommended): Opus 5.5' });
+		expect(choices.find(c => c.id === 'haiku')!.name).toBe('Haiku 5.5');
+		// A "Default" whose description isn't a model name stays as it is.
+		expect(modelChoices([{ id: 'default', name: 'Default', description: 'Uses the model from your config file' }])[0]!.name).toBe('Default');
 	});
 
 	it('the sign-in picker runs the login and offers a retry', () => {

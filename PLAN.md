@@ -59,8 +59,9 @@ The core. Keep it editor-independent so it can be reused (Zed, Neovim, etc.).
 - **Ignore rules.** Respect `.gitignore`, plus built-in defaults (`node_modules`, build dirs, LaTeX artifacts: `.aux`, `.log`, `.out`, `.toc`, `.bbl`, `.blg`, `.fls`, `.fdb_latexmk`, `.synctex.gz`, and the build-output PDF next to a `.tex` file, e.g. `main.pdf` for `main.tex`), plus Claude Code's `.claude/settings.local.json` (its "always allow" answers), plus a user config list. Other PDFs, such as figures, stay reviewable.
 - **Git operations auto-accept.** Detect git operations and move the baseline to the new state instead of flooding review:
   - Index-only change (e.g. `git add`): accept pending hunks only in the staged files.
-  - Any HEAD move (commit, checkout, pull, merge, rebase, reset, stash affecting HEAD): accept all pending hunks workspace-wide as part of the new baseline.
-  - If an agent runs `git add`/`git commit` itself, it is bypassing the review model: we make no review guarantees, and pending hunks are accepted (and committed) under the rules above.
+  - Any HEAD move (commit, checkout, pull, merge, rebase, reset, cherry-pick, stash affecting HEAD): accept, as whole files (baseline = the file on disk), only the paths that differ between the old and the new HEAD tree (`git diff-tree -M <old> <new>`). Both paths of a rename count, and a deletion is accepted as a deletion. Pending changes in every other file stay pending. (Guru's decision of Oct 8, 2026, #12: "if you commit we provide no meaningful guarantees", so committed files become Keep File; until then any HEAD move accepted everything workspace-wide.) If git can't produce the diff, every pending change is accepted, as before.
+  - A stash-only move (`git stash` / `git stash pop` move `refs/stash`, not HEAD) accepts nothing: the changes come back with the pop.
+  - If an agent runs `git add`/`git commit` itself, it is bypassing the review model: we make no review guarantees, and the files it stages or commits are accepted under the rules above.
 - **Persistence.** Pending state survives editor restarts.
 - **Initialization.** On first open, baseline = current disk state (nothing pending).
 
@@ -171,7 +172,7 @@ For agents that speak [ACP](https://agentclientprotocol.com) (Claude Code via [c
 - Agent creates, deletes, or renames files → reviewable units (delete + create with identical content = rename).
 - Formatter or linter on save → if triggered by the editor, changes inside pending agent hunks stay pending and changes elsewhere fold into the baseline; external if run by the agent.
 - `git add` (index-only change) → accept pending hunks in the staged files only.
-- Any HEAD move (commit, checkout, pull, merge, rebase, reset, stash affecting HEAD) → accept all pending hunks workspace-wide as the new baseline. An agent running `git add`/`git commit` bypasses review.
+- Any HEAD move (commit, checkout, pull, merge, rebase, reset, cherry-pick, stash affecting HEAD) → accept, whole, only the files that differ between the old and the new HEAD tree (renames: both paths; deletions as deletions); every other pending change stays pending (Guru, Oct 8 2026, #12). An agent running `git add`/`git commit` bypasses review for the files it stages or commits.
 - Build artifacts (LaTeX auxiliary files and output PDFs, `node_modules`, `dist`) → ignored.
 - Large and binary files → file-level accept/reject only.
 - Editor closed while the agent keeps editing → changes appear as pending on next open.

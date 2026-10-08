@@ -101,6 +101,17 @@ describe('ReviewController', () => {
     expect(ctl.pendingFiles.map((f) => [f.rel, f.kind, f.inline])).toEqual([['paper.tex', 'modified', true]]);
   });
 
+  it('every external write to a pending file is pushed again, even with the same baseline (the editor may not show it any more, #16)', async () => {
+    fs.writeFileSync(path.join(root, 'a.tex'), 'one\n');
+    await open();
+    const abs = await agentWrite('a.tex', 'one\nAGENT\n');
+    expect(core.calls).toEqual(['set a.tex']);
+    // The editor's review may have stopped showing the file (an unsaved Undo, then a revert); the next write must show.
+    await agentWrite('a.tex', 'one\nAGENT\nAGAIN\n');
+    expect(core.calls).toEqual(['set a.tex', 'set a.tex']);
+    expect(core.shown.get(abs)?.baseline).toBe('one\n');
+  });
+
   it('closing a diff or editor of a pending file (its document closes) changes nothing: still pending, same baseline', async () => {
     await open();
     const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\n');
@@ -394,15 +405,22 @@ describe('ReviewController', () => {
     ]);
   });
 
-  it('a git commit accepts everything (HEAD moved)', async () => {
-    const git = (...args: string[]) => execFileSync('git', args, { cwd: root, stdio: 'pipe' });
+  it('a git commit accepts the files it changed; another file\'s pending change stays (#12)', async () => {
+    const git = (...args: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: root, stdio: 'pipe' });
     git('init', '-q');
-    git('-c', 'user.name=t', '-c', 'user.email=t@t', 'add', '.');
-    git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'init');
+    git('add', '.');
+    git('commit', '-qm', 'init');
     await open(true);
     const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\n');
     expect(core.shown.has(abs)).toBe(true);
-    git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qam', 'agent work');
+    fs.writeFileSync(path.join(root, '.gitignore'), '*.log\n');
+    git('add', '.gitignore');
+    git('commit', '-qm', 'ignore logs');
+    await ctl.handleFsEvents([path.join(root, '.git', 'HEAD'), path.join(root, '.gitignore')]);
+    await ctl.idle();
+    expect(ctl.pendingFiles.map((f) => f.rel)).toEqual(['paper.tex']);
+    expect(core.shown.get(abs)).toEqual({ baseline: 'Intro.\nMethods.\nResults.\n', kind: 'modified' });
+    git('commit', '-qam', 'agent work');
     await ctl.handleFsEvents([path.join(root, '.git', 'HEAD')]);
     await ctl.idle();
     expect(ctl.pendingFiles).toEqual([]);

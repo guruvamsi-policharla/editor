@@ -9,9 +9,14 @@ export function baselineUri(absPath: string): vscode.Uri {
   return vscode.Uri.file(absPath).with({ scheme: BASELINE_SCHEME });
 }
 
-/** An empty document standing for a file that no longer exists (the right side of a deleted file's diff). */
+/**
+ * An empty document standing for a file that no longer exists (the right side of a deleted file's diff). A scheme of
+ * its own, so that the diff's title bar can offer Keep Deletion / Restore File (`resourceScheme`).
+ */
+export const DELETED_SCHEME = 'agent-review-deleted';
+
 export function deletedUri(absPath: string): vscode.Uri {
-  return vscode.Uri.file(absPath).with({ scheme: BASELINE_SCHEME, query: 'deleted' });
+  return vscode.Uri.file(absPath).with({ scheme: DELETED_SCHEME });
 }
 
 export class BaselineContentProvider implements vscode.TextDocumentContentProvider, vscode.Disposable {
@@ -27,7 +32,7 @@ export class BaselineContentProvider implements vscode.TextDocumentContentProvid
   }
 
   async provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
-    if (uri.query === 'deleted') { return ''; }
+    if (uri.scheme === DELETED_SCHEME) { return ''; }
     return (await this.ctl.baselineText(uri.fsPath)) ?? '';
   }
 

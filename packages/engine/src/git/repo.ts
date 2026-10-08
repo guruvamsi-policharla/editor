@@ -182,27 +182,63 @@ export async function readIndex(fs: FileSystem, repo: GitRepoInfo): Promise<Map<
   return parseIndex(await fs.readFile(file), repo.objectFormat);
 }
 
-/** Reads blob contents from the user's repository. Injectable for tests and non-Node hosts. */
+/** Reads objects from the user's repository. Injectable for tests and non-Node hosts. */
 export interface GitObjectReader {
   readBlob(repo: GitRepoInfo, oid: string): Promise<Uint8Array | undefined>;
+  /**
+   * Repo-relative paths that differ between two commits' trees (both sides of a rename; null: no commit, i.e. an
+   * unborn branch). Undefined if git could not tell.
+   */
+  changedPaths(repo: GitRepoInfo, from: string | null, to: string | null): Promise<string[] | undefined>;
 }
 
-/** Default reader: `git cat-file blob <oid>`, read-only, no optional locks. */
+const OID_RE = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+
+function runGit(repo: GitRepoInfo, args: string[]): Promise<Buffer | undefined> {
+  return new Promise((resolve) => {
+    execFile(
+      'git',
+      ['--git-dir', repo.gitDir, ...args],
+      {
+        encoding: 'buffer',
+        maxBuffer: 512 * 1024 * 1024,
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+        windowsHide: true,
+      },
+      (err, stdout) => resolve(err ? undefined : stdout),
+    );
+  });
+}
+
+/** Paths in `git diff-tree -z --name-status` output: one per entry, two for renames and copies. */
+export function parseNameStatus(out: string): string[] {
+  const fields = out.split('\0');
+  const paths: string[] = [];
+  for (let i = 0; i < fields.length;) {
+    const status = fields[i++]!;
+    if (!status) { continue; }
+    const n = status.startsWith('R') || status.startsWith('C') ? 2 : 1;
+    for (let k = 0; k < n && i < fields.length; k++) { paths.push(fields[i++]!); }
+  }
+  return paths;
+}
+
+/** Default reader: `git cat-file` / `git diff-tree` / `git ls-tree`, read-only, no optional locks. */
 export const gitCliObjectReader: GitObjectReader = {
-  readBlob(repo, oid) {
-    if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(oid)) { return Promise.resolve(undefined); }
-    return new Promise((resolve) => {
-      execFile(
-        'git',
-        ['--git-dir', repo.gitDir, 'cat-file', 'blob', oid],
-        {
-          encoding: 'buffer',
-          maxBuffer: 512 * 1024 * 1024,
-          env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
-          windowsHide: true,
-        },
-        (err, stdout) => resolve(err ? undefined : new Uint8Array(stdout)),
-      );
-    });
+  async readBlob(repo, oid) {
+    if (!OID_RE.test(oid)) { return undefined; }
+    const out = await runGit(repo, ['cat-file', 'blob', oid]);
+    return out ? new Uint8Array(out) : undefined;
+  },
+  async changedPaths(repo, from, to) {
+    if (from === to) { return []; }
+    if ((from && !OID_RE.test(from)) || (to && !OID_RE.test(to))) { return undefined; }
+    if (from && to) {
+      const out = await runGit(repo, ['diff-tree', '-r', '-M', '--name-status', '-z', from, to]);
+      return out ? parseNameStatus(out.toString('utf8')) : undefined;
+    }
+    // One side is an unborn branch: every file of the other commit.
+    const out = await runGit(repo, ['ls-tree', '-r', '--name-only', '-z', (from ?? to)!]);
+    return out ? out.toString('utf8').split('\0').filter(Boolean) : undefined;
   },
 };

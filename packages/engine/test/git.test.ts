@@ -1,13 +1,16 @@
 /**
  * Git-operation detection against real repositories (PLAN.md §5.1, §7):
  *  - index-only change (git add): accept pending hunks only in the staged files
- *  - any HEAD move (commit, checkout, reset, merge, rebase): accept everything; `git stash` / pop accept nothing
+ *  - a HEAD move (commit, checkout, reset, merge, rebase): accept, whole, only the files that differ between the old and
+ *    the new HEAD tree (both sides of a rename, deletions); every other pending change stays pending (#12, Guru's
+ *    decision of Oct 8 2026)
+ *  - `git stash` / pop accept nothing
  *  - the engine never touches the user's index, HEAD, refs, or stash
  */
 import * as nodeFs from 'node:fs';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ReviewEngine } from '../src/index.js';
+import { gitCliObjectReader, ReviewEngine } from '../src/index.js';
 import { baselineFiles, DiskWorkspace, gitWithInput, hasGit } from './helpers.js';
 
 describe.runIf(hasGit())('git operations', () => {
@@ -94,15 +97,99 @@ describe.runIf(hasGit())('git operations', () => {
     expect(pendingPaths()).toEqual([]);
   });
 
-  it('a commit (HEAD move) accepts all pending changes workspace-wide', async () => {
-    await agentWrite('a.txt', 'staged\n');
-    await agentWrite('b.txt', 'unstaged\n');
+  it('#12: a commit of another file leaves the pending changes in this file pending', async () => {
+    await agentWrite('a.txt', 'a1\nagent\na3\na4\na5\na6\na7\n');
+    await agentWrite('.gitignore', '*.log\n');
+    ws.git('add', '.gitignore');
+    ws.git('commit', '-qm', 'ignore logs'); // #12's repro: commit only .gitignore
+    expect(await engine.checkGit()).toEqual({ kind: 'head', accepted: ['.gitignore'] });
+    expect(pendingPaths()).toEqual(['a.txt']);
+    expect(await baselineFiles(engine)).toMatchObject({ 'a.txt': 'a1\na2\na3\na4\na5\na6\na7\n' });
+  });
+
+  it('a commit accepts the files it changed, whole, and nothing else', async () => {
+    await agentWrite('a.txt', 'a1\nA2\na3\na4\na5\nA6\na7\n');
+    await agentWrite('b.txt', 'agent b\n');
+    await agentWrite('docs/c.md', 'agent c\n');
     await agentWrite('untracked.txt', 'u\n');
-    ws.git('commit', '-qam', 'agent commit'); // what an agent running git itself does
-    const r = await engine.checkGit();
-    expect(r.kind).toBe('head');
+    ws.git('commit', '-qm', 'agent commit', '--', 'a.txt', 'b.txt'); // what an agent running git itself does
+    expect(await engine.checkGit()).toEqual({ kind: 'head', accepted: ['a.txt', 'b.txt'] });
+    expect(pendingPaths()).toEqual(['docs/c.md', 'untracked.txt']);
+    expect(await baselineFiles(engine)).toMatchObject({ 'a.txt': 'a1\nA2\na3\na4\na5\nA6\na7\n', 'b.txt': 'agent b\n', 'docs/c.md': 'c\n' });
+    expect(await baselineFiles(engine)).not.toHaveProperty('untracked.txt');
+  });
+
+  it('a commit of part of a file accepts the whole file as it is on disk', async () => {
+    await agentWrite('a.txt', 'a1\nA2\na3\na4\na5\nA6\na7\n');
+    const oid = gitWithInput(ws.root, 'a1\nA2\na3\na4\na5\na6\na7\n', 'hash-object', '-w', '--stdin').trim();
+    ws.git('update-index', '--cacheinfo', `100644,${oid},a.txt`);
+    ws.git('commit', '-qm', 'first hunk only');
+    expect(await engine.checkGit()).toEqual({ kind: 'head', accepted: ['a.txt'] });
     expect(pendingPaths()).toEqual([]);
-    expect(await baselineFiles(engine)).toMatchObject({ 'a.txt': 'staged\n', 'b.txt': 'unstaged\n', 'untracked.txt': 'u\n' });
+  });
+
+  it('a commit with a rename accepts both paths', async () => {
+    await engine.handleFsEvents([ws.remove('b.txt'), ws.write('renamed.txt', 'b\n')]);
+    await agentWrite('a.txt', 'agent\n');
+    expect(pendingPaths()).toEqual(['a.txt', 'renamed.txt']); // the engine's rename (b.txt -> renamed.txt)
+    ws.git('add', '-A', 'b.txt', 'renamed.txt');
+    ws.git('commit', '-qm', 'rename', '--', 'b.txt', 'renamed.txt');
+    expect(ws.git('show', '--name-status', '-M', '--format=', 'HEAD').trim()).toBe('R100\tb.txt\trenamed.txt');
+    expect((await engine.checkGit()).kind).toBe('head');
+    expect(pendingPaths()).toEqual(['a.txt']);
+    expect(await baselineFiles(engine)).toMatchObject({ 'renamed.txt': 'b\n' });
+    expect(await baselineFiles(engine)).not.toHaveProperty('b.txt');
+  });
+
+  it('a commit with a deletion accepts the deletion', async () => {
+    await engine.handleFsEvents([ws.remove('docs/c.md')]);
+    await agentWrite('b.txt', 'agent\n');
+    ws.git('rm', '-q', '--cached', 'docs/c.md');
+    ws.git('commit', '-qm', 'delete c');
+    expect(await engine.checkGit()).toEqual({ kind: 'head', accepted: ['docs/c.md'] });
+    expect(pendingPaths()).toEqual(['b.txt']);
+    expect(await baselineFiles(engine)).not.toHaveProperty('docs/c.md');
+  });
+
+  it('a commit plus a git add of another file in the same batch: the staged file is accepted as staging', async () => {
+    await agentWrite('a.txt', 'agent a\n');
+    await agentWrite('b.txt', 'agent b\n');
+    await agentWrite('docs/c.md', 'agent c\n');
+    ws.git('commit', '-qm', 'a', '--', 'a.txt');
+    ws.git('add', 'b.txt');
+    expect(await engine.checkGit()).toEqual({ kind: 'head', accepted: ['a.txt', 'b.txt'] });
+    expect(pendingPaths()).toEqual(['docs/c.md']);
+  });
+
+  it('if git cannot tell what a HEAD move changed, every pending change is accepted (the rule before #12)', async () => {
+    await engine.close();
+    engine = await ws.open({ gitObjectReader: { ...gitCliObjectReader, changedPaths: () => Promise.resolve(undefined) } });
+    await agentWrite('a.txt', 'agent\n');
+    await agentWrite('b.txt', 'agent b\n');
+    ws.git('commit', '-qm', 'a', '--', 'a.txt');
+    expect(await engine.checkGit()).toEqual({ kind: 'head', accepted: ['a.txt', 'b.txt'] });
+  });
+
+  it('checkout of another branch accepts the files that differ between the branches; the rest stays pending', async () => {
+    ws.git('checkout', '-qb', 'feature');
+    ws.write('a.txt', 'feature version\n');
+    ws.write('feature-only.txt', 'f\n');
+    ws.git('add', '.');
+    ws.git('commit', '-qm', 'feature');
+    ws.git('checkout', '-q', 'main');
+    await engine.handleFsEvents([ws.abs('a.txt'), ws.abs('feature-only.txt')]);
+    expect(pendingPaths()).toEqual([]);
+    await agentWrite('b.txt', 'pending across checkout\n');
+    ws.git('checkout', '-q', 'feature'); // b.txt is the same on both branches: git carries the change over
+    expect(await engine.checkGit()).toEqual({ kind: 'head', accepted: ['a.txt', 'feature-only.txt'] });
+    await engine.handleFsEvents([ws.abs('a.txt'), ws.abs('feature-only.txt')]);
+    expect(pendingPaths()).toEqual(['b.txt']);
+    expect(await baselineFiles(engine)).toMatchObject({ 'a.txt': 'feature version\n', 'feature-only.txt': 'f\n', 'b.txt': 'b\n' });
+    ws.git('checkout', '-q', 'main');
+    await engine.checkGit();
+    expect(pendingPaths()).toEqual(['b.txt']);
+    expect(await baselineFiles(engine)).toMatchObject({ 'a.txt': 'a1\na2\na3\na4\na5\na6\na7\n', 'b.txt': 'b\n' });
+    expect(await baselineFiles(engine)).not.toHaveProperty('feature-only.txt');
   });
 
   it('checkout of another branch does not flood review', async () => {
@@ -121,8 +208,8 @@ describe.runIf(hasGit())('git operations', () => {
     await engine.checkGit();
     ws.git('checkout', '-q', 'feature');
     await engine.handleFsEvents([ws.abs('a.txt'), ws.abs('feature-only.txt')]);
-    expect(pendingPaths()).toEqual([]);
-    expect(await baselineFiles(engine)).toMatchObject({ 'a.txt': 'feature version\n', 'b.txt': 'pending before checkout\n' });
+    expect(pendingPaths()).toEqual(['b.txt']); // not in the checkout's diff
+    expect(await baselineFiles(engine)).toMatchObject({ 'a.txt': 'feature version\n', 'b.txt': 'b\n' });
   });
 
   it('reset --hard is a HEAD-affecting operation', async () => {
@@ -133,6 +220,18 @@ describe.runIf(hasGit())('git operations', () => {
     await engine.handleFsEvents([ws.abs('a.txt')]);
     expect(pendingPaths()).toEqual([]);
     expect(await baselineFiles(engine)).toMatchObject({ 'a.txt': 'a1\na2\na3\na4\na5\na6\na7\n' });
+  });
+
+  it('reset (mixed) to another commit accepts the files in its diff; an untouched pending file stays pending', async () => {
+    await agentWrite('a.txt', 'agent a\n');
+    ws.git('commit', '-qam', 'tmp');
+    await engine.checkGit();
+    await agentWrite('b.txt', 'agent b\n');
+    await agentWrite('a.txt', 'agent a, again\n');
+    ws.git('reset', '-q', 'HEAD~1'); // the working tree keeps both files
+    expect(await engine.checkGit()).toEqual({ kind: 'head', accepted: ['a.txt'] });
+    expect(pendingPaths()).toEqual(['b.txt']);
+    expect(await baselineFiles(engine)).toMatchObject({ 'a.txt': 'agent a, again\n', 'b.txt': 'b\n' });
   });
 
   it('git stash + pop (refs/stash moves, HEAD does not) accepts nothing: the pending changes come back with pop', async () => {
@@ -157,8 +256,9 @@ describe.runIf(hasGit())('git operations', () => {
     ws.git('commit', '-qam', 'while closed');
     ws.write('b.txt', 'after commit\n');
     engine = await ws.open();
-    // The commit accepted everything on disk at open time (including later edits): no review guarantees across git ops.
-    expect(pendingPaths()).toEqual([]);
+    // The commit accepted its file as it was on disk at open time; b.txt, outside the commit, is pending.
+    expect(pendingPaths()).toEqual(['b.txt']);
+    expect(await baselineFiles(engine)).toMatchObject({ 'a.txt': 'agent\n', 'b.txt': 'b\n' });
   });
 
   it('waits while git holds index.lock, then applies the operation', async () => {
