@@ -37,7 +37,7 @@ import { ILanguageService } from '../../../../editor/common/languages/language.j
 import { EndOfLinePreference, ITextModel } from '../../../../editor/common/model.js';
 import { createTextBufferFactory } from '../../../../editor/common/model/textModel.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
-import { IResolvedTextEditorModel } from '../../../../editor/common/services/resolverService.js';
+import { IResolvedTextEditorModel, ITextModelService } from '../../../../editor/common/services/resolverService.js';
 import { IModelContentChangedEvent } from '../../../../editor/common/textModelEvents.js';
 import { localize } from '../../../../nls.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
@@ -150,6 +150,8 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 
 	private readonly _changeService: ChatEditingTextModelChangeService;
 	private readonly _integrations = this._register(new DisposableMap<IEditorPane, IModifiedFileEntryEditorIntegration>());
+	/** Per pane: drops its integration when the pane's code editor goes (its group or window was closed). */
+	private readonly _integrationEditorListeners = this._register(new DisposableMap<IEditorPane>());
 
 	/** The save of the last Undo, while it runs, and the buffer version it writes. */
 	private _undoSave: { readonly versionId: number; readonly done: Promise<void> } | undefined;
@@ -173,6 +175,7 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 		@ITextFileService private readonly _textFileService: ITextFileService,
 		@ILogService private readonly _logService: ILogService,
 		@INotificationService private readonly _notificationService: INotificationService,
+		@ITextModelService textModelService: ITextModelService,
 	) {
 		super();
 		this._kind = kind;
@@ -185,6 +188,17 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 			this.originalURI,
 			false
 		));
+		// The side-by-side diff (Toggle Diff) resolves the baseline through ITextModelService, and when the diff closes
+		// and drops the last reference, the resolver disposes the model it resolved: this entry's baseline. The inline
+		// review then lost its original side (no highlights, no Keep/Undo) while the file stayed pending, and the diff
+		// could not be opened again. Hold a reference for the entry's lifetime, as chat's entries do.
+		textModelService.createModelReference(this.originalURI).then(ref => {
+			if (this._store.isDisposed) {
+				ref.dispose();
+			} else {
+				this._register(ref);
+			}
+		}, err => this._logService.error('[agentReview] could not hold the baseline model', err));
 
 		this._changeService = this._register(this._instantiationService.createInstance(
 			ChatEditingTextModelChangeService,
@@ -383,6 +397,10 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 			}
 			value = this.createEditorIntegration(codeEditor);
 			this._integrations.set(pane, value);
+			this._integrationEditorListeners.set(pane, codeEditor.onDidDispose(() => {
+				this._integrationEditorListeners.deleteAndDispose(pane);
+				this._integrations.deleteAndDispose(pane);
+			}));
 		}
 		return value;
 	}

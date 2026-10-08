@@ -579,7 +579,7 @@ index 2e43b458..35c53899 100644
  
  	async reject(): Promise<boolean> {
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts
-index 01fe8016..13568ccd 100644
+index 01fe8016..02c409a7 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts
 +++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts
 @@ -29,7 +29,6 @@ import { IDocumentDiffItemWithMultiDiffEditorItem, MultiDiffEditorInput } from '
@@ -649,7 +649,7 @@ index 01fe8016..13568ccd 100644
  			precondition: ContextKeyExpr.and(ctxHasEditorModification, ctxIsCurrentlyBeingModified.negate()),
  			icon: _keep
  				? Codicon.check
-@@ -306,12 +309,12 @@ export class RejectHunkAction extends AcceptRejectHunkAction {
+@@ -306,12 +309,13 @@ export class RejectHunkAction extends AcceptRejectHunkAction {
  	}
  }
  
@@ -662,10 +662,11 @@ index 01fe8016..13568ccd 100644
 -			category: CHAT_CATEGORY,
 +			title: localize2('agentReview.diff', 'Toggle Diff Editor for Agent Changes'),
 +			category: AGENT_REVIEW_CATEGORY,
++			f1: true, // agent review: also in the command palette
  			toggled: {
  				condition: ContextKeyExpr.or(EditorContextKeys.inDiffEditor, ActiveEditorContext.isEqualTo(TEXT_DIFF_EDITOR_ID))!,
  				icon: Codicon.goToFile,
-@@ -340,11 +343,11 @@ class ToggleDiffAction extends ChatEditingEditorAction {
+@@ -340,11 +344,11 @@ class ToggleDiffAction extends ChatEditingEditorAction {
  	}
  }
  
@@ -679,7 +680,7 @@ index 01fe8016..13568ccd 100644
  			f1: true,
  			precondition: ContextKeyExpr.and(ctxHasEditorModification, ctxIsCurrentlyBeingModified.negate()),
  			keybinding: {
-@@ -388,8 +391,8 @@ export class AcceptAllEditsAction extends ChatEditingEditorAction {
+@@ -388,8 +392,8 @@ export class AcceptAllEditsAction extends ChatEditingEditorAction {
  	constructor() {
  		super({
  			id: AcceptAllEditsAction.ID,

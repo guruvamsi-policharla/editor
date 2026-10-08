@@ -10,7 +10,7 @@
 // keybindings, and explorer decorations.
 
 import { Emitter, Event } from '../../../../base/common/event.js';
-import { Disposable, DisposableMap, IDisposable } from '../../../../base/common/lifecycle.js';
+import { combinedDisposable, Disposable, DisposableMap, IDisposable } from '../../../../base/common/lifecycle.js';
 import { ResourceMap } from '../../../../base/common/map.js';
 import { IObservable, IReader, observableValue } from '../../../../base/common/observable.js';
 import { isEqual } from '../../../../base/common/resources.js';
@@ -20,6 +20,7 @@ import { ITextModel } from '../../../../editor/common/model.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
 import { ITextModelContentProvider, ITextModelService } from '../../../../editor/common/services/resolverService.js';
 import { createDecorator, IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { ILogService } from '../../../../platform/log/common/log.js';
 import { IUndoRedoService, UndoRedoElementType } from '../../../../platform/undoRedo/common/undoRedo.js';
 import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntry } from '../../chat/common/editing/chatEditingService.js';
 import { SaveReason } from '../../../common/editor.js';
@@ -117,6 +118,7 @@ export class AgentReviewService extends Disposable implements IAgentReviewServic
 		@IInstantiationService private readonly _instantiationService: IInstantiationService,
 		@IUndoRedoService private readonly _undoRedoService: IUndoRedoService,
 		@ITextFileService private readonly _textFileService: ITextFileService,
+		@ILogService private readonly _logService: ILogService,
 	) {
 		super();
 		this._register(this._undoHistory);
@@ -173,13 +175,36 @@ export class AgentReviewService extends Disposable implements IAgentReviewServic
 			return this._store.isDisposed || !this._latest.get(uri) ? undefined : this._createEntry(uri);
 		}
 		const entry = this._instantiationService.createInstance(AgentReviewEntry, ref, baseline, latest.kind, this._undoHistory);
-		const listener = entry.onDidHunkAction(e => {
-			this._onDidHunkAction.fire(e);
-			this._pushUndoForKeep(e);
-		});
+		const listener = combinedDisposable(
+			entry.onDidHunkAction(e => {
+				this._onDidHunkAction.fire(e);
+				this._pushUndoForKeep(e);
+			}),
+			entry.originalModel.onWillDispose(() => this._recreateEntry(uri, entry)),
+		);
 		this._entries.set(uri, { entry, listener });
 		this._session.entriesObs.set([...this._session.entriesObs.get(), entry], undefined);
 		return entry;
+	}
+
+	/**
+	 * The entry holds its baseline model, so nothing else should dispose it. If something does anyway, the review would
+	 * lose its original side while the file is still pending: rebuild the entry from the same baseline instead.
+	 */
+	private _recreateEntry(uri: URI, entry: AgentReviewEntry): void {
+		if (this._entries.get(uri)?.entry !== entry) {
+			return; // removed or replaced: the entry disposes its own baseline
+		}
+		const baseline = entry.originalModel.getValue();
+		const kind = entry.kind;
+		this._logService.warn('[agentReview] baseline model disposed while the file is pending; recreating the review', uri.toString());
+		setTimeout(() => { // not while the model is being disposed
+			if (this._entries.get(uri)?.entry !== entry) {
+				return;
+			}
+			this.remove(uri);
+			this.setBaseline(uri, baseline, kind);
+		}, 0);
 	}
 
 	/**

@@ -48,7 +48,7 @@ import { IContextKeyService } from '../../../../../platform/contextkey/common/co
 import { ContextKeyService } from '../../../../../platform/contextkey/browser/contextKeyService.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { AcceptAction, AcceptAllEditsAction, AcceptHunkAction, NavigateAction, RejectAction, RejectHunkAction, ToggleAccessibleDiffViewAction, ToggleDiffAction } from '../../../chat/browser/chatEditing/chatEditingEditorActions.js';
-import { AgentReviewKind, foldUnsavedEdits, IAgentReviewHunkEvent } from '../../browser/agentReviewEntry.js';
+import { AGENT_REVIEW_BASELINE_SCHEME, AgentReviewKind, foldUnsavedEdits, IAgentReviewHunkEvent } from '../../browser/agentReviewEntry.js';
 import { IFileContent, IFileService } from '../../../../../platform/files/common/files.js';
 import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { AgentReviewService } from '../../browser/agentReviewService.js';
@@ -94,14 +94,21 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		saveOutcome = 'ok';
 		notifications = [];
 
+		const workbench = store.add(workbenchInstantiationService(undefined, store));
+		// The real resolver for the baseline models: reference counted, and it disposes a model it resolved when the
+		// last reference goes (as when a side-by-side diff closes). The file itself is a plain model here.
+		const resolver = workbench.get(ITextModelService);
 		const collection = new ServiceCollection();
 		collection.set(IEditorWorkerService, new SyncDescriptor(TestWorkerService));
 		collection.set(ITextModelService, new class extends mock<ITextModelService>() {
 			override async createModelReference(resource: URI): Promise<IReference<IResolvedTextEditorModel>> {
+				if (resource.scheme === AGENT_REVIEW_BASELINE_SCHEME) {
+					return resolver.createModelReference(resource);
+				}
 				return { dispose: () => { }, object: { textEditorModel: modelService.getModel(resource) ?? model, getLanguageId: () => 'latex' } as IResolvedTextEditorModel };
 			}
-			override registerTextModelContentProvider(_scheme: string, _provider: ITextModelContentProvider): IDisposable {
-				return Disposable.None;
+			override registerTextModelContentProvider(scheme: string, provider: ITextModelContentProvider): IDisposable {
+				return resolver.registerTextModelContentProvider(scheme, provider);
 			}
 		}());
 		collection.set(IChatEditingService, new class extends mock<IChatEditingService>() {
@@ -150,7 +157,7 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 			override readonly onDidChangeViewVisibility = Event.None;
 		}());
 
-		insta = store.add(store.add(workbenchInstantiationService(undefined, store)).createChild(collection));
+		insta = store.add(workbench.createChild(collection));
 		store.add(insta.get(IEditorWorkerService) as TestWorkerService);
 		modelService = insta.get(IModelService);
 		model = store.add(modelService.createModel(DISK, null, uri, false));
@@ -163,12 +170,13 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 
 	teardown(() => store.clear());
 
+	let zoneIds = 0;
+
 	/** A code editor without a DOM view: records view zones and overlay widgets instead. */
 	function createEditor(instantiationService: TestInstantiationService): ITestCodeEditor {
 		const e = store.add(instantiateTestCodeEditor(instantiationService, model));
-		let zoneIds = 0;
 		const accessor: IViewZoneChangeAccessor = {
-			addZone: zone => { const id = String(++zoneIds); zones.set(id, zone); return id; },
+			addZone: zone => { const id = String(++zoneIds); zones.set(id, zone); return id; }, // unique across editors
 			removeZone: id => { zones.delete(id); },
 			layoutZone: () => { },
 		};
@@ -602,6 +610,93 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.deepStrictEqual(opened.map(i => i.label), ['paper.tex (agent changes)']);
 	});
 
+	function deletedRows() {
+		return [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
+	}
+
+	function textEditorPane(codeEditor: ITestCodeEditor): IEditorPane {
+		return new class extends mock<IEditorPane>() {
+			override getId() { return 'workbench.editors.files.textFileEditor'; }
+			override getControl() { return codeEditor; }
+		}();
+	}
+
+	test('closing the side-by-side diff leaves the review alone: red rows, Keep/Undo and the baseline stay', async () => {
+		// The diff resolves the baseline through ITextModelService and lets go of it when it closes. That was the last
+		// reference, so the resolver disposed the entry's baseline model: no highlights, and the diff couldn't reopen.
+		const entry = (await service.setBaseline(uri, BASELINE))!;
+		await waitForState(entry.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
+		const integration = entry.getEditorIntegration(textEditorPane(editor));
+		const textModelService = insta.get(ITextModelService);
+		for (let i = 0; i < 2; i++) { // open and close it, twice
+			const diffSide = await textModelService.createModelReference(entry.originalURI);
+			assert.strictEqual(diffSide.object.textEditorModel, entry.originalModel, 'the diff shows the entry\'s baseline');
+			diffSide.dispose();
+			await timeout(0); // the resolver disposes unreferenced models asynchronously
+		}
+		assert.strictEqual(entry.originalModel.isDisposed(), false);
+		assert.strictEqual(service.getEntry(uri), entry);
+		assert.strictEqual(entry.originalModel.getValue(), BASELINE, 'baseline unchanged');
+		assert.strictEqual(model.getValue(), DISK, 'buffer unchanged');
+		assert.strictEqual(entry.changesCount.get(), 1);
+		assert.strictEqual(deletedRows().length, 1, 'red rows still shown');
+		assert.strictEqual(hunkWidgets().length, 1, 'Keep/Undo still shown');
+		assert.strictEqual(hunkEvents.length, 0, 'nothing kept or undone');
+		assert.strictEqual(saves.length, 0, 'nothing saved');
+
+		// Keep and new baselines from the engine still work.
+		await service.setBaseline(uri, BASELINE + 'Appendix.\n');
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 ? d : undefined));
+		await integration.acceptNearestChange(hunkWidgets()[0]);
+		assert.deepStrictEqual(hunkEvents.map(e => e.kind), ['accepted']);
+	});
+
+	test('if the baseline model is disposed anyway, the review is rebuilt from the same baseline', async () => {
+		const entry = (await service.setBaseline(uri, BASELINE))!;
+		await waitForState(entry.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
+		entry.getEditorIntegration(textEditorPane(editor));
+		modelService.destroyModel(entry.originalURI);
+		const again = await waitForState(service.entries.map(entries => entries.length === 1 && entries[0] !== entry ? entries[0] : undefined));
+		await waitForState(again.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
+		assert.strictEqual(again.originalModel.getValue(), BASELINE);
+		assert.strictEqual(hunkWidgets().length, 0, 'the old entry\'s widgets are gone');
+		again.getEditorIntegration(textEditorPane(editor)); // the overlay asks the new entry when the entries change
+		assert.strictEqual(deletedRows().length, 1);
+		assert.strictEqual(hunkWidgets().length, 1);
+		assert.strictEqual(hunkEvents.length, 0);
+	});
+
+	test('another editor on the file (split, other group or window) reviews it too; closing it leaves the first alone', async () => {
+		const entry = (await service.setBaseline(uri, BASELINE))!;
+		await waitForState(entry.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
+		const first = entry.getEditorIntegration(textEditorPane(editor));
+		const second = createEditor(insta);
+		const secondPane = textEditorPane(second);
+		const split = entry.getEditorIntegration(secondPane);
+		assert.notStrictEqual(split, first);
+		assert.strictEqual(entry.getEditorIntegration(secondPane), split, 'one integration per pane');
+		assert.strictEqual(deletedRows().length, 2);
+		assert.strictEqual(hunkWidgets().length, 2);
+
+		second.dispose(); // its group or window closed: its integration goes with it
+		assert.strictEqual(hunkWidgets().length, 1);
+		assert.strictEqual(deletedRows().length, 1);
+		assert.strictEqual(first.currentIndex.get(), 0, 'the first editor still reviews the file');
+	});
+
+	test('switching the editor to another file and back shows the review again', async () => {
+		const entry = (await service.setBaseline(uri, BASELINE))!;
+		await waitForState(entry.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
+		entry.getEditorIntegration(textEditorPane(editor));
+		const other = store.add(modelService.createModel('Other file.\n', null, URI.parse('test:/other.tex'), false));
+		editor.setModel(other);
+		assert.strictEqual(deletedRows().length, 0);
+		assert.strictEqual(hunkWidgets().length, 0);
+		editor.setModel(model);
+		assert.strictEqual(deletedRows().length, 1);
+		assert.strictEqual(hunkWidgets().length, 1);
+	});
+
 	test('review commands use agent-review wording and the Agent Review category; Keep/Undo labels and keybindings are unchanged', () => {
 		const desc = (action: { desc: Readonly<IAction2Options> }) => {
 			const kb = action.desc.keybinding;
@@ -633,6 +728,7 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 				{ title: 'Toggle Diff Editor for Agent Changes', short: undefined, key: KeyMod.Alt | KeyMod.Shift | KeyCode.F7 },
 				{ title: 'Show Accessible Diff View for Agent Changes', short: undefined, key: KeyCode.F7 },
 			]);
+		assert.strictEqual(new ToggleDiffAction().desc.f1, true, 'Toggle Diff is in the command palette');
 	});
 
 	test('a reload from disk (agent write) stays pending; a user keystroke outside hunks folds in', async () => {
