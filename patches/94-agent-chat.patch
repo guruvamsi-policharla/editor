@@ -1,0 +1,203 @@
+diff --git a/src/vs/workbench/contrib/agentChat/browser/agentChat.contribution.ts b/src/vs/workbench/contrib/agentChat/browser/agentChat.contribution.ts
+new file mode 100644
+index 00000000..d3eb4492
+--- /dev/null
++++ b/src/vs/workbench/contrib/agentChat/browser/agentChat.contribution.ts
+@@ -0,0 +1,72 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++// Agent chat (the built-in agent-chat extension), through internal commands:
++// - `_agentChat.openChat(uri, where)` opens a chat session (from the extension's chat search) in the chat view in
++//   the side bar, or in an editor tab.
++// - Cmd/Ctrl+L inserts a reference to the selection at the cursor
++// of the last focused chat input, as an inline pill (core's dynamic variable, the same as `#selection`), so a
++// message can say "in this part <ref>, fold in this argument <ref>". The request then carries the text with the
++// reference in place, plus a reference with its range (a Location) for the extension.
++
++import { URI, UriComponents } from '../../../../base/common/uri.js';
++import { IRange, Range } from '../../../../editor/common/core/range.js';
++import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
++import { ChatDynamicVariableModel } from '../../chat/browser/attachments/chatDynamicVariables.js';
++import { ChatViewPaneTarget, IChatWidgetService } from '../../chat/browser/chat.js';
++import { ACTIVE_GROUP } from '../../../services/editor/common/editorService.js';
++
++CommandsRegistry.registerCommand('_agentChat.openChat', async (accessor, uri: UriComponents | undefined, where: unknown) => {
++	if (!uri) {
++		return false;
++	}
++	const widget = await accessor.get(IChatWidgetService).openSession(URI.revive(uri), where === 'editor' ? ACTIVE_GROUP : ChatViewPaneTarget);
++	widget?.focusInput();
++	return !!widget;
++});
++
++/**
++ * `_agentChat.insertReference(text, uri, range?)`: inserts `text` (e.g. `@main.tex:L16-18`) at the cursor of the
++ * last focused chat input (revealing it), as a reference pill for `uri` (and `range`, 1-based lines), followed by
++ * a space. Returns whether it was inserted.
++ */
++CommandsRegistry.registerCommand('_agentChat.insertReference', async (accessor, text: unknown, uri: UriComponents | undefined, range: IRange | undefined) => {
++	if (typeof text !== 'string' || !text || !uri) {
++		return false;
++	}
++	const widgetService = accessor.get(IChatWidgetService);
++	const widget = widgetService.lastFocusedWidget ?? await widgetService.revealWidget();
++	if (!widget) {
++		return false;
++	}
++	await widgetService.reveal(widget);
++	const editor = widget.inputEditor;
++	const model = editor.getModel();
++	const variables = widget.getContrib<ChatDynamicVariableModel>(ChatDynamicVariableModel.ID);
++	if (!model || !variables) {
++		return false;
++	}
++	const at = editor.getPosition() ?? model.getFullModelRange().getEndPosition();
++	const before = at.column > 1 ? model.getValueInRange(new Range(at.lineNumber, at.column - 1, at.lineNumber, at.column)) : '';
++	const prefix = before && !/\s/.test(before) ? ' ' : '';
++	if (!editor.executeEdits('agentChat.insertReference', [{ range: Range.fromPositions(at), text: `${prefix}${text} ` }])) {
++		return false;
++	}
++	const start = at.column + prefix.length;
++	const pill = new Range(at.lineNumber, start, at.lineNumber, start + text.length);
++	const resource = URI.revive(uri);
++	variables.addReference({
++		// Unique per pill: the request's references are keyed by id.
++		id: `agentChat.reference:${resource.toString()}:${range?.startLineNumber ?? 0}-${range?.endLineNumber ?? 0}:${Date.now()}`,
++		fullName: text,
++		isFile: true,
++		range: pill,
++		data: range ? { uri: resource, range: Range.lift(range) } : resource,
++	});
++	editor.setPosition({ lineNumber: pill.endLineNumber, column: pill.endColumn + 1 });
++	widget.focusInput();
++	widget.refreshParsedInput();
++	return true;
++});
+diff --git a/src/vs/workbench/contrib/chat/browser/agentSessions/agentSessionsModel.ts b/src/vs/workbench/contrib/chat/browser/agentSessions/agentSessionsModel.ts
+index 550b01e7..1632a19e 100644
+--- a/src/vs/workbench/contrib/chat/browser/agentSessions/agentSessionsModel.ts
++++ b/src/vs/workbench/contrib/chat/browser/agentSessions/agentSessionsModel.ts
+@@ -647,8 +647,8 @@ export class AgentSessionsModel extends Disposable implements IAgentSessionsMode
+ 	}
+ 
+ 	private resolveProvider(provider: string, options: { refreshProvider: boolean }): Promise<void> {
+-		if (this.chatEntitlementService.sentiment.hidden) {
+-			return Promise.resolve(); // don't resolve if AI features are disabled
++		if (this.chatEntitlementService.sentiment.hidden && getAgentSessionProvider(provider) !== undefined) {
++			return Promise.resolve(); // don't resolve if AI features are disabled (sessions of other extensions' types still list)
+ 		}
+ 
+ 		let resolver = this.resolvers.get(provider);
+diff --git a/src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts b/src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts
+index 6ba765d1..71ba5ea8 100644
+--- a/src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts
++++ b/src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts
+@@ -4051,10 +4051,12 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
+ 	 * The attachments that are rendered as pills in the input. Agent-host
+ 	 * completion entries (skills/commands) live in the model so their `_meta`
+ 	 * reaches the outgoing message, but they are shown as inline decorations
+-	 * rather than pills, so they are excluded here.
++	 * rather than pills, so they are excluded here. So are the agent chat's
++	 * Cmd/Ctrl+L references (`_agentChat.insertReference`): they are inline
++	 * pills in the text already.
+ 	 */
+ 	private getRenderableAttachments(): IChatRequestVariableEntry[] {
+-		return this.attachmentModel.attachments.filter(attachment => !isAgentHostCompletionVariableEntry(attachment));
++		return this.attachmentModel.attachments.filter(attachment => !isAgentHostCompletionVariableEntry(attachment) && !(attachment.range && attachment.id.startsWith('agentChat.reference:')));
+ 	}
+ 
+ 	private handleAttachmentOpen(index: number, attachment: IChatRequestVariableEntry): void {
+diff --git a/src/vs/workbench/contrib/chat/common/model/chatModel.ts b/src/vs/workbench/contrib/chat/common/model/chatModel.ts
+index f3863489..e305b4e3 100644
+--- a/src/vs/workbench/contrib/chat/common/model/chatModel.ts
++++ b/src/vs/workbench/contrib/chat/common/model/chatModel.ts
+@@ -1667,7 +1667,11 @@ export class ChatResponseModel extends Disposable implements IChatResponseModel
+ 		// spinner/"Editing files" label. See https://github.com/microsoft/vscode/issues/288701.
+ 		for (const part of this._response.value) {
+ 			if (part.kind === 'toolInvocation' && part instanceof ChatToolInvocation) {
+-				part.cancelFromStreaming(ToolConfirmKind.Skipped);
++				// External invocations (an extension's tool cards) aren't tied to the request's tool calls, and the
++				// extension's own completion arrives after the cancel, when progress is dropped: cancel them here.
++				if (!part.cancelFromStreaming(ToolConfirmKind.Skipped) && part.source.type === 'external') {
++					part.cancelIfIncomplete(ToolConfirmKind.Skipped);
++				}
+ 			} else if (part instanceof ChatPlanReviewData) {
+ 				part.dismiss();
+ 			} else if (part instanceof ChatQuestionCarouselData) {
+diff --git a/src/vs/workbench/contrib/chat/common/model/chatProgressTypes/chatToolInvocation.ts b/src/vs/workbench/contrib/chat/common/model/chatProgressTypes/chatToolInvocation.ts
+index 13aa48ff..20b6d72c 100644
+--- a/src/vs/workbench/contrib/chat/common/model/chatProgressTypes/chatToolInvocation.ts
++++ b/src/vs/workbench/contrib/chat/common/model/chatProgressTypes/chatToolInvocation.ts
+@@ -226,6 +226,27 @@ export class ChatToolInvocation implements IChatToolInvocation {
+ 		return true;
+ 	}
+ 
++	/**
++	 * Cancel an invocation that hasn't completed yet: an extension's external tool card (a command that was
++	 * running or waiting for permission) when the user stops the request. Core drops the extension's later
++	 * updates after a cancel, so without this the card would keep its spinner.
++	 * @returns true if the cancellation was applied, false if it was already complete or cancelled
++	 */
++	public cancelIfIncomplete(reason: ToolConfirmKind.Denied | ToolConfirmKind.Skipped, reasonMessage?: string | IMarkdownString): boolean {
++		const type = this._state.get().type;
++		if (type === IChatToolInvocation.StateKind.Completed || type === IChatToolInvocation.StateKind.Cancelled) {
++			return false;
++		}
++		this._state.set({
++			type: IChatToolInvocation.StateKind.Cancelled,
++			reason,
++			reasonMessage,
++			parameters: this.parameters,
++			confirmationMessages: this.confirmationMessages,
++		}, undefined);
++		return true;
++	}
++
+ 	/**
+ 	 * Transition from streaming state to prepared/executing state.
+ 	 * Called when the full tool call is ready.
+diff --git a/src/vs/workbench/contrib/chat/test/common/model/chatModel.test.ts b/src/vs/workbench/contrib/chat/test/common/model/chatModel.test.ts
+index e6e923ef..f42551e9 100644
+--- a/src/vs/workbench/contrib/chat/test/common/model/chatModel.test.ts
++++ b/src/vs/workbench/contrib/chat/test/common/model/chatModel.test.ts
+@@ -1728,6 +1728,25 @@ suite('ChatResponseModel', () => {
+ 		assert.strictEqual(response.state, ResponseModelState.Cancelled);
+ 	});
+ 
++	test('cancellation stops an extension\'s open external tool card; a completed one is left alone', async () => {
++		const model = testDisposables.add(instantiationService.createInstance(ChatModel, undefined, { initialLocation: ChatAgentLocation.Chat, canUseTools: true }));
++		const text = 'run a command';
++		const request = model.addRequest({ text, parts: [new ChatRequestTextPart(new OffsetRange(0, text.length), new Range(1, text.length, 1, text.length), text)] }, { variables: [] }, 0);
++		const response = request.response!;
++
++		// An extension's tool cards (chat session providers): one still running, one done.
++		model.acceptResponseProgress(request, { kind: 'externalToolInvocationUpdate', toolCallId: 'open', toolName: 'Bash', isComplete: false, invocationMessage: 'Running make' });
++		model.acceptResponseProgress(request, { kind: 'externalToolInvocationUpdate', toolCallId: 'done', toolName: 'Read', isComplete: true, invocationMessage: 'Reading a.txt', pastTenseMessage: 'Read a.txt' });
++		const [open, done] = response.response.value.filter(p => p.kind === 'toolInvocation') as IChatToolInvocation[];
++		assert.strictEqual(open.state.get().type, IChatToolInvocation.StateKind.Executing);
++
++		model.cancelRequest(request);
++
++		assert.strictEqual(open.state.get().type, IChatToolInvocation.StateKind.Cancelled);
++		assert.strictEqual(IChatToolInvocation.isComplete(open), true);
++		assert.strictEqual(done.state.get().type, IChatToolInvocation.StateKind.Completed);
++	});
++
+ 	test('completed tool invocation ignores duplicate completion', async () => {
+ 		const toolInvocation = new ChatToolInvocation({ invocationMessage: 'Running command' }, {
+ 			id: 'run_in_terminal',
+diff --git a/src/vs/workbench/workbench.common.main.ts b/src/vs/workbench/workbench.common.main.ts
+index 8815d77a..84f438a8 100644
+--- a/src/vs/workbench/workbench.common.main.ts
++++ b/src/vs/workbench/workbench.common.main.ts
+@@ -232,6 +232,7 @@ import './contrib/chat/browser/agentSessions/agentHost/agentHost.contribution.js
+ import './contrib/chat/browser/chat.view.contribution.js';
+ import './contrib/inlineChat/browser/inlineChat.contribution.js';
+ import './contrib/agentReview/browser/agentReview.contribution.js';
++import './contrib/agentChat/browser/agentChat.contribution.js';
+ 
+ // Copilot Voice
+ import './contrib/agentsVoice/browser/agentsVoice.contribution.js';

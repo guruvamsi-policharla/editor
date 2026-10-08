@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Run the core unit tests for our patches on a tree prepared by prepare-vscodium.sh:
 #   - agentReview Electron tests (src/vs/workbench/contrib/agentReview/test/browser)
-#   - upstream chat-editing tests (regression check for the review hooks patch)
+#   - upstream chat-editing tests (regression check for the review hooks patch), and the chat model tests (the agent
+#     chat patch: Stop cancels open external tool cards)
 #   - upstream diff tests incl. fixtures (regression check for the diff option patch), and the similar-line alignment tests
 # Linux needs Xvfb (xvfb-run). Usage: fork/scripts/test-core.sh [WORKDIR]
 set -euo pipefail
@@ -14,7 +15,8 @@ RUN=(./scripts/test.sh)
 for f in src/vs/workbench/contrib/agentReview/test/browser/*.test.ts \
          src/vs/workbench/contrib/chat/test/browser/chatEditing/chatEditingService.test.ts \
          src/vs/workbench/contrib/chat/test/browser/chatEditing/chatEditingActions.test.ts \
-         src/vs/workbench/contrib/chat/test/browser/chatEditing/chatEditingModifiedNotebookEntry.test.ts; do
+         src/vs/workbench/contrib/chat/test/browser/chatEditing/chatEditingModifiedNotebookEntry.test.ts \
+         src/vs/workbench/contrib/chat/test/common/model/chatModel.test.ts; do
   RUN+=(--run "$f")
 done
 if [[ "$(uname)" == "Linux" && -z "${DISPLAY:-}" ]]; then

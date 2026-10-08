@@ -80,7 +80,10 @@ jobs:
       - name: Apply VSCodium patches + ours (no npm ci)
         run: fork/scripts/prepare-vscodium.sh --patches-only "$RUNNER_TEMP/fork"
       - name: fork/src matches what the patches create
-        run: diff -ru fork/src/vs/workbench/contrib/agentReview "$RUNNER_TEMP/fork/vscodium/vscode/src/vs/workbench/contrib/agentReview"
+        run: |
+          for d in agentReview agentChat; do
+            diff -ru "fork/src/vs/workbench/contrib/$d" "$RUNNER_TEMP/fork/vscodium/vscode/src/vs/workbench/contrib/$d"
+          done
       - name: Patch size report
         run: |
           {
