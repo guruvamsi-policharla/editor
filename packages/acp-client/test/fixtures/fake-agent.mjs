@@ -93,10 +93,12 @@ const connection = acp.agent({ name: 'fake-agent' })
 			await update({ sessionUpdate: 'some_future_kind', payload: 1 });
 			await update({ sessionUpdate: 'agent_message_chunk', messageId: 'm1', content: { type: 'text', text: 'Hello ' } });
 			await update({ sessionUpdate: 'agent_message_chunk', messageId: 'm1', content: { type: 'text', text: 'world' } });
+			sessions.get(sessionId).mode = 'plan';
 			await update({ sessionUpdate: 'current_mode_update', currentModeId: 'plan' });
 			await update({ sessionUpdate: 'session_info_update', title: 'A title' });
 			await update({ sessionUpdate: 'usage_update', used: 10, size: 100, cost: { amount: 0.01, currency: 'USD' } });
-			await update({ sessionUpdate: 'config_option_update', configOptions: options({ ...sessions.get(sessionId), model: 'small' }) });
+			sessions.get(sessionId).model = 'small';
+			await update({ sessionUpdate: 'config_option_update', configOptions: options(sessions.get(sessionId)) });
 			return { stopReason: 'end_turn' };
 		}
 		if (text === 'permission') {
