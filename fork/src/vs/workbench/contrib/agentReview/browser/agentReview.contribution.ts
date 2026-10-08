@@ -23,7 +23,7 @@ import { ServicesAccessor } from '../../../../platform/instantiation/common/inst
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
-import { AgentReviewKind } from './agentReviewEntry.js';
+import { AgentReviewKind, MERGE_EDITOR_ID } from './agentReviewEntry.js';
 import { AgentReviewSaveParticipants } from './agentReviewSaveParticipant.js';
 import { AgentReviewService, IAgentReviewService } from './agentReviewService.js';
 
@@ -89,7 +89,7 @@ class AgentReviewEditorState extends Disposable implements IWorkbenchContributio
 		const isActive = ctxAgentReviewIsActive.bindTo(contextKeyService);
 		const updateActive = () => {
 			const uri = editorService.activeEditor?.resource;
-			isActive.set(!!uri && !!agentReviewService.getEntry(uri));
+			isActive.set(!!uri && !!agentReviewService.getEntry(uri) && editorService.activeEditorPane?.getId() !== MERGE_EDITOR_ID);
 		};
 		this._register(editorService.onDidActiveEditorChange(updateActive));
 		this._register(autorun(r => {

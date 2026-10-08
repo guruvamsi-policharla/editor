@@ -41,7 +41,7 @@ import { IChatEditingExplanationModelManager } from '../../../chat/browser/chatE
 import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntryChangeHunk } from '../../../chat/common/editing/chatEditingService.js';
 import { TestWorkerService } from '../../../inlineChat/test/browser/testWorkerService.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
-import { IResourceDiffEditorInput } from '../../../../common/editor.js';
+import { IEditorPane, IResourceDiffEditorInput } from '../../../../common/editor.js';
 import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
 import { IAction2Options } from '../../../../../platform/actions/common/actions.js';
 import { IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
@@ -296,6 +296,24 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.ok(position && typeof position === 'object');
 		assert.ok(position.left > 50 + 'b TWO'.length * 7, 'right of the text');
 		assert.ok(position.top < editor.getTopForLineNumber(3), 'on line 2, not below it');
+	});
+
+	test('the 3-way merge editor\'s result shows the file without the review (no red rows, no Keep/Undo)', async () => {
+		const entry = (await service.setBaseline(uri, BASELINE, 'modified'))!;
+		await waitForState(entry.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
+		const pane = (id: string) => new class extends mock<IEditorPane>() {
+			override getId() { return id; }
+			override getControl() { return editor; }
+		}();
+		const mergePane = pane('mergeEditor');
+		const merge = entry.getEditorIntegration(mergePane);
+		assert.strictEqual(zones.size, 0);
+		assert.strictEqual(hunkWidgets().length, 0);
+		assert.strictEqual(merge.next(true), false);
+		assert.strictEqual(entry.getEditorIntegration(mergePane), merge);
+
+		store.add(entry.getEditorIntegration(pane('workbench.editors.files.textFileEditor')));
+		assert.strictEqual(hunkWidgets().length, 1, 'a text editor on the same file reviews it');
 	});
 
 	test('Ctrl+Y/Ctrl+N act on the change the cursor is in, even when another change\'s Keep/Undo is closer', async () => {

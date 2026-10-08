@@ -1,6 +1,6 @@
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts b/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts
 new file mode 100644
-index 00000000..2820c19f
+index 00000000..2cbd16ac
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts
 @@ -0,0 +1,101 @@
@@ -29,7 +29,7 @@ index 00000000..2820c19f
 +import { ILogService } from '../../../../platform/log/common/log.js';
 +import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 +import { IEditorService } from '../../../services/editor/common/editorService.js';
-+import { AgentReviewKind } from './agentReviewEntry.js';
++import { AgentReviewKind, MERGE_EDITOR_ID } from './agentReviewEntry.js';
 +import { AgentReviewSaveParticipants } from './agentReviewSaveParticipant.js';
 +import { AgentReviewService, IAgentReviewService } from './agentReviewService.js';
 +
@@ -95,7 +95,7 @@ index 00000000..2820c19f
 +		const isActive = ctxAgentReviewIsActive.bindTo(contextKeyService);
 +		const updateActive = () => {
 +			const uri = editorService.activeEditor?.resource;
-+			isActive.set(!!uri && !!agentReviewService.getEntry(uri));
++			isActive.set(!!uri && !!agentReviewService.getEntry(uri) && editorService.activeEditorPane?.getId() !== MERGE_EDITOR_ID);
 +		};
 +		this._register(editorService.onDidActiveEditorChange(updateActive));
 +		this._register(autorun(r => {
@@ -107,10 +107,10 @@ index 00000000..2820c19f
 +registerWorkbenchContribution2(AgentReviewEditorState.ID, AgentReviewEditorState, WorkbenchPhase.AfterRestored);
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
 new file mode 100644
-index 00000000..58ec32bc
+index 00000000..4523abaf
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
-@@ -0,0 +1,385 @@
+@@ -0,0 +1,405 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -480,7 +480,11 @@ index 00000000..58ec32bc
 +
 +	getEditorIntegration(pane: IEditorPane): IModifiedFileEntryEditorIntegration {
 +		let value = this._integrations.get(pane);
-+		if (!value) {
++		if (!value && pane.getId() === MERGE_EDITOR_ID) {
++			// The 3-way merge (agent's version vs unsaved edits) is the review there: no Keep/Undo in its result.
++			value = new NoReviewIntegration();
++			this._integrations.set(pane, value);
++		} else if (!value) {
 +			const codeEditor = getCodeEditor(pane.getControl());
 +			if (!codeEditor) {
 +				throw new Error('agent review needs a code editor');
@@ -495,6 +499,22 @@ index 00000000..58ec32bc
 +		// renderDiffImmediately=true: there is no "streaming" phase for agent review.
 +		return this._instantiationService.createInstance(ChatEditingCodeEditorIntegration, this, codeEditor, this.diffInfo, true);
 +	}
++}
++
++/** `MergeEditor.ID` (not imported: that would load the merge editor with this file). */
++export const MERGE_EDITOR_ID = 'mergeEditor';
++
++/** For an editor that shows the file but reviews nothing. */
++class NoReviewIntegration implements IModifiedFileEntryEditorIntegration {
++	readonly currentIndex = constObservable(-1);
++	reveal(): void { }
++	next(): boolean { return false; }
++	previous(): boolean { return false; }
++	enableAccessibleDiffView(): void { }
++	async acceptNearestChange(): Promise<void> { }
++	async rejectNearestChange(): Promise<void> { }
++	async toggleDiff(): Promise<void> { }
++	dispose(): void { }
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewMerge.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewMerge.ts
 new file mode 100644
@@ -1094,10 +1114,10 @@ index 00000000..546d6d59
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
 new file mode 100644
-index 00000000..5eea8955
+index 00000000..2bc19709
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
-@@ -0,0 +1,597 @@
+@@ -0,0 +1,615 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -1141,7 +1161,7 @@ index 00000000..5eea8955
 +import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntryChangeHunk } from '../../../chat/common/editing/chatEditingService.js';
 +import { TestWorkerService } from '../../../inlineChat/test/browser/testWorkerService.js';
 +import { IEditorService } from '../../../../services/editor/common/editorService.js';
-+import { IResourceDiffEditorInput } from '../../../../common/editor.js';
++import { IEditorPane, IResourceDiffEditorInput } from '../../../../common/editor.js';
 +import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
 +import { IAction2Options } from '../../../../../platform/actions/common/actions.js';
 +import { IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
@@ -1396,6 +1416,24 @@ index 00000000..5eea8955
 +		assert.ok(position && typeof position === 'object');
 +		assert.ok(position.left > 50 + 'b TWO'.length * 7, 'right of the text');
 +		assert.ok(position.top < editor.getTopForLineNumber(3), 'on line 2, not below it');
++	});
++
++	test('the 3-way merge editor\'s result shows the file without the review (no red rows, no Keep/Undo)', async () => {
++		const entry = (await service.setBaseline(uri, BASELINE, 'modified'))!;
++		await waitForState(entry.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
++		const pane = (id: string) => new class extends mock<IEditorPane>() {
++			override getId() { return id; }
++			override getControl() { return editor; }
++		}();
++		const mergePane = pane('mergeEditor');
++		const merge = entry.getEditorIntegration(mergePane);
++		assert.strictEqual(zones.size, 0);
++		assert.strictEqual(hunkWidgets().length, 0);
++		assert.strictEqual(merge.next(true), false);
++		assert.strictEqual(entry.getEditorIntegration(mergePane), merge);
++
++		store.add(entry.getEditorIntegration(pane('workbench.editors.files.textFileEditor')));
++		assert.strictEqual(hunkWidgets().length, 1, 'a text editor on the same file reviews it');
 +	});
 +
 +	test('Ctrl+Y/Ctrl+N act on the change the cursor is in, even when another change\'s Keep/Undo is closer', async () => {

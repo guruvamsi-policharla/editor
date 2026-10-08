@@ -669,7 +669,7 @@ index 01fe8016..13568ccd 100644
  			icon: Codicon.checkAll,
  			f1: true,
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorOverlay.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorOverlay.ts
-index 6817b7dc..e4bf7eaf 100644
+index 6817b7dc..7b44cdc7 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorOverlay.ts
 +++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorOverlay.ts
 @@ -23,7 +23,7 @@ import { Event } from '../../../../../base/common/event.js';
@@ -697,7 +697,18 @@ index 6817b7dc..e4bf7eaf 100644
  		this._domNode.appendChild(this._toolbarNode);
  		this._showStore.add(toDisposable(() => this._toolbarNode.remove()));
  
-@@ -378,6 +387,12 @@ class ChatEditingOverlayController {
+@@ -324,6 +333,10 @@ class ChatEditingOverlayController {
+ 			if (!getCodeEditor(editor?.getControl())) {
+ 				return undefined;
+ 			}
++			if (editor?.getId() === 'mergeEditor') {
++				// The 3-way merge editor's result: the merge is the review there (agent review)
++				return undefined;
++			}
+ 
+ 			const uri = EditorResourceAccessor.getOriginalUri(editor?.input, { supportSideBySide: SideBySideEditor.PRIMARY });
+ 
+@@ -378,6 +391,12 @@ class ChatEditingOverlayController {
  				);
  
  				widget.show(session, entry, { entryIndex, changeIndex });

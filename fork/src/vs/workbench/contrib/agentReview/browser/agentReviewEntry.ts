@@ -367,7 +367,11 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 
 	getEditorIntegration(pane: IEditorPane): IModifiedFileEntryEditorIntegration {
 		let value = this._integrations.get(pane);
-		if (!value) {
+		if (!value && pane.getId() === MERGE_EDITOR_ID) {
+			// The 3-way merge (agent's version vs unsaved edits) is the review there: no Keep/Undo in its result.
+			value = new NoReviewIntegration();
+			this._integrations.set(pane, value);
+		} else if (!value) {
 			const codeEditor = getCodeEditor(pane.getControl());
 			if (!codeEditor) {
 				throw new Error('agent review needs a code editor');
@@ -382,4 +386,20 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 		// renderDiffImmediately=true: there is no "streaming" phase for agent review.
 		return this._instantiationService.createInstance(ChatEditingCodeEditorIntegration, this, codeEditor, this.diffInfo, true);
 	}
+}
+
+/** `MergeEditor.ID` (not imported: that would load the merge editor with this file). */
+export const MERGE_EDITOR_ID = 'mergeEditor';
+
+/** For an editor that shows the file but reviews nothing. */
+class NoReviewIntegration implements IModifiedFileEntryEditorIntegration {
+	readonly currentIndex = constObservable(-1);
+	reveal(): void { }
+	next(): boolean { return false; }
+	previous(): boolean { return false; }
+	enableAccessibleDiffView(): void { }
+	async acceptNearestChange(): Promise<void> { }
+	async rejectNearestChange(): Promise<void> { }
+	async toggleDiff(): Promise<void> { }
+	dispose(): void { }
 }
