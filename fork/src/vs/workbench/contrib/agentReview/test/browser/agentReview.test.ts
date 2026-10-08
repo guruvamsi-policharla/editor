@@ -204,6 +204,14 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.strictEqual(hunkWidgets().length, 1, 'one per-hunk toolbar');
 	});
 
+	test('with word wrap on, deleted lines wrap like the editor\'s lines (a long LaTeX paragraph is not cut off)', async () => {
+		editor.updateOptions({ wordWrap: 'wordWrapColumn', wordWrapColumn: 20 });
+		await showPending('Intro sentence.\n' + 'This long paragraph was deleted by the agent, and all of it must stay readable.\n' + 'Closing sentence.\n');
+		const deleted = [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
+		assert.strictEqual(deleted.length, 1);
+		assert.ok(deleted[0].heightInLines! >= 4, `wrapped into several rows (got ${deleted[0].heightInLines})`);
+	});
+
 	test('each Keep/Undo toolbar has its own row below its hunk, so it never covers text', async () => {
 		model.setValue('a one\nb TWO, rewritten by the agent\nc three\ne five\n');
 		const { entry } = await showPending('a one\nb two\nc three\nd four\ne five\n');
