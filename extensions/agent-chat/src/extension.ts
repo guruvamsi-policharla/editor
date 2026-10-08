@@ -4,9 +4,8 @@
 //   and accept requests while Copilot is absent; it only points at the session types.
 // - One chat session type per harness profile (harnessChat.ts), in the secondary side bar or as editor tabs.
 // - Nothing here emits edit parts: the harness writes files itself and agent-review shows them with Keep/Undo.
-// - Cmd/Ctrl+L: agent-review's "Send Selection to Agent" calls `agentChat.insertReference` when the chat is the
-//   target (`agentReview.agent.target`), using `agentChat.lastUsed` to pick between chat and terminal. The
-//   reference goes in at the cursor, as an inline pill (core's `_agentChat.insertReference`, patch 94).
+// - Cmd/Ctrl+L: agent-review's "Send Selection to Agent" always calls `agentChat.insertReference` (never the agent
+//   terminal). The reference goes in at the cursor, as an inline pill (core's `_agentChat.insertReference`, patch 94).
 // - History (history.ts) for this workspace, searched by title and content (Search Chats); one agent edits at a
 //   time across chats (scheduler.ts).
 import { createHash } from 'node:crypto';
