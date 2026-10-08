@@ -141,7 +141,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (d.uri.scheme === 'file') { void ctl.onBufferSettled(d.uri.fsPath); }
     }),
     vscode.workspace.onDidChangeTextDocument((e) => {
-      if (e.document.uri.scheme !== 'file' || e.contentChanges.length === 0) { return; }
+      if (e.document.uri.scheme !== 'file') { return; }
+      if (e.contentChanges.length === 0) { // a dirty-state change
+        logs.onDirtyStateChange(e.document.uri.toString(), e.document.isDirty, e.document.version);
+        return;
+      }
       logs.onChange(e.document.uri.toString(), e.contentChanges, e.document.isDirty, e.document.version, e.document.isDirty ? undefined : e.document.getText());
       if (!e.document.isDirty) { void ctl.onBufferSettled(e.document.uri.fsPath); } // reverted or reloaded
     }),

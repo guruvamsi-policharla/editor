@@ -271,6 +271,49 @@ describe('ReviewController', () => {
     expect(await ctl.lineCounts(ctl.pendingFiles[0]!)).toEqual({ added: 2, removed: 1 }); // b = 20 and d = 4: still the agent's
   });
 
+  it('a first keystroke reported clean (the dirty state follows) stays in the edit log: format on save keeps the agent JSON pending', async () => {
+    // polish-2 P2-6, as traced in the packaged app: the agent's JSON edit was accepted by the user's next save.
+    fs.writeFileSync(path.join(root, 'data.json'), '{\n  "runs": 50,\n  "batch": [32, 128, 512]\n}\n');
+    await open();
+    const abs = await agentWrite('data.json', '{\n  "runs": 50, "warmup":5,"cores" :[1,2,4],\n  "batch": [32, 128, 512]\n}\n');
+    const logs = new EditLogs();
+    const key = 'file://' + abs;
+    let text = read(abs);
+    logs.markClean(key, text); // opened
+    let version = 1;
+    const at = text.indexOf(']\n}') + 1;
+    for (const [i, ch] of [...', 2048'].entries()) {
+      text = text.slice(0, at + i) + ch + text.slice(at + i);
+      logs.onChange(key, [{ rangeOffset: at + i, rangeLength: 0, text: ch }], i > 0, ++version, i > 0 ? undefined : text);
+      if (i === 0) { logs.onDirtyStateChange(key, true, version); } // VS Code: the dirty state arrives after the change
+    }
+    const userVersion = version;
+    // Format on save: one edit over the whole object (as a formatter may report it).
+    const formatted = '{\n  "runs": 50,\n  "warmup": 5,\n  "cores": [\n    1,\n    2,\n    4\n  ],\n  "batch": [\n    32,\n    128,\n    512\n  ],\n  2048\n}\n';
+    logs.onChange(key, [{ rangeOffset: 0, rangeLength: text.length, text: formatted }], true, ++version);
+    text = formatted;
+    dirty.add(abs);
+    const edits = logs.get(key, userVersion)!;
+    expect(edits.filter((e) => e.origin === 'user')).toHaveLength(6);
+    await userSave(abs, text, [...edits]);
+    expect(ctl.pendingFiles.map((f) => path.basename(f.absPath))).toEqual(['data.json']);
+    expect(await ctl.baselineText(abs)).not.toContain('warmup');
+  });
+
+  it('a change reported clean with no dirty state after it (a reload from disk) restarts the edit log', async () => {
+    await open();
+    const logs = new EditLogs();
+    logs.markClean('k', 'a\n');
+    logs.onChange('k', [{ rangeOffset: 0, rangeLength: 0, text: 'x' }], true, 2);
+    logs.onChange('k', [{ rangeOffset: 0, rangeLength: 2, text: 'agent\n' }], false, 3, 'agent\n'); // reload
+    logs.onChange('k', [{ rangeOffset: 0, rangeLength: 0, text: 'u' }], true, 4);
+    expect(logs.get('k')).toEqual([{ offset: 0, length: 0, text: 'u', origin: 'user' }]);
+    expect(logs.cleanText('k')).toBe('agent\n');
+    logs.onChange('k', [{ rangeOffset: 0, rangeLength: 1, text: '' }], false, 5, 'agent\n'); // undo back to the saved state
+    logs.onDirtyStateChange('k', false, 5);
+    expect(logs.get('k')).toEqual([]);
+  });
+
   it('without the save-participant version, the same save counts the formatter as the user (stock VS Code)', async () => {
     fs.writeFileSync(path.join(root, 'conf.ini'), 'a=1\nb=2\n');
     await open();
