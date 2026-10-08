@@ -12,8 +12,9 @@
  * All public operations are serialized.
  */
 import * as path from 'node:path';
-import { foldUserSave, provenanceFromDiff, trackEdits, type TrackedEdit } from './attribution.js';
+import { addFormatterPass, foldUserSave, provenanceFromDiff, trackEdits, type Provenance, type TrackedEdit } from './attribution.js';
 import { acceptHunks, computeHunks, hunkRegion, rejectHunks, type Hunk } from './diff/hunks.js';
+import { diffRegions } from './diff/myers.js';
 import { nodeFileSystem, type FileStat, type FileSystem } from './fs.js';
 import {
   findGitRepo,
@@ -66,6 +67,11 @@ export interface ReviewEngineOptions {
   excludeDirs?: readonly string[];
   /** Wall clock, for tests. */
   now?: () => number;
+  /**
+   * Detailed log of what the engine decides and why: baseline moves, pending changes, save attribution, watcher
+   * events, git operations. For hunting attribution bugs; off (undefined) by default.
+   */
+  trace?: (message: string) => void;
 }
 
 /** A filesystem event from the host's watcher. Only the path matters; the engine re-examines it. */
@@ -131,6 +137,14 @@ export interface UserSaveOptions {
    * `reportUserSave` before writing, or pass `base`.
    */
   base?: string | Uint8Array;
+  /**
+   * The buffer as the user left it, before format on save and other save participants changed it (the saved
+   * content if none did). With it, the user's part (disk -> userContent: the 'user' edits, else a diff) and the
+   * formatter's part (userContent -> saved, by diff) are told apart without trusting the edit log, so a formatter
+   * rewriting agent lines can never pass for the user rewriting them. Without it, edits tagged 'formatter' are the
+   * only way to know, and a log that doesn't replay counts every change as the user's.
+   */
+  userContent?: string;
 }
 
 export interface UserSaveResult {
@@ -180,6 +194,9 @@ export class ReviewEngine {
   private readonly gitEnabled: boolean;
   private readonly gitReader: GitObjectReader;
   private readonly now: () => number;
+  private readonly traceFn: ((message: string) => void) | undefined;
+  /** The public operation running now (for the trace). */
+  private op = '';
   private readonly excludeDirs: string[];
   private ignoreOptions: IgnoreOptions;
   private rules!: IgnoreRules;
@@ -211,6 +228,7 @@ export class ReviewEngine {
     this.gitEnabled = opts.git ?? true;
     this.gitReader = opts.gitObjectReader ?? gitCliObjectReader;
     this.now = opts.now ?? Date.now;
+    this.traceFn = opts.trace;
     this.excludeDirs = excludeDirs;
     this.ignoreOptions = opts.ignore ?? {};
   }
@@ -258,7 +276,7 @@ export class ReviewEngine {
 
   /** Persist and stop. Further calls fail. */
   async close(): Promise<void> {
-    await this.run(async () => {
+    await this.run('close', async () => {
       if (this.gitRetryTimer) { clearTimeout(this.gitRetryTimer); }
       this.gitRetryTimer = undefined;
       this.dirty = true;
@@ -270,7 +288,7 @@ export class ReviewEngine {
 
   /** Wait for queued operations and persist state. */
   async flush(): Promise<void> {
-    await this.run(async () => {
+    await this.run('flush', async () => {
       this.dirty = true;
       await this.persist();
     });
@@ -290,7 +308,7 @@ export class ReviewEngine {
 
   /** Feed watcher events. Paths may be absolute or root-relative; symlinked paths are normalized. */
   handleFsEvents(events: readonly (FsEvent | string)[]): Promise<void> {
-    return this.run(async () => {
+    return this.run('handleFsEvents', async () => {
       const rels = new Set<string>();
       let fullRescan = false;
       for (const ev of events) {
@@ -314,6 +332,7 @@ export class ReviewEngine {
           if (/\.tex$/i.test(rel)) { changed.push(...(await this.refreshTexSibling(rel))); }
           for (const p of changed) { (this.consumeExpectedWrite(p) ? self : external).push(p); }
         }
+        if (self.length || external.length) { this.trace(`watcher: ${[...self.map((p) => `${p} (self)`), ...external.map((p) => `${p} (external)`)].join(', ')}`); }
         this.emit('self', self);
         this.emit('external', external);
         if (ignoreChanged) { await this.reloadIgnoreRules(); }
@@ -325,7 +344,7 @@ export class ReviewEngine {
 
   /** Re-walk the whole workspace (e.g. after the host's watcher overflowed). */
   rescan(): Promise<void> {
-    return this.run(async () => {
+    return this.run('rescan', async () => {
       await this.rescanInternal();
       if (this.repo) { await this.pollGit(); }
       await this.persist();
@@ -334,7 +353,7 @@ export class ReviewEngine {
 
   /** Replace the user's extra ignore patterns and rescan. Newly visible files start with nothing pending. */
   setIgnorePatterns(patterns: readonly string[]): Promise<void> {
-    return this.run(async () => {
+    return this.run('setIgnorePatterns', async () => {
       this.ignoreOptions = { ...this.ignoreOptions, patterns: [...patterns] };
       await this.reloadIgnoreRules();
       await this.persist();
@@ -346,7 +365,7 @@ export class ReviewEngine {
    * stay pending; formatter edits inside pending agent hunks stay pending, elsewhere they fold in.
    */
   reportUserSave(file: string, content: string | Uint8Array, options: UserSaveOptions = {}): Promise<UserSaveResult> {
-    return this.run(async () => {
+    return this.run('reportUserSave', async () => {
       const rel = await this.relOrThrow(file);
       const saved = toBytes(content);
       const savedOid = gitBlobId(saved);
@@ -379,20 +398,42 @@ export class ReviewEngine {
           diskText = convertEol(diskText, savedEol);
           baseText = convertEol(baseText, savedEol);
         }
-        let prov = options.edits ? trackEdits(diskText, options.edits) : undefined;
-        attribution = 'edits';
-        if (!prov || joinLines(prov.lines.map((l) => l.text)) !== savedText) {
-          prov = provenanceFromDiff(diskText, savedText, 'user');
-          attribution = options.edits ? 'fallback' : 'diff';
+        let prov: Provenance | undefined;
+        if (options.userContent !== undefined) {
+          // Two passes: the user's edits (disk -> userContent), then the formatter's (userContent -> saved).
+          const userText = savedEol ? convertEol(options.userContent, savedEol) : options.userContent;
+          prov = options.edits ? trackEdits(diskText, options.edits.filter((e) => e.origin === 'user')) : undefined;
+          attribution = 'edits';
+          if (!prov || joinLines(prov.lines.map((l) => l.text)) !== userText) {
+            prov = provenanceFromDiff(diskText, userText, 'user');
+            attribution = options.edits ? 'fallback' : 'diff';
+          }
+          const agentLines = new Set<number>();
+          for (const r of diffRegions(splitLines(baseText), splitLines(diskText))) { for (let d = r.bStart; d < r.bEnd; d++) { agentLines.add(d); } }
+          prov = addFormatterPass(prov, userText, savedText, (d) => agentLines.has(d));
+        } else {
+          prov = options.edits ? trackEdits(diskText, options.edits) : undefined;
+          attribution = 'edits';
+          if (!prov || joinLines(prov.lines.map((l) => l.text)) !== savedText) {
+            prov = provenanceFromDiff(diskText, savedText, 'user');
+            attribution = options.edits ? 'fallback' : 'diff';
+          }
         }
         const baseLines = splitLines(baseText);
         const folded = foldUserSave(baseLines, splitLines(diskText), prov);
+        if (this.traceFn) {
+          const n = (o: string) => options.edits?.filter((e) => e.origin === o).length ?? 0;
+          const before = diffRegions(baseLines, splitLines(diskText)).length;
+          const after = diffRegions(folded, splitLines(savedText)).length;
+          const fmt = options.userContent === undefined ? 'formatter: by edit tags' : options.userContent === savedText ? 'no formatter changes' : 'formatter: by diff from the user text';
+          this.trace(`${rel}: save attributed by ${attribution} (${options.edits ? `${options.edits.length} edits: ${n('user')} user, ${n('formatter')} formatter` : 'no edit log'}; ${fmt}; base ${options.base !== undefined ? 'given' : 'from disk'}); changes against the baseline: ${before} before the save (baseline -> disk), ${after} after (new baseline -> saved)`);
+        }
         // An agent-created file the user saved without folding anything stays a pending creation.
         if (!baseEntry && folded.length === 0 && saved.length > 0) { newBaseline = undefined; }
         else { newBaseline = encodeText(joinLines(folded)); }
       }
 
-      if (newBaseline) { await this.setBaseline(rel, newBaseline); }
+      if (newBaseline) { await this.setBaseline(rel, newBaseline, `user save, attribution: ${attribution}`); }
       // The host is about to write `saved`; record it so pending is right before the watcher catches up.
       this.disk.set(rel, { oid: savedOid, size: saved.length, binary: isBinary(saved), mtimeMs: 0, ctimeMs: 0, recordedAt: 0 });
       this.updatePending(rel);
@@ -404,11 +445,11 @@ export class ReviewEngine {
 
   /** Report that the user deleted a file or folder in the editor: its baseline goes too (nothing pending). */
   reportUserDelete(file: string): Promise<void> {
-    return this.run(async () => {
+    return this.run('reportUserDelete', async () => {
       const rel = await this.relOrThrow(file);
       const touched: string[] = [];
       for (const p of this.trackedUnder(rel)) {
-        this.baseline.delete(p);
+        this.dropBaseline(p, 'user deleted it');
         this.disk.delete(p);
         this.expectedWrites.set(p, null);
         this.updatePending(p);
@@ -422,7 +463,7 @@ export class ReviewEngine {
 
   /** Report that the user renamed a file or folder in the editor: baseline entries move with it. */
   reportUserRename(from: string, to: string): Promise<void> {
-    return this.run(async () => {
+    return this.run('reportUserRename', async () => {
       const a = await this.relOrThrow(from);
       const b = await this.relOrThrow(to);
       const touched: string[] = [];
@@ -464,7 +505,7 @@ export class ReviewEngine {
 
   /** Full change for one file, including hunks with word-level ranges. Reads the disk fresh. */
   getFileChange(file: string): Promise<FileChange | undefined> {
-    return this.run(async () => {
+    return this.run('getFileChange', async () => {
       const rel = await this.relOrThrow(file);
       return (await this.loadChange(rel))?.change;
     });
@@ -472,7 +513,7 @@ export class ReviewEngine {
 
   /** Accepted (baseline) content of a file, or undefined if it isn't in the baseline. */
   getBaselineContent(file: string): Promise<Uint8Array | undefined> {
-    return this.run(async () => {
+    return this.run('getBaselineContent', async () => {
       const rel = await this.relOrThrow(file);
       const e = this.baseline.get(rel);
       return e ? this.store.read(e.oid) : undefined;
@@ -487,17 +528,17 @@ export class ReviewEngine {
   // ---------------------------------------------------------------- operations
 
   acceptHunk(file: string, hunkId: string): Promise<void> {
-    return this.run(async () => {
+    return this.run('acceptHunk', async () => {
       const rel = await this.relOrThrow(file);
       const loaded = await this.loadChange(rel);
       if (!loaded) { throw new NotPendingError(rel); }
       const hunk = loaded.change.hunks.find((h) => h.id === hunkId);
       if (!hunk) { throw new StaleChangeError(`Hunk ${hunkId} no longer matches ${rel}; re-read the file's changes`); }
       if (loaded.change.reviewMode === 'file') {
-        await this.acceptPath(rel, true);
+        await this.acceptPath(rel, true, 'Keep (whole-file change)');
       } else {
         const next = acceptHunks(loaded.baseLines!, loaded.diskLines!, [hunkRegion(hunk)]);
-        await this.setBaseline(rel, encodeText(joinLines(next)));
+        await this.setBaseline(rel, encodeText(joinLines(next)), `Keep hunk ${hunkId}`);
         this.updatePending(rel);
       }
       this.emit('accept', [rel]);
@@ -506,7 +547,7 @@ export class ReviewEngine {
   }
 
   rejectHunk(file: string, hunkId: string): Promise<void> {
-    return this.run(async () => {
+    return this.run('rejectHunk', async () => {
       const rel = await this.relOrThrow(file);
       const loaded = await this.loadChange(rel);
       if (!loaded) { throw new NotPendingError(rel); }
@@ -539,7 +580,7 @@ export class ReviewEngine {
     content: string | Uint8Array | null,
     options: { expectedBaseline?: string | Uint8Array | null; restoreLineEndings?: boolean } = {},
   ): Promise<void> {
-    return this.run(async () => {
+    return this.run('setBaselineContent', async () => {
       const rel = await this.relOrThrow(file);
       if (await this.rules.isIgnored(rel)) { throw new Error(`${rel} is ignored; it has no baseline`); }
       if (options.expectedBaseline !== undefined) {
@@ -548,7 +589,7 @@ export class ReviewEngine {
         if (current !== expected) { throw new StaleChangeError(`The baseline of ${rel} changed; re-read it`); }
       }
       if (content === null) {
-        if (this.baseline.delete(rel)) { this.dirty = true; }
+        this.dropBaseline(rel, 'set to null by the host');
       } else {
         let bytes = toBytes(content);
         const text = options.restoreLineEndings ? decodeText(bytes) : undefined;
@@ -562,7 +603,7 @@ export class ReviewEngine {
           if (baseText !== undefined) { sources.push(baseText); }
           bytes = encodeText(restoreLineEndings(text, sources));
         }
-        await this.setBaseline(rel, bytes);
+        await this.setBaseline(rel, bytes, 'set by the host (Keep in the editor, or Ctrl+Z of one)');
       }
       this.updatePending(rel);
       this.emit('accept', [rel]);
@@ -572,12 +613,12 @@ export class ReviewEngine {
 
   /** Accept a whole file (for renames, either path accepts the rename). */
   acceptFile(file: string): Promise<void> {
-    return this.run(async () => {
+    return this.run('acceptFile', async () => {
       const rel = await this.relOrThrow(file);
       const paths = this.reviewUnit(rel);
       if (!paths.some((p) => this.pending.has(p))) { throw new NotPendingError(rel); }
       for (const p of paths) { if (!(await this.isFresh(p))) { throw new StaleChangeError(`${p} changed on disk; re-read its changes`); } }
-      for (const p of paths) { await this.acceptPath(p, false); }
+      for (const p of paths) { await this.acceptPath(p, false, 'Keep file'); }
       this.emit('accept', paths);
       await this.persist();
     });
@@ -585,7 +626,7 @@ export class ReviewEngine {
 
   /** Reject a whole file: restore modified/deleted content, delete created files, undo renames. */
   rejectFile(file: string): Promise<void> {
-    return this.run(async () => {
+    return this.run('rejectFile', async () => {
       const rel = await this.relOrThrow(file);
       const paths = this.reviewUnit(rel);
       if (!paths.some((p) => this.pending.has(p))) { throw new NotPendingError(rel); }
@@ -598,7 +639,7 @@ export class ReviewEngine {
 
   /** Accept every pending change. Files that changed since last observed are refreshed and skipped. */
   acceptAll(): Promise<BulkResult> {
-    return this.run(async () => {
+    return this.run('acceptAll', async () => {
       const result: BulkResult = { done: [], skipped: [] };
       for (const s of this.listChanges()) {
         const paths = s.oldPath ? [s.oldPath, s.path] : [s.path];
@@ -606,7 +647,7 @@ export class ReviewEngine {
           result.skipped.push(...paths);
           continue;
         }
-        for (const p of paths) { await this.acceptPath(p, false); }
+        for (const p of paths) { await this.acceptPath(p, false, 'Keep All'); }
         result.done.push(...paths);
       }
       this.emit('accept', result.done);
@@ -617,7 +658,7 @@ export class ReviewEngine {
 
   /** Reject every pending change. Files that changed since last observed are refreshed and skipped. */
   rejectAll(): Promise<BulkResult> {
-    return this.run(async () => {
+    return this.run('rejectAll', async () => {
       const result: BulkResult = { done: [], skipped: [] };
       for (const s of this.listChanges()) {
         const paths = s.oldPath ? [s.oldPath, s.path] : [s.path];
@@ -636,7 +677,7 @@ export class ReviewEngine {
 
   /** Check the enclosing repository for git operations now (also done after every event batch). */
   checkGit(): Promise<GitOperationResult> {
-    return this.run(async () => {
+    return this.run('checkGit', async () => {
       const r = await this.pollGit();
       await this.persist();
       return r;
@@ -645,9 +686,12 @@ export class ReviewEngine {
 
   // ---------------------------------------------------------------- internals: serialization & events
 
-  private run<T>(fn: () => Promise<T>): Promise<T> {
+  private run<T>(op: string, fn: () => Promise<T>): Promise<T> {
     if (this.closed) { return Promise.reject(new Error('ReviewEngine is closed')); }
-    const result = this.queue.then(fn);
+    const result = this.queue.then(() => {
+      this.op = op;
+      return fn();
+    });
     this.queue = result.catch(() => undefined);
     return result;
   }
@@ -723,11 +767,29 @@ export class ReviewEngine {
 
   // ---------------------------------------------------------------- internals: disk & baseline state
 
+  private trace(message: string): void {
+    if (!this.traceFn) { return; }
+    try {
+      this.traceFn(`[${this.op}] ${message}`);
+    } catch {
+      // A failing logger must not break the engine.
+    }
+  }
+
   private updatePending(rel: string): void {
     const d = this.disk.get(rel);
     const b = this.baseline.get(rel);
+    const was = this.pending.has(rel);
     if (d?.oid === b?.oid) { this.pending.delete(rel); }
     else { this.pending.add(rel); }
+    if (was !== this.pending.has(rel)) { this.trace(`${rel}: ${was ? 'no longer pending' : 'pending'} (disk ${short(d?.oid)}, baseline ${short(b?.oid)})`); }
+  }
+
+  private dropBaseline(rel: string, why: string): boolean {
+    if (!this.baseline.delete(rel)) { return false; }
+    this.dirty = true;
+    this.trace(`${rel}: baseline dropped (${why})`);
+    return true;
   }
 
   private async readDisk(rel: string, st?: FileStat): Promise<ReadResult | undefined> {
@@ -751,10 +813,12 @@ export class ReviewEngine {
     return { entry, data };
   }
 
-  private async setBaseline(rel: string, data: Uint8Array): Promise<void> {
+  private async setBaseline(rel: string, data: Uint8Array, why: string): Promise<void> {
     const oid = await this.store.write(data);
+    const old = this.baseline.get(rel)?.oid;
     this.baseline.set(rel, { oid, size: data.length, binary: isBinary(data) });
     this.dirty = true;
+    if (old !== oid) { this.trace(`${rel}: baseline ${short(old)} -> ${short(oid)} (${why})`); }
   }
 
   private async writeDisk(rel: string, data: Uint8Array): Promise<void> {
@@ -836,7 +900,7 @@ export class ReviewEngine {
     const st = await this.fs.stat(this.abs(rel));
     const untrack = (p: string) => {
       if (this.disk.has(p) || this.baseline.has(p)) { changed.push(p); }
-      if (this.baseline.delete(p)) { this.dirty = true; }
+      this.dropBaseline(p, 'now ignored');
       this.disk.delete(p);
       this.updatePending(p);
     };
@@ -900,7 +964,7 @@ export class ReviewEngine {
       const r = await this.readDisk(pdf);
       if (!r) { return []; }
       this.disk.set(pdf, r.entry);
-      await this.setBaseline(pdf, r.data);
+      await this.setBaseline(pdf, r.data, 'no longer a LaTeX build artifact');
       this.updatePending(pdf);
     }
     return [];
@@ -951,7 +1015,7 @@ export class ReviewEngine {
       if (!r) { return; }
       if (cached?.oid !== r.entry.oid) { changed.push(rel); }
       this.disk.set(rel, r.entry);
-      if (opts.initAll || wasIgnored) { await this.setBaseline(rel, r.data); }
+      if (opts.initAll || wasIgnored) { await this.setBaseline(rel, r.data, opts.initAll ? 'first scan' : 'no longer ignored'); }
     });
     for (const rel of [...this.disk.keys()]) {
       if (!seen.has(rel)) {
@@ -962,7 +1026,7 @@ export class ReviewEngine {
     // Baseline entries for paths that are now ignored stop being tracked.
     for (const rel of [...this.baseline.keys()]) {
       if (!seen.has(rel) && (await this.rules.isIgnored(rel))) {
-        this.baseline.delete(rel);
+        this.dropBaseline(rel, 'now ignored');
         changed.push(rel);
       }
     }
@@ -1064,17 +1128,17 @@ export class ReviewEngine {
     return { change: { ...summary, hunks: computeHunks(baseLines, diskLines) }, baseLines, diskLines };
   }
 
-  private async acceptPath(rel: string, checkFresh: boolean): Promise<void> {
+  private async acceptPath(rel: string, checkFresh: boolean, why: string): Promise<void> {
     if (checkFresh && !(await this.isFresh(rel))) { throw new StaleChangeError(`${rel} changed on disk`); }
     const r = this.disk.has(rel) ? await this.readDisk(rel) : undefined;
     const saving = this.saveInFlight(rel, r);
     if (saving) {
-      await this.setBaseline(rel, saving.data); // accept what is being saved, not the old disk
+      await this.setBaseline(rel, saving.data, `${why}, the save in flight`); // accept what is being saved, not the old disk
     } else if (r) {
       this.disk.set(rel, r.entry);
-      await this.setBaseline(rel, r.data);
-    } else if (this.baseline.delete(rel)) {
-      this.dirty = true;
+      await this.setBaseline(rel, r.data, why);
+    } else {
+      this.dropBaseline(rel, why);
     }
     this.updatePending(rel);
   }
@@ -1126,7 +1190,7 @@ export class ReviewEngine {
     this.gitRetryTimer = setTimeout(() => {
       this.gitRetryTimer = undefined;
       if (this.closed) { return; }
-      void this.run(async () => {
+      void this.run('gitRetry', async () => {
         await this.pollGit();
         await this.persist();
       }).catch(() => undefined);
@@ -1165,7 +1229,7 @@ export class ReviewEngine {
       await this.fullScan({ trustStatCache: true });
       const accepted: string[] = [];
       for (const rel of [...this.pending]) {
-        await this.acceptPath(rel, false);
+        await this.acceptPath(rel, false, `git HEAD moved (${short(this.gitHead.oid ?? undefined)} -> ${short(head.oid ?? undefined)})`);
         accepted.push(rel);
       }
       this.gitHead = head;
@@ -1198,6 +1262,7 @@ export class ReviewEngine {
     this.gitIndexStat = idxStat;
     this.dirty = true;
     const accepted = await this.acceptStaged(staged);
+    if (staged.length) { this.trace(`git index changed for ${staged.join(', ')}; accepted: ${accepted.join(', ') || 'nothing'}`); }
     if (accepted.length) { this.emit('git-index', accepted); }
     return { kind: 'index', staged: staged.sort(), accepted };
   }
@@ -1218,14 +1283,14 @@ export class ReviewEngine {
       if (!diskRead) {
         // Pending deletion: staged once the index no longer has the file.
         if (indexOid === undefined) {
-          await this.acceptPath(rel, false);
+          await this.acceptPath(rel, false, 'deletion staged');
           accepted.push(rel);
         }
         continue;
       }
       if (indexOid === undefined) { continue; }
       if (indexOid === diskOid) {
-        await this.acceptPath(rel, false);
+        await this.acceptPath(rel, false, 'staged (index = disk)');
         accepted.push(rel);
         continue;
       }
@@ -1238,12 +1303,16 @@ export class ReviewEngine {
       const diskLines = splitLines(decodeText(diskRead.data)!);
       const regions = stagedRegions(baseLines, diskLines, splitLines(indexText));
       if (regions.length === 0) { continue; }
-      await this.setBaseline(rel, encodeText(joinLines(acceptHunks(baseLines, diskLines, regions))));
+      await this.setBaseline(rel, encodeText(joinLines(acceptHunks(baseLines, diskLines, regions))), `partly staged (${regions.length} region(s))`);
       this.updatePending(rel);
       accepted.push(rel);
     }
     return accepted;
   }
+}
+
+function short(oid: string | undefined): string {
+  return oid ? oid.slice(0, 8) : 'none';
 }
 
 function push<K, V>(m: Map<K, V[]>, k: K, v: V): void {

@@ -38,6 +38,18 @@ export interface SavedLine {
   src: number;
   /** Who wrote a new line. Undefined for unchanged disk lines. */
   origin?: EditOrigin;
+  /** A formatter's line that contains words from an agent-added line: never folded into the baseline on its own. */
+  agentText?: boolean;
+  /**
+   * A formatter's line with words from other lines than the one it replaces (a reflow moved words across lines), so
+   * it can't stand in for that line alone.
+   */
+  moved?: boolean;
+  /**
+   * Not in the saved content: a line of the user's, before format on save mixed it into agent text, that goes into
+   * the baseline in its place (see addFormatterPass).
+   */
+  ghost?: boolean;
 }
 
 export interface Provenance {
@@ -157,6 +169,117 @@ export function trackEdits(disk: string, edits: readonly TrackedEdit[]): Provena
   return { lines, removedBy };
 }
 
+/** Non-whitespace tokens of a line: runs of letters/digits/underscore, and single other characters. */
+const WORD_RE = /[\p{L}\p{N}_]+|[^\p{L}\p{N}_\s]/gu;
+/** Above this many tokens in one changed region, new lines aren't traced to their words (they count as the formatter's). */
+const MAX_REGION_TOKENS = 20_000;
+
+/**
+ * Add a formatter pass to the provenance of the user's text: `saved` is `userText` after format on save (or any
+ * edits the editor made while saving). The formatter's changes are found by diffing, so this doesn't depend on an
+ * edit log: unchanged lines keep their provenance, and removed disk lines count as removed by the formatter (unless
+ * the user removed them first).
+ *
+ * Each new line is traced to the words it is made of (a word-level diff of the changed region): a formatter only
+ * moves words around. A line with any word from an agent-added disk line (`isAgentLine`) is the formatter's and
+ * carries agent text, so it stays pending as part of the agent's change. A line made of the user's words (and
+ * maybe unchanged lines' words) is the user's: format on save reflowing a line the user typed next to an agent
+ * hunk folds in, instead of becoming part of the agent's change, which Undo would remove. Any other line (only
+ * unchanged lines' words, or only the formatter's punctuation) is the formatter's. A word the trace can't find in
+ * the changed region's old lines (moved across an unchanged line) counts as possibly the agent's.
+ */
+export function addFormatterPass(user: Provenance, userText: string, saved: string, isAgentLine: (diskLine: number) => boolean = () => false): Provenance {
+  if (userText === saved) { return user; }
+  const u = splitLines(userText);
+  const s = splitLines(saved);
+  const lines: SavedLine[] = [];
+  const removedBy = new Map(user.removedBy);
+  let ui = 0;
+  let si = 0;
+  const pushEqualUntil = (uEnd: number) => {
+    while (ui < uEnd) {
+      lines.push({ ...user.lines[ui++]!, text: s[si++]! });
+    }
+  };
+  for (const r of diffRegions(u, s)) {
+    pushEqualUntil(r.aStart);
+    for (let i = r.aStart; i < r.aEnd; i++) {
+      const src = user.lines[i]!.src;
+      if (src >= 0 && !removedBy.has(src)) { removedBy.set(src, 'formatter'); }
+    }
+    // Where each word of the new lines came from: 'agent', 'user' or 'common' (an unchanged disk line).
+    const kindOf = (i: number): 'agent' | 'user' | 'common' => {
+      const l = user.lines[i]!;
+      if (l.src < 0) { return l.origin === 'user' ? 'user' : 'common'; }
+      return isAgentLine(l.src) ? 'agent' : 'common';
+    };
+    const oldWords: { word: string; kind: 'agent' | 'user' | 'common'; line: number }[] = [];
+    for (let i = r.aStart; i < r.aEnd; i++) { for (const w of u[i]!.match(WORD_RE) ?? []) { oldWords.push({ word: w, kind: kindOf(i), line: i }); } }
+    const paired = r.aEnd - r.aStart === r.bEnd - r.bStart;
+    const moved = new Set<number>();
+    /** New lines with a (letter/digit) word of the user's. */
+    const userWords = new Set<number>();
+    const newWords: { word: string; line: number }[] = [];
+    for (let j = r.bStart; j < r.bEnd; j++) { for (const w of s[j]!.match(WORD_RE) ?? []) { newWords.push({ word: w, line: j }); } }
+    const found = new Map<number, Set<string>>();
+    if (oldWords.length + newWords.length <= MAX_REGION_TOKENS) {
+      let oi = 0;
+      let ni = 0;
+      const matchUntil = (oEnd: number) => {
+        while (oi < oEnd) {
+          const line = newWords[ni++]!.line;
+          const kinds = found.get(line) ?? new Set<string>();
+          if (!paired || oldWords[oi]!.line - r.aStart !== line - r.bStart) { moved.add(line); }
+          if (oldWords[oi]!.kind === 'user' && /[\p{L}\p{N}]/u.test(oldWords[oi]!.word)) { userWords.add(line); }
+          kinds.add(oldWords[oi++]!.kind);
+          if (!found.has(line)) { found.set(line, kinds); }
+        }
+      };
+      for (const w of diffRegions(oldWords.map((x) => x.word), newWords.map((x) => x.word))) {
+        matchUntil(w.aStart);
+        // A word that isn't in the region's old lines was moved here from elsewhere (formatters add whitespace and
+        // punctuation, not words): it may be the agent's.
+        for (let k = w.bStart; k < w.bEnd; k++) {
+          if (/[\p{L}\p{N}]/u.test(newWords[k]!.word)) {
+            found.set(newWords[k]!.line, new Set(['agent']));
+            moved.add(newWords[k]!.line);
+          }
+        }
+        oi = w.aEnd;
+        ni = w.bEnd;
+      }
+      matchUntil(oldWords.length);
+    } else {
+      // Too big to trace: assume any line may carry agent text, from anywhere.
+      for (let j = r.bStart; j < r.bEnd; j++) {
+        found.set(j, new Set(['agent']));
+        moved.add(j);
+      }
+    }
+    // The formatter mixed the user's words into a line with agent words: that line stays pending, so the user's text
+    // in it would be lost from the baseline (and Undo would delete it). Keep the user's lines of this region as they
+    // were before formatting in the baseline instead (ghosts), and fold none of the region's new lines.
+    let mixed = false;
+    for (let j = r.bStart; j < r.bEnd; j++) { if (found.get(j)?.has('agent') && userWords.has(j)) { mixed = true; } }
+    if (mixed) {
+      for (let i = r.aStart; i < r.aEnd; i++) {
+        if (kindOf(i) === 'user') { lines.push({ text: u[i]!.endsWith('\n') ? u[i]! : `${u[i]!}\n`, src: -1, origin: 'user', ghost: true, moved: true }); }
+      }
+    }
+    for (let j = r.bStart; j < r.bEnd; j++) {
+      const kinds = found.get(j);
+      const line: SavedLine = kinds?.has('agent') ? { text: s[j]!, src: -1, origin: 'formatter', agentText: true }
+        : { text: s[j]!, src: -1, origin: kinds?.has('user') && !mixed ? 'user' : 'formatter' };
+      if (moved.has(j) || mixed) { line.moved = true; }
+      lines.push(line);
+    }
+    ui = r.aEnd;
+    si = r.bEnd;
+  }
+  pushEqualUntil(u.length);
+  return { lines, removedBy };
+}
+
 /**
  * Compute the new baseline after a user save.
  *
@@ -218,7 +341,7 @@ export function foldUserSave(baseline: readonly string[], disk: readonly string[
       if (insideAgent && saved.removedBy.get(d) === 'formatter') { out.push(disk[d]!); }
     }
     for (const l of newLines) {
-      if (l.origin === 'user' || !insideAgent) { out.push(l.text); }
+      if (l.origin === 'user' || (!insideAgent && !l.agentText)) { out.push(l.text); }
     }
   };
 
@@ -230,13 +353,15 @@ export function foldUserSave(baseline: readonly string[], disk: readonly string[
     while (j < S.length && S[j]!.src < 0) { j++; }
     const nextD = j < S.length ? S[j]!.src : nD;
     const gap = S.slice(i, j);
-    if (gap.length > 0 && gap.length === nextD - p && gap.some((l) => l.origin === 'formatter')) {
+    if (gap.length > 0 && gap.length === nextD - p && gap.some((l) => l.origin === 'formatter') && !gap.some((l) => l.moved)) {
       // A line-for-line rewrite that a formatter took part in (format on save touches runs of adjacent lines,
       // often next to or across agent hunks): pair each new line with the disk line it replaced and decide per
-      // line. A rewritten agent line stays pending unless the user wrote it; any other line folds in.
+      // line. A rewritten agent line stays pending unless the user wrote it; any other line folds in. Not when the
+      // formatter moved words across lines (a reflow): then a new line isn't its old line reformatted, and folding
+      // it would drop the words it lost from the baseline (and Undo would delete them).
       for (let k = 0; k < gap.length; k++) {
         emitDeletions(p + k);
-        if (dCommon[p + k] !== -1 || gap[k]!.origin === 'user') { out.push(gap[k]!.text); }
+        if ((dCommon[p + k] !== -1 && !gap[k]!.agentText) || gap[k]!.origin === 'user') { out.push(gap[k]!.text); }
       }
       emitDeletions(nextD);
     } else {

@@ -98,6 +98,15 @@ suite('AgentReview: save attribution with format on save', () => {
 		assert.ok(event.version > userVersion, 'the formatter edit comes after the user version');
 		assert.strictEqual(event.version, model.textEditorModel.getVersionId(), 'nothing changes after the report');
 		assert.strictEqual(text, 'alpha = 1\ngamma = 3\n', 'reported right before the write, with the formatter edits applied');
+		assert.strictEqual(event.userText, 'alpha = 1\ngamma=3\n', 'the text as the user left it, before the formatter');
+	});
+
+	test('no userText when no participant changed the buffer', async () => {
+		model.textEditorModel.applyEdits([EditOperation.replace(new Range(2, 1, 2, 9), 'gamma = 3')]);
+		await model.save({ reason: SaveReason.EXPLICIT });
+		assert.strictEqual(events.length, 1);
+		assert.strictEqual(events[0].event.userVersion, events[0].event.version);
+		assert.strictEqual(events[0].event.userText, undefined);
 	});
 
 	test('runs after participants added later, so their edits are reported too', async () => {

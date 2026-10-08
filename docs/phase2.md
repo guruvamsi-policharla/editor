@@ -41,6 +41,22 @@ All screenshots come from the packaged `VSCode-linux-x64/editor` built by `fork/
 | [`before-merge.png`](img/polish-2/before-merge.png) / [`after-merge.png`](img/polish-2/after-merge.png) | The 3-way merge editor (agent write under unsaved edits): before, the Result pane also had red rows, Keep/Undo and the file bar; after, only the merge |
 | [`after-figure-cite.png`](img/polish-2/after-figure-cite.png) | A figure caption reworded with a `\cite{...,...}` added: track changes in the caption line |
 
+### polish-3 (packaged build; `/workspace/cc/polish-3-smoke`)
+
+| Screenshot | What it shows |
+|---|---|
+| [`before-json-accepted.png`](img/polish-3/before-json-accepted.png) | **Before** (polish-2 build, P2-6): the agent added `warmup`/`cores` to `data.json`; the user typed `, 2048` and saved with JSON format on save. Nothing is pending any more: the agent's edit was accepted without review |
+| [`before-json-reflow.png`](img/polish-3/before-json-reflow.png) | **Before** (polish-2, P2-7): when the change did stay pending, the user's reflowed `batch` lines and `2048` were part of the agent's change (Undo would have removed them) |
+| [`after-json-format-on-save.png`](img/polish-3/after-json-format-on-save.png) | **After**, same steps (polish-2's whole long-session sequence first): only the agent's `warmup`/`cores` lines are pending; the user's lines folded in |
+| [`after-latexindent.png`](img/polish-3/after-latexindent.png) | latexindent (via LaTeX Workshop) as format on save: the agent changed one `align` row, the user typed elsewhere and saved. latexindent re-aligned both rows; the user's row folded in, the agent's row is pending (track changes) |
+| [`claude-p-pending.png`](img/polish-3/claude-p-pending.png) | A real `claude -p` run in the Agent Terminal: its added sentence is pending; Ctrl+Y with the cursor in it keeps it (disk untouched) |
+
+**The vanished JSON change (P2-6), root cause.** Traced in the packaged app with the new `agentReview.trace` setting: VS Code reported the first keystroke in `data.json` with the document clean (the dirty state arrives as a separate event right after). The extension's edit log took that as "the buffer matches the disk again" and restarted after the keystroke, so the log missed it. At the save, the log didn't replay, and the engine fell back to diffing with every changed line counted as the user's — including format on save's reflow of the agent's line. A hunk whose agent lines were all "rewritten by the user" counts as resolved, so the whole file folded into the baseline. A buffer restored by hot exit (no edit log at all) hit the same fallback. Fixes: the edit log treats a clean report as tentative (cancelled by the dirty-state event for the same version), and core now passes the text as the user left it before save participants (`userText`), so the engine finds the formatter's part by diffing instead of trusting the log.
+
+**Format on save next to agent text (P2-7 and the reflow cases the stress harness found).** Formatter lines are traced to the words they're made of: a line with an agent word stays pending (and is never folded), a line of the user's words folds in. A reflow that moves words across lines no longer folds line-for-line (that dropped base words from the baseline), and the user's words mixed into an agent line stay in the baseline as the user wrote them.
+
+**Stress harness** (`packages/engine/test/stress/sim.ts`, in both suites with fixed seeds): agent writes, typing, saves with and without formatters (JSON, LaTeX reflow and indentation), Keep/Undo, editor undo, restarts and git, checking after every step that no agent text reaches the baseline without a Keep, a HEAD move or staging, and that no base text leaves it while on disk.
+
 Also checked by hand in the packaged app:
 
 - The ↑/↓ overlay arrows move between hunks and files with chat disabled.
@@ -126,7 +142,7 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 |---|---|---|
 | `90-diff-preserve-short-matching-lines.patch` | +468 −2 (2 diff options; new `alignSimilarLines.ts` + 8 tests; 2 more unit tests) | `linesDiffComputer.ts`, `documentDiffProvider.ts`, `defaultLinesDiffComputer.ts`, the diff test file |
 | `91-chat-editing-review-hooks.patch` | +412 −41 | `chatEditingTextModelChangeService.ts` (C3 predicate gets the event; public `extendToSubwords` / `preserveShortMatchingLines`), `chatEditingEditorActions.ts` (C5 precondition; agent-review titles and the "Agent Review" category; 3 classes exported for tests), `chatEditingCodeEditorIntegration.ts` (hunk toolbar at the end of the last row or in its own row, opt-in via `hunkToolbarRows`; track changes, opt-in via `trackChanges`; deleted lines wrap), `chatEditingCodeEditorIntegration.ts` / `chatEditingNotebookEditorIntegration.ts` (diff title; the cursor-in-change context key per editor), `chatEditingServiceImpl.ts` (explorer tooltip), `chatEditingEditorOverlay.ts` (agent review: the file bar at the bottom center with the file's name; none in the merge editor) |
-| `92-agent-review.patch` | +2091 (incl. blank lines): new `contrib/agentReview/` (entry, service, contribution, save-attribution participants, 3-way merge, CSS, 34 tests in 3 files) + 1 import line in `workbench.common.main.ts` | `workbench.common.main.ts` (1 line) |
+| `92-agent-review.patch` | +2107 (incl. blank lines): new `contrib/agentReview/` (entry, service, contribution, save-attribution participants, 3-way merge, CSS, 34 tests in 3 files) + 1 import line in `workbench.common.main.ts` | `workbench.common.main.ts` (1 line) |
 | `93-default-layout.patch` | +2 −2 | Secondary side bar hidden by default (`workbench.contribution.ts`, `themeMainServiceImpl.ts`) |
 
 ## Engine additions
@@ -159,9 +175,9 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 
 | Suite | Count | Command |
 |---|---|---|
-| Engine (vitest) | 162 (14 files) | `npm test -w @editor/engine` |
-| Extension integration (vitest, real engine on temp dirs, fake core / fake terminal) | 36 | `npm test -w agent-review` |
-| Core `contrib/agentReview` (Electron) | 34 | `fork/scripts/test-core.sh` |
+| Engine (vitest; incl. the stress harness: 40 + 10 seeds) | 176 (17 files) | `npm test -w @editor/engine` (`STRESS_SEED=<n>` replays a seed) |
+| Extension integration (vitest, real engine on temp dirs, fake core / fake terminal; incl. the stress harness through the controller: 25 + 7 seeds) | 42 | `npm test -w agent-review` |
+| Core `contrib/agentReview` (Electron) | 35 | `fork/scripts/test-core.sh` |
 | Upstream chat-editing regression (Electron) | 49 | `fork/scripts/test-core.sh` |
 | Upstream diff + fixtures (node, incl. 2 new) + similar-line alignment (8) | 133 | `fork/scripts/test-core.sh` |
 | Core typecheck of the patched tree (tsgo) | 0 errors | `npm run typecheck-client` (CI `patches` job) |

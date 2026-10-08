@@ -9,10 +9,12 @@
 // agent-review extension hears about a save, formatter edits are already in the buffer and look like
 // the user's typing.
 //
-// Two participants bracket all others: the first records the model's version before any participant
-// runs; the last tells the extension `agentReview.ext.onWillWrite({ uri, userVersion, version })`
-// right before the write. Buffer edits after `userVersion` were made by the editor during the save,
-// not by the user: the engine keeps them pending inside agent hunks and folds them in elsewhere.
+// Two participants bracket all others: the first records the model's version and text before any
+// participant runs; the last tells the extension `agentReview.ext.onWillWrite({ uri, userVersion,
+// version, userText })` right before the write. Buffer edits after `userVersion` were made by the
+// editor during the save, not by the user: the engine keeps them pending inside agent hunks and folds
+// them in elsewhere. `userText` lets the engine find them by diffing (user text -> written text) even
+// when the extension's edit log or document version can't be trusted.
 
 import { raceTimeout } from '../../../../base/common/async.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
@@ -30,6 +32,8 @@ export interface IAgentReviewWillWriteEvent {
 	readonly userVersion: number;
 	/** Model version about to be written. */
 	readonly version: number;
+	/** The text at `userVersion` (as the user left it), when save participants changed it; else omitted. */
+	readonly userText?: string;
 }
 
 /** Same budget the extension host gets for onWillSaveTextDocument. */
@@ -41,7 +45,7 @@ export class AgentReviewSaveParticipants extends Disposable implements IWorkbenc
 	static readonly FIRST = -1_000_000;
 	static readonly LAST = 1_000_000;
 
-	private readonly _userVersions = new ResourceMap<number>();
+	private readonly _userVersions = new ResourceMap<{ readonly version: number; readonly text: string }>();
 
 	constructor(
 		@ITextFileService textFileService: ITextFileService,
@@ -61,17 +65,20 @@ export class AgentReviewSaveParticipants extends Disposable implements IWorkbenc
 
 	private _willParticipate(model: ITextFileEditorModel): void {
 		if (model.textEditorModel) {
-			this._userVersions.set(model.resource, model.textEditorModel.getVersionId());
+			this._userVersions.set(model.resource, { version: model.textEditorModel.getVersionId(), text: model.textEditorModel.getValue() });
 		}
 	}
 
 	private async _willWrite(model: ITextFileEditorModel): Promise<void> {
-		const userVersion = this._userVersions.get(model.resource);
+		const user = this._userVersions.get(model.resource);
 		this._userVersions.delete(model.resource);
-		if (userVersion === undefined || !model.textEditorModel) {
+		if (user === undefined || !model.textEditorModel) {
 			return;
 		}
-		const event: IAgentReviewWillWriteEvent = { uri: model.resource, userVersion, version: model.textEditorModel.getVersionId() };
+		const version = model.textEditorModel.getVersionId();
+		const event: IAgentReviewWillWriteEvent = version === user.version
+			? { uri: model.resource, userVersion: user.version, version }
+			: { uri: model.resource, userVersion: user.version, version, userText: user.text };
 		try {
 			// Bounded: a slow or missing extension must never block saving.
 			await raceTimeout(this._commandService.executeCommand('agentReview.ext.onWillWrite', event), WILL_WRITE_TIMEOUT_MS);
