@@ -293,7 +293,7 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.deepStrictEqual(opened.map(i => i.label), ['paper.tex (agent changes)']);
 	});
 
-	test('review commands use agent-review wording; Keep/Undo labels and keybindings are unchanged', () => {
+	test('review commands use agent-review wording and the Agent Review category; Keep/Undo labels and keybindings are unchanged', () => {
 		const desc = (action: { desc: Readonly<IAction2Options> }) => {
 			const kb = action.desc.keybinding;
 			const title = action.desc.title;
@@ -303,10 +303,16 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 				key: (Array.isArray(kb) ? kb[0] : kb)?.primary,
 			};
 		};
+		const category = (action: { desc: Readonly<IAction2Options> }) => {
+			const c = action.desc.category;
+			return typeof c === 'string' ? c : c?.value;
+		};
 		const next = new (class extends NavigateAction { constructor() { super(true); } })();
 		const prev = new (class extends NavigateAction { constructor() { super(false); } })();
+		const actions = [next, prev, new AcceptAction(), new RejectAction(), new AcceptAllEditsAction(), new AcceptHunkAction(), new RejectHunkAction(), new ToggleDiffAction(), new ToggleAccessibleDiffViewAction()];
+		assert.deepStrictEqual(actions.map(category), actions.map(() => 'Agent Review'), 'listed under "Agent Review", not "Chat"');
 		assert.deepStrictEqual(
-			[next, prev, new AcceptAction(), new RejectAction(), new AcceptAllEditsAction(), new AcceptHunkAction(), new RejectHunkAction(), new ToggleDiffAction(), new ToggleAccessibleDiffViewAction()].map(desc),
+			actions.map(desc),
 			[
 				{ title: 'Go to Next Agent Change', short: undefined, key: KeyMod.Alt | KeyCode.F5 },
 				{ title: 'Go to Previous Agent Change', short: undefined, key: KeyMod.Alt | KeyMod.Shift | KeyCode.F5 },
