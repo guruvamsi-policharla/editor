@@ -235,6 +235,8 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.deepStrictEqual(struck.map(d => d.range.startLineNumber), [2], 'the deleted words, in the line');
 		assert.ok(struck.map(d => d.options.before?.content).join('').includes('never'));
 		assert.deepStrictEqual(deletedZones().map(z => z.afterLineNumber), [3], 'only the rewritten closing line gets red rows');
+		const lighter = model.getAllDecorations().filter(d => d.options.className?.includes('agent-review-track-changes-line'));
+		assert.deepStrictEqual(lighter.map(d => d.range.startLineNumber), [2], 'a lighter line tint for track changes only');
 		assert.strictEqual(hunkWidgets().length, 2, 'both still have Keep/Undo');
 	});
 

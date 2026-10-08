@@ -116,3 +116,8 @@
 	padding: 4px 12px;
 	font-size: 12px;
 }
+
+/* Track changes: the edited lines get a lighter tint than the inserted words in them. */
+.monaco-editor .char-insert.agent-review-track-changes-line {
+	background-color: color-mix(in srgb, var(--vscode-diffEditor-insertedTextBackground) 40%, transparent);
+}
