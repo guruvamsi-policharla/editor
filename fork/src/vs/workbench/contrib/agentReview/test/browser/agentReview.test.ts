@@ -212,6 +212,19 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.ok(deleted[0].heightInLines! >= 4, `wrapped into several rows (got ${deleted[0].heightInLines})`);
 	});
 
+	test('a few words changed in a long line show as track changes (no red copy of the line); a rewrite keeps the red rows', async () => {
+		const paragraph = 'We present a batched threshold encryption scheme in which the committee never runs a key generation protocol.';
+		model.setValue(`Intro.\n${paragraph.replace('never runs', 'does not run')}\nUnchanged middle sentence.\nA completely different closing sentence.\n`);
+		await showPending(`Intro.\n${paragraph}\nUnchanged middle sentence.\nClosing.\n`);
+		const deletedZones = () => [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
+		const struck = model.getAllDecorations().filter(d => d.options.before?.inlineClassName === 'inline-deleted-text');
+
+		assert.deepStrictEqual(struck.map(d => d.range.startLineNumber), [2], 'the deleted words, in the line');
+		assert.ok(struck.map(d => d.options.before?.content).join('').includes('never'));
+		assert.deepStrictEqual(deletedZones().map(z => z.afterLineNumber), [3], 'only the rewritten closing line gets red rows');
+		assert.strictEqual(hunkWidgets().length, 2, 'both still have Keep/Undo');
+	});
+
 	test('each Keep/Undo toolbar has its own row below its hunk, so it never covers text', async () => {
 		model.setValue('a one\nb TWO, rewritten by the agent\nc three\ne five\n');
 		const { entry } = await showPending('a one\nb two\nc three\nd four\ne five\n');

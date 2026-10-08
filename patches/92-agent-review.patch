@@ -107,10 +107,10 @@ index 00000000..2820c19f
 +registerWorkbenchContribution2(AgentReviewEditorState.ID, AgentReviewEditorState, WorkbenchPhase.AfterRestored);
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
 new file mode 100644
-index 00000000..baccb665
+index 00000000..da500520
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
-@@ -0,0 +1,382 @@
+@@ -0,0 +1,384 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -253,6 +253,8 @@ index 00000000..baccb665
 +	readonly reviewMode = constObservable(true);
 +	/** Read by ChatEditingCodeEditorIntegration: each hunk's Keep/Undo toolbar gets its own row below the hunk. */
 +	readonly hunkToolbarRows = true;
++	/** Read by ChatEditingCodeEditorIntegration: a few changed words within lines are shown as track changes. */
++	readonly trackChanges = true;
 +	readonly autoAcceptController = constObservable<{ total: number; remaining: number; cancel(): void } | undefined>(undefined);
 +
 +	private readonly _changeService: ChatEditingTextModelChangeService;
@@ -1042,10 +1044,10 @@ index 00000000..68180ed8
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
 new file mode 100644
-index 00000000..27b05950
+index 00000000..43e91463
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
-@@ -0,0 +1,526 @@
+@@ -0,0 +1,539 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -1258,6 +1260,19 @@ index 00000000..27b05950
 +		const deleted = [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
 +		assert.strictEqual(deleted.length, 1);
 +		assert.ok(deleted[0].heightInLines! >= 4, `wrapped into several rows (got ${deleted[0].heightInLines})`);
++	});
++
++	test('a few words changed in a long line show as track changes (no red copy of the line); a rewrite keeps the red rows', async () => {
++		const paragraph = 'We present a batched threshold encryption scheme in which the committee never runs a key generation protocol.';
++		model.setValue(`Intro.\n${paragraph.replace('never runs', 'does not run')}\nUnchanged middle sentence.\nA completely different closing sentence.\n`);
++		await showPending(`Intro.\n${paragraph}\nUnchanged middle sentence.\nClosing.\n`);
++		const deletedZones = () => [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
++		const struck = model.getAllDecorations().filter(d => d.options.before?.inlineClassName === 'inline-deleted-text');
++
++		assert.deepStrictEqual(struck.map(d => d.range.startLineNumber), [2], 'the deleted words, in the line');
++		assert.ok(struck.map(d => d.options.before?.content).join('').includes('never'));
++		assert.deepStrictEqual(deletedZones().map(z => z.afterLineNumber), [3], 'only the rewritten closing line gets red rows');
++		assert.strictEqual(hunkWidgets().length, 2, 'both still have Keep/Undo');
 +	});
 +
 +	test('each Keep/Undo toolbar has its own row below its hunk, so it never covers text', async () => {

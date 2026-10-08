@@ -1,5 +1,5 @@
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
-index 2e43b458..a28e319a 100644
+index 2e43b458..a40b6868 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
 +++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
 @@ -77,6 +77,9 @@ class ObjectPool<T extends IDisposable> {
@@ -75,11 +75,12 @@ index 2e43b458..a28e319a 100644
  		this._diffHunksRenderStore.clear();
  		for (const widget of this._diffHunkWidgetPool.free) {
  			widget.remove();
-@@ -348,25 +368,43 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -348,32 +368,65 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  		this._diffHunksRenderStore.clear();
  		this._diffHunkWidgets.length = 0;
  		const diffHunkDecorations: IModelDeltaDecoration[] = [];
 +		const toolbarRows = reviewMode && !diffMode && (this._entry as { readonly hunkToolbarRows?: boolean }).hunkToolbarRows === true;
++		const trackChangesEnabled = reviewMode && !diffMode && (this._entry as { readonly trackChanges?: boolean }).trackChanges === true;
  
  		this._editor.changeViewZones((viewZoneChangeAccessor) => {
 -			for (const id of this._viewZones) {
@@ -121,7 +122,39 @@ index 2e43b458..a28e319a 100644
  					mightContainNonBasicASCII,
  					mightContainRTL,
  				);
-@@ -456,6 +494,21 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 				const decorations: InlineDecoration[] = [];
++				// Agent review: a few words changed within lines reads as track changes (deleted words struck through
++				// before the new ones, in the line) instead of the whole lines again in red above them.
++				const trackChanges = trackChangesEnabled && showAsTrackChanges(diffEntry, diff.originalModel, diff.modifiedModel);
+ 
+ 				if (reviewMode) {
+ 					for (const i of diffEntry.innerChanges || []) {
++						if (trackChanges && !i.originalRange.isEmpty()) {
++							modifiedVisualDecorations.push({
++								range: Range.fromPositions(i.modifiedRange.getStartPosition()),
++								options: ModelDecorationOptions.createDynamic({
++									description: 'agent-review-deleted-text',
++									before: { content: diff.originalModel.getValueInRange(i.originalRange), inlineClassName: 'inline-deleted-text' },
++									showIfCollapsed: true,
++									zIndex: 100000,
++								})
++							});
++						}
+ 						decorations.push(new InlineDecoration(
+ 							i.originalRange.delta(-(diffEntry.original.startLineNumber - 1)),
+ 							diffDeleteDecoration.className!,
+@@ -425,8 +478,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 					const domNode = document.createElement('div');
+ 					domNode.className = 'chat-editing-original-zone view-lines line-delete monaco-mouse-cursor-text';
+ 					const result = renderLines(source, renderOptions, decorations, domNode);
+-					extraLines = result.heightInLines;
+-					if (!isCreatedContent) {
++					extraLines = trackChanges ? 0 : result.heightInLines;
++					if (!isCreatedContent && !trackChanges) {
+ 
+ 						const viewZoneData: IViewZone = {
+ 							afterLineNumber: diffEntry.modified.startLineNumber - 1,
+@@ -456,6 +509,21 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  						this._diffHunkWidgetPool.putBack(widget);
  					}));
  
@@ -143,7 +176,7 @@ index 2e43b458..a28e319a 100644
  					widget.layout(diffEntry.modified.startLineNumber);
  
  					this._diffHunkWidgets.push(widget);
-@@ -532,7 +585,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -532,7 +600,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  			} else if (e.target.type === MouseTargetType.CONTENT_VIEW_ZONE) {
  				const zone = e.target.detail;
  				const idx = this._viewZones.findIndex(id => id === zone.viewZoneId);
@@ -153,7 +186,7 @@ index 2e43b458..a28e319a 100644
  
  			} else if (e.target.position) {
  				const { position } = e.target;
-@@ -699,7 +753,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -699,7 +768,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  				original: { resource: this._entry.originalURI },
  				modified: { resource: this._entry.modifiedURI },
  				options: { selection },
@@ -162,7 +195,36 @@ index 2e43b458..a28e319a 100644
  			});
  
  			if (diffEditor && diffEditor.input) {
-@@ -745,6 +799,13 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+@@ -735,6 +804,28 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 	}
+ }
+ 
++/**
++ * Whether a change is a few words within lines: every inner change stays on one line, the lines correspond one to
++ * one, and the changed text is at most 30% of the lines. Larger rewrites read better as old lines above new ones.
++ */
++export function showAsTrackChanges(change: DetailedLineRangeMapping, original: ITextModel, modified: ITextModel): boolean {
++	if (change.original.isEmpty || change.modified.isEmpty || change.original.length !== change.modified.length || !change.innerChanges?.length) {
++		return false;
++	}
++	let changed = 0;
++	for (const i of change.innerChanges) {
++		if (i.originalRange.startLineNumber !== i.originalRange.endLineNumber || i.modifiedRange.startLineNumber !== i.modifiedRange.endLineNumber) {
++			return false;
++		}
++		changed += original.getValueLengthInRange(i.originalRange) + modified.getValueLengthInRange(i.modifiedRange);
++	}
++	let total = 0;
++	for (let line = change.modified.startLineNumber; line < change.modified.endLineNumberExclusive; line++) {
++		total += modified.getLineLength(line);
++	}
++	return changed <= 0.3 * total;
++}
++
+ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+ 
+ 	private static _idPool = 0;
+@@ -745,6 +836,13 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  	private _position: IOverlayWidgetPosition | undefined;
  	private _lastStartLineNumber: number | undefined;
  	private _removed: boolean = false;
@@ -176,7 +238,7 @@ index 2e43b458..a28e319a 100644
  
  	constructor(
  		private readonly _editor: ICodeEditor,
-@@ -806,13 +867,39 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+@@ -806,13 +904,39 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  		return this._id;
  	}
  
