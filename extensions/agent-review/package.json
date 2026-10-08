@@ -148,7 +148,7 @@
       {
         "command": "agentReview.addToChat",
         "title": "Add Selection to Chat",
-        "category": "Agent Review"
+        "category": "Chat"
       }
     ],
     "views": {
@@ -246,6 +246,13 @@
         {
           "command": "agentReview.restoreFile",
           "when": "resourceScheme == agent-review-deleted"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "agentReview.addToChat",
+          "when": "editorHasSelection",
+          "group": "1_chat@1"
         }
       ],
       "editor/title": [
