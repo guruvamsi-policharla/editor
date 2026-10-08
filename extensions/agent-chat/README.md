@@ -7,6 +7,7 @@ Phase A0 prototype of the ACP chat panel ([PLAN.md](../../PLAN.md) Phase 4, [doc
 - **Models.** Each type sets `requiresCustomModels` and the extension registers the `agent-chat` language-model vendor, whose models are the harness's model choices, targeted at that type. Core needs a model for every request; the editor never calls one, and the choice is forwarded as the ACP `model` option.
 - **Pickers.** The other ACP select options become `ChatSessionProviderOptionGroup`s (`src/options.ts`). Changes reach the harness through `inputState.onDidChange`, and selections made in an untitled chat carry over through `previousInputState`.
 - **Permission prompts** use the core `vscode_get_confirmation_with_options` tool, which can't be auto-approved.
+- **Opens on Claude Code.** `configurationDefaults` sets `chat.editor.localAgent.enabled: false`, so core's Local chat (Copilot's "Build with Agent") isn't offered and new chats default to the first session type by `order`.
 - **No edit parts** are emitted, so the chat's own editing session stays empty and agent-review owns Keep/Undo.
 - **`agentChat.insertReference`** inserts `@path:Lx-y` into the last focused chat input (`workbench.action.chat.open` with `isPartialQuery`).
 

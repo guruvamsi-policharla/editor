@@ -76,6 +76,9 @@
         "requiresCustomModels": true
       }
     ],
+    "configurationDefaults": {
+      "chat.editor.localAgent.enabled": false
+    },
     "commands": [
       {
         "command": "agentChat.newClaude",
