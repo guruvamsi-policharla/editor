@@ -21,7 +21,11 @@ import { ITextFileEditorModel } from '../../../../services/textfile/common/textf
 import { TestServiceAccessor, workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
 import { TestWorkerService } from '../../../inlineChat/test/browser/testWorkerService.js';
 import { MergeEditorInput } from '../../../mergeEditor/browser/mergeEditorInput.js';
-import { AGENT_REVIEW_MERGE_SCHEME, openAgentReviewMerge } from '../../browser/agentReviewMerge.js';
+import { AGENT_REVIEW_MERGE_SCHEME, closeOrphanedAgentReviewMerges, openAgentReviewMerge } from '../../browser/agentReviewMerge.js';
+import { mock } from '../../../../../base/test/common/mock.js';
+import { INotification, INotificationService } from '../../../../../platform/notification/common/notification.js';
+import { IEditorService } from '../../../../services/editor/common/editorService.js';
+import { IEditorIdentifier } from '../../../../common/editor.js';
 
 suite('AgentReview: 3-way merge for agent writes under unsaved edits', () => {
 
@@ -99,6 +103,31 @@ suite('AgentReview: 3-way merge for agent writes under unsaved edits', () => {
 		await model.revert();
 		for (const r of resources) {
 			assert.strictEqual(models().getModel(r), null);
+		}
+	});
+
+	test('a merge restored after a restart (its snapshots gone) is closed, with a message, instead of failing to open', async () => {
+		const merge = (await insta.invokeFunction(openAgentReviewMerge, uri, { base: BASE, noOpen: true }))!;
+		const closed: unknown[] = [];
+		const notifications: INotification[] = [];
+		const child = insta.createChild(new ServiceCollection(
+			[IEditorService, new class extends mock<IEditorService>() {
+				override getEditors() { return [{ editor: merge.input, groupId: 1 }]; }
+				override async closeEditors(editors: readonly IEditorIdentifier[]) { closed.push(...editors.map(e => e.editor)); }
+			}()],
+			[INotificationService, new class extends mock<INotificationService>() {
+				override notify(n: INotification) { notifications.push(n); return undefined!; }
+			}()],
+		));
+		try {
+			assert.strictEqual(await child.invokeFunction(closeOrphanedAgentReviewMerges), 0, 'a merge whose snapshots exist stays');
+			await close(merge.input); // as after a restart: the restored input's snapshots don't exist
+			assert.strictEqual(await child.invokeFunction(closeOrphanedAgentReviewMerges), 1);
+			assert.deepStrictEqual(closed, [merge.input]);
+			assert.match(String(notifications[0].message), /paper\.tex could not be reopened/);
+		} finally {
+			child.dispose();
+			await model.revert();
 		}
 	});
 });

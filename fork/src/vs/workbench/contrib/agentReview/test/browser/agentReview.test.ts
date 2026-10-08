@@ -33,7 +33,7 @@ import { SyncDescriptor } from '../../../../../platform/instantiation/common/des
 import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
 import { ServiceCollection } from '../../../../../platform/instantiation/common/serviceCollection.js';
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
-import { ITextFileSaveOptions, ITextFileService } from '../../../../services/textfile/common/textfiles.js';
+import { ITextFileEditorModel, ITextFileSaveOptions, ITextFileService } from '../../../../services/textfile/common/textfiles.js';
 import { workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
 import { INotification, INotificationHandle, INotificationService, Severity } from '../../../../../platform/notification/common/notification.js';
 import { IChatWidgetService } from '../../../chat/browser/chat.js';
@@ -41,14 +41,16 @@ import { IChatEditingExplanationModelManager } from '../../../chat/browser/chatE
 import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntryChangeHunk } from '../../../chat/common/editing/chatEditingService.js';
 import { TestWorkerService } from '../../../inlineChat/test/browser/testWorkerService.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
-import { IResourceDiffEditorInput } from '../../../../common/editor.js';
+import { IEditorPane, IResourceDiffEditorInput } from '../../../../common/editor.js';
 import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
 import { IAction2Options } from '../../../../../platform/actions/common/actions.js';
 import { IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
 import { ContextKeyService } from '../../../../../platform/contextkey/browser/contextKeyService.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { AcceptAction, AcceptAllEditsAction, AcceptHunkAction, NavigateAction, RejectAction, RejectHunkAction, ToggleAccessibleDiffViewAction, ToggleDiffAction } from '../../../chat/browser/chatEditing/chatEditingEditorActions.js';
-import { AgentReviewKind, IAgentReviewHunkEvent } from '../../browser/agentReviewEntry.js';
+import { AgentReviewKind, foldUnsavedEdits, IAgentReviewHunkEvent } from '../../browser/agentReviewEntry.js';
+import { IFileContent, IFileService } from '../../../../../platform/files/common/files.js';
+import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { AgentReviewService } from '../../browser/agentReviewService.js';
 
 suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
@@ -75,8 +77,11 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 	let holdSave: Promise<void> | undefined;
 	let saveOutcome: 'ok' | 'cancelled' | 'error';
 	let notifications: INotification[];
+	/** The file on disk, for the entry's view of unsaved edits (disk -> buffer). */
+	let diskContent: string;
 
 	setup(() => {
+		diskContent = DISK;
 		zones = new Map();
 		overlays = new Set();
 		registeredSessions = [];
@@ -108,7 +113,15 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		collection.set(IChatEditingExplanationModelManager, new class extends mock<IChatEditingExplanationModelManager>() {
 			override readonly state = constObservable(new ResourceMap<never>());
 		}());
+		collection.set(IFileService, new class extends mock<IFileService>() {
+			override async readFile(): Promise<IFileContent> {
+				return { value: VSBuffer.fromString(diskContent) } as IFileContent;
+			}
+		}());
 		collection.set(ITextFileService, new class extends mock<ITextFileService>() {
+			override readonly files = new class extends mock<ITextFileService['files']>() {
+				override get() { return { textEditorModel: model } as unknown as ITextFileEditorModel; }
+			}();
 			override isDirty(): boolean {
 				return dirty || (trackSaves && model.getAlternativeVersionId() !== savedVersion);
 			}
@@ -222,7 +235,32 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.deepStrictEqual(struck.map(d => d.range.startLineNumber), [2], 'the deleted words, in the line');
 		assert.ok(struck.map(d => d.options.before?.content).join('').includes('never'));
 		assert.deepStrictEqual(deletedZones().map(z => z.afterLineNumber), [3], 'only the rewritten closing line gets red rows');
+		const lighter = model.getAllDecorations().filter(d => d.options.className?.includes('agent-review-track-changes-line'));
+		assert.deepStrictEqual(lighter.map(d => d.range.startLineNumber), [2], 'a lighter line tint for track changes only');
 		assert.strictEqual(hunkWidgets().length, 2, 'both still have Keep/Undo');
+	});
+
+	test('a small edit next to a deleted or inserted paragraph: track changes for the edit, the paragraph on its own', async () => {
+		const edited = 'Note that the setup ceremony verifies an epoch identifier without any interaction, and the aggregator outputs the vector $\\mathbf{x}$ of ciphertexts.';
+		const deleted = 'Concretely, the aggregator aggregates the batch commitment which is the dominant cost in practice, even if $t-1$ parties are corrupt.';
+		const glued = 'We stress that the decryption shares are \\emph{constant size}, regardless of how many ciphertexts are in the batch.';
+		const next = 'In particular, the committee publishes an epoch identifier after the epoch closes, and each party samples a threshold signature.';
+		const rename = (s: string) => s.replace('mathbf{x}', 'mathbf{y}').replace('epoch closes', 'epoch ends');
+		model.setValue(['\\section{Intro}', '', rename(edited), '', rename(next), glued, '', '\\end{document}', ''].join('\n'));
+		const { entry } = await showPending(['\\section{Intro}', '', edited, '', deleted, '', next, '', '\\end{document}', ''].join('\n'));
+
+		const struck = model.getAllDecorations().filter(d => d.options.before?.inlineClassName?.includes('agent-review-deleted-text'));
+		assert.deepStrictEqual(struck.map(d => [d.range.startLineNumber, d.options.before?.content]), [[3, 'x'], [5, 'closes']], 'word-level, in both edited paragraphs');
+		const deletedZones = [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
+		assert.deepStrictEqual(deletedZones.map(z => z.afterLineNumber), [3], 'only the deleted paragraph gets red rows, after the paragraph it followed');
+		assert.ok(deletedZones[0].domNode.textContent?.replace(/\u00a0/g, ' ').includes('Concretely'));
+		assert.ok(!deletedZones[0].domNode.textContent?.replace(/\u00a0/g, ' ').includes('Note that'), 'the edited paragraph is not repeated in red');
+		assert.strictEqual(hunkWidgets().length, 2, 'Keep/Undo for each edited paragraph (the deletion goes with the first)');
+
+		// Keep the first: the second edit and its inserted sentence stay pending.
+		const diff = entry.diffInfo.get();
+		await diff.keep(diff.changes[0]);
+		assert.deepStrictEqual(entry.diffInfo.get().changes.map(c => `${c.original} -> ${c.modified}`), ['[5,6) -> [5,7)']);
 	});
 
 	test('a Keep/Undo toolbar with no room at the end of its hunk has its own row below it, so it never covers text', async () => {
@@ -273,6 +311,59 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.ok(position && typeof position === 'object');
 		assert.ok(position.left > 50 + 'b TWO'.length * 7, 'right of the text');
 		assert.ok(position.top < editor.getTopForLineNumber(3), 'on line 2, not below it');
+	});
+
+	test('unsaved user edits in the buffer when the entry is created (restored after a restart) are not agent changes', async () => {
+		// Disk: the agent's version (a line deleted). The buffer: that plus the user's unsaved edit of line 1.
+		model.setValue('Intro sentence, as the user rewrote it.\nClosing sentence.\n');
+		dirty = true;
+		const { entry } = await showPending();
+		assert.deepStrictEqual(entry.diffInfo.get().changes.map(c => `${c.original} -> ${c.modified}`), ['[2,3) -> [2,2)'], 'only the agent\'s deletion');
+		assert.strictEqual(hunkWidgets().length, 1);
+
+		// The engine accepts the file (Keep from the list): nothing pending, the user's edit still isn't an agent change.
+		await entry.setBaseline(DISK, 'modified');
+		assert.strictEqual(entry.diffInfo.get().changes.length, 0);
+	});
+
+	test('foldUnsavedEdits: the user\'s edits go into the baseline, except where they touch an agent change', () => {
+		const baseline = 'a\nb\nc\nd\n';
+		const disk = 'a\nB by agent\nc\nd\n';
+		assert.strictEqual(foldUnsavedEdits(baseline, disk, 'a user\nB by agent\nc\nd\n'), 'a user\nb\nc\nd\n');
+		assert.strictEqual(foldUnsavedEdits(baseline, disk, 'a\nB by the agent\nc\nd\n'), baseline, 'inside the agent change: part of it');
+		assert.strictEqual(foldUnsavedEdits(baseline.replace(/\n/g, '\r\n'), disk.replace(/\n/g, '\r\n'), 'a\nB by agent\nc\nd user\n'), 'a\nb\nc\nd user\n');
+	});
+
+	test('the 3-way merge editor\'s result shows the file without the review (no red rows, no Keep/Undo)', async () => {
+		const entry = (await service.setBaseline(uri, BASELINE, 'modified'))!;
+		await waitForState(entry.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
+		const pane = (id: string) => new class extends mock<IEditorPane>() {
+			override getId() { return id; }
+			override getControl() { return editor; }
+		}();
+		const mergePane = pane('mergeEditor');
+		const merge = entry.getEditorIntegration(mergePane);
+		assert.strictEqual(zones.size, 0);
+		assert.strictEqual(hunkWidgets().length, 0);
+		assert.strictEqual(merge.next(true), false);
+		assert.strictEqual(entry.getEditorIntegration(mergePane), merge);
+
+		store.add(entry.getEditorIntegration(pane('workbench.editors.files.textFileEditor')));
+		assert.strictEqual(hunkWidgets().length, 1, 'a text editor on the same file reviews it');
+	});
+
+	test('Ctrl+Y/Ctrl+N act on the change the cursor is in, even when another change\'s Keep/Undo is closer', async () => {
+		// The toolbar sits at the end of a hunk: for a hunk of many rows (a wrapped paragraph, several lines) the
+		// previous hunk's toolbar can be nearer to the cursor than its own.
+		model.setValue('ONE\ntwo\nA\nB\nC\nD\nE\nF\nnine\n');
+		const { entry, integration } = await showPending('one\ntwo\na\nb\nc\nd\ne\nf\nnine\n');
+		assert.strictEqual(entry.diffInfo.get().changes.length, 2);
+		editor.setPosition({ lineNumber: 3, column: 1 });
+		await integration.acceptNearestChange();
+		assert.deepStrictEqual(entry.diffInfo.get().changes.map(c => c.modified.toString()), ['[1,2)'], 'the second change was kept');
+		editor.setPosition({ lineNumber: 1, column: 1 });
+		await integration.rejectNearestChange();
+		assert.strictEqual(model.getLineContent(1), 'one');
 	});
 
 	test('Ctrl+Y/Ctrl+N context: "cursor in a change" follows the file the editor shows, not the last integration created', async () => {

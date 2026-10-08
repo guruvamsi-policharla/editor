@@ -1,8 +1,308 @@
+diff --git a/src/vs/editor/common/diff/defaultLinesDiffComputer/alignSimilarLines.ts b/src/vs/editor/common/diff/defaultLinesDiffComputer/alignSimilarLines.ts
+new file mode 100644
+index 00000000..37ac8996
+--- /dev/null
++++ b/src/vs/editor/common/diff/defaultLinesDiffComputer/alignSimilarLines.ts
+@@ -0,0 +1,286 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { Range } from '../../core/range.js';
++import { OffsetRange } from '../../core/ranges/offsetRange.js';
++import { ArrayText } from '../../core/text/abstractText.js';
++import { DetailedLineRangeMapping, getLineRangeMapping, RangeMapping } from '../rangeMapping.js';
++import { ITimeout, SequenceDiff } from './algorithms/diffAlgorithm.js';
++
++/**
++ * The line diff matches equal lines only. Where several alignments match equally well, e.g. which blank line between
++ * paragraphs to keep when a paragraph next to an edited one was deleted, it can pair the edited paragraph's new version
++ * with nothing, so the edit shows as whole paragraphs deleted and inserted.
++ *
++ * This aligns the lines of each run of changes again (together with the blank lines between and around them), also
++ * pairing lines that are similar but not equal. Each similar pair becomes a change of its own, as do the lines
++ * inserted or deleted between them. The resulting changes can touch: `splitInsertedAndDeletedLines` separates them
++ * again after the character-level diff.
++ */
++export function alignSimilarLines(diffs: SequenceDiff[], originalLines: string[], modifiedLines: string[], timeout: ITimeout): SequenceDiff[] {
++	if (diffs.length === 0) {
++		return diffs;
++	}
++	const isBlank = (line: string) => line.trim().length === 0;
++	const result: SequenceDiff[] = [];
++	const tokens1 = new Map<number, Map<string, number>>();
++	const tokens2 = new Map<number, Map<string, number>>();
++
++	let prevEnd1 = 0;
++	let i = 0;
++	while (i < diffs.length) {
++		// A window: changes separated only by blank lines, plus the blank lines right before and after them.
++		let j = i;
++		while (j + 1 < diffs.length && allBlank(originalLines, diffs[j].seq1Range.endExclusive, diffs[j + 1].seq1Range.start)) {
++			j++;
++		}
++		let start1 = diffs[i].seq1Range.start;
++		let start2 = diffs[i].seq2Range.start;
++		while (start1 > prevEnd1 && isBlank(originalLines[start1 - 1])) {
++			start1--;
++			start2--;
++		}
++		let end1 = diffs[j].seq1Range.endExclusive;
++		let end2 = diffs[j].seq2Range.endExclusive;
++		const nextStart1 = j + 1 < diffs.length ? diffs[j + 1].seq1Range.start : originalLines.length;
++		while (end1 < nextStart1 && isBlank(originalLines[end1])) {
++			end1++;
++			end2++;
++		}
++
++		const aligned = timeout.isValid() && (end1 - start1) * (end2 - start2) <= 10_000
++			? alignWindow(start1, end1, start2, end2, originalLines, modifiedLines, tokens1, tokens2)
++			: undefined;
++		if (aligned) {
++			result.push(...aligned);
++		} else {
++			result.push(...diffs.slice(i, j + 1));
++		}
++		prevEnd1 = end1;
++		i = j + 1;
++	}
++	return result;
++}
++
++function allBlank(lines: string[], start: number, endExclusive: number): boolean {
++	for (let i = start; i < endExclusive; i++) {
++		if (lines[i].trim().length > 0) {
++			return false;
++		}
++	}
++	return true;
++}
++
++const enum Step { Pair = 1, Delete = 2, Insert = 3 }
++
++function alignWindow(start1: number, end1: number, start2: number, end2: number, originalLines: string[], modifiedLines: string[], tokens1: Map<number, Map<string, number>>, tokens2: Map<number, Map<string, number>>): SequenceDiff[] {
++	const n = end1 - start1;
++	const m = end2 - start2;
++	// score[a][b]: best alignment of the first a original and b modified lines of the window.
++	const score: number[][] = [];
++	const step: Step[][] = [];
++	const similar: boolean[][] = [];
++	for (let a = 0; a <= n; a++) {
++		score.push(new Array<number>(m + 1).fill(0));
++		step.push(new Array<Step>(m + 1).fill(Step.Pair));
++		similar.push(new Array<boolean>(m + 1).fill(false));
++	}
++	for (let a = 0; a <= n; a++) {
++		for (let b = 0; b <= m; b++) {
++			if (a === 0 && b === 0) {
++				continue;
++			}
++			let best = -1;
++			let bestStep = Step.Pair;
++			if (a > 0 && b > 0) {
++				const l1 = originalLines[start1 + a - 1];
++				const l2 = modifiedLines[start2 + b - 1];
++				let pair = -1;
++				if (l1.trim() === l2.trim()) {
++					pair = l2.length === 0 ? 0.1 : 1 + Math.log(1 + l2.length);
++				} else {
++					const s = similarity(lineTokens(tokens1, start1 + a - 1, l1), lineTokens(tokens2, start2 + b - 1, l2));
++					if (s >= 0.5) {
++						pair = s * (1 + Math.log(1 + l2.length));
++						similar[a][b] = true;
++					}
++				}
++				if (pair >= 0) {
++					best = score[a - 1][b - 1] + pair;
++				}
++			}
++			if (a > 0 && score[a - 1][b] > best) {
++				best = score[a - 1][b];
++				bestStep = Step.Delete;
++			}
++			if (b > 0 && score[a][b - 1] > best) {
++				best = score[a][b - 1];
++				bestStep = Step.Insert;
++			}
++			score[a][b] = best;
++			step[a][b] = bestStep;
++		}
++	}
++
++	// Backtrack. Every similar pair is a change of its own, and so is each run of inserted and deleted lines.
++	const result: SequenceDiff[] = [];
++	let pendingEnd1 = -1;
++	let pendingEnd2 = -1;
++	const flush = (a: number, b: number) => {
++		if (pendingEnd1 >= 0) {
++			result.push(new SequenceDiff(new OffsetRange(start1 + a, start1 + pendingEnd1), new OffsetRange(start2 + b, start2 + pendingEnd2)));
++			pendingEnd1 = pendingEnd2 = -1;
++		}
++	};
++	let a = n;
++	let b = m;
++	while (a > 0 || b > 0) {
++		const s = a === 0 ? Step.Insert : b === 0 ? Step.Delete : step[a][b];
++		if (s === Step.Pair) {
++			flush(a, b);
++			if (similar[a][b]) {
++				result.push(new SequenceDiff(new OffsetRange(start1 + a - 1, start1 + a), new OffsetRange(start2 + b - 1, start2 + b)));
++			}
++			a--;
++			b--;
++		} else {
++			if (pendingEnd1 < 0) {
++				pendingEnd1 = a;
++				pendingEnd2 = b;
++			}
++			if (s === Step.Delete) {
++				a--;
++			} else {
++				b--;
++			}
++		}
++	}
++	flush(0, 0);
++	return result.reverse();
++}
++
++function lineTokens(cache: Map<number, Map<string, number>>, line: number, text: string): Map<string, number> {
++	let result = cache.get(line);
++	if (!result) {
++		// Pairs of consecutive words (or symbols): unrelated prose shares many words but few word pairs.
++		result = new Map();
++		const words = text.match(/\w+|[^\s\w]/g) ?? [];
++		for (let i = 0; i + 1 < words.length; i++) {
++			const key = words[i] + ' ' + words[i + 1];
++			result.set(key, (result.get(key) ?? 0) + 1);
++		}
++		cache.set(line, result);
++	}
++	return result;
++}
++
++/** Dice coefficient of the two multisets; lines with fewer than three words are never similar. */
++function similarity(t1: Map<string, number>, t2: Map<string, number>): number {
++	let size1 = 0;
++	let size2 = 0;
++	for (const c of t1.values()) {
++		size1 += c;
++	}
++	for (const c of t2.values()) {
++		size2 += c;
++	}
++	if (size1 < 2 || size2 < 2) {
++		return 0;
++	}
++	let common = 0;
++	for (const [key, c] of t1) {
++		common += Math.min(c, t2.get(key) ?? 0);
++	}
++	return 2 * common / (size1 + size2);
++}
++
++/**
++ * A change that edits some lines and also inserts or deletes whole lines right before or after them (an edited
++ * paragraph next to a new or removed one) is split in two: the edit, and the inserted or deleted lines on their own.
++ * The inserted or deleted lines are moved by one line, over a line with the same text (usually a blank line), so that
++ * an unchanged line separates the two changes. When there is no such line, the change stays as it is.
++ */
++export function splitInsertedAndDeletedLines(changes: readonly DetailedLineRangeMapping[], originalLines: string[], modifiedLines: string[]): DetailedLineRangeMapping[] {
++	const result: DetailedLineRangeMapping[] = [];
++	const original = new ArrayText(originalLines);
++	const modified = new ArrayText(modifiedLines);
++
++	for (let i = 0; i < changes.length; i++) {
++		const change = changes[i];
++		if (!change.innerChanges || change.innerChanges.length < 2) {
++			result.push(change);
++			continue;
++		}
++		const parts = change.innerChanges.map(c => getLineRangeMapping(c, original, modified));
++
++		let head: DetailedLineRangeMapping | undefined;
++		let tail: DetailedLineRangeMapping | undefined;
++		if (touchesOnly(parts[0], parts[1])) {
++			head = shiftWholeLines(parts[0], -1, originalLines, modifiedLines, result.at(-1), undefined);
++		}
++		if (parts.length - (head ? 1 : 0) >= 2 && touchesOnly(parts[parts.length - 2], parts[parts.length - 1])) {
++			tail = shiftWholeLines(parts[parts.length - 1], 1, originalLines, modifiedLines, undefined, changes.at(i + 1));
++		}
++		if (!head && !tail) {
++			result.push(change);
++			continue;
++		}
++		const rest = parts.slice(head ? 1 : 0, tail ? parts.length - 1 : parts.length);
++		if (head) {
++			result.push(head);
++		}
++		result.push(new DetailedLineRangeMapping(
++			rest[0].original.join(rest[rest.length - 1].original),
++			rest[0].modified.join(rest[rest.length - 1].modified),
++			rest.map(p => p.innerChanges![0]),
++		));
++		if (tail) {
++			result.push(tail);
++		}
++	}
++	return result;
++}
++
++/** Whether `a` ends where `b` starts (or before), on both sides. */
++function touchesOnly(a: DetailedLineRangeMapping, b: DetailedLineRangeMapping): boolean {
++	return a.original.endLineNumberExclusive <= b.original.startLineNumber && a.modified.endLineNumberExclusive <= b.modified.startLineNumber;
++}
++
++/**
++ * Moves a whole-line insertion or deletion by `delta` lines (up: -1, down: 1), if the line it moves over has the same
++ * text as the line it uncovers, and an unchanged line still separates it from `previous` and `next`.
++ */
++function shiftWholeLines(part: DetailedLineRangeMapping, delta: -1 | 1, originalLines: string[], modifiedLines: string[], previous: DetailedLineRangeMapping | undefined, next: DetailedLineRangeMapping | undefined): DetailedLineRangeMapping | undefined {
++	const isDeletion = part.modified.isEmpty && !part.original.isEmpty;
++	const isInsertion = part.original.isEmpty && !part.modified.isEmpty;
++	if (!isDeletion && !isInsertion) {
++		return undefined;
++	}
++	const lines = isDeletion ? originalLines : modifiedLines;
++	const range = isDeletion ? part.original : part.modified;
++	// The line (1-based) that moves into the range, and the one it takes the place of.
++	const [entering, leaving] = delta === 1
++		? [range.endLineNumberExclusive, range.startLineNumber]
++		: [range.startLineNumber - 1, range.endLineNumberExclusive - 1];
++	if (entering < 1 || entering > lines.length || lines[entering - 1] !== lines[leaving - 1]) {
++		return undefined;
++	}
++	const originalRange = part.original.delta(delta);
++	const modifiedRange = part.modified.delta(delta);
++	// The inner change below is written as whole lines, so the line after the range has to exist.
++	if (originalRange.endLineNumberExclusive > originalLines.length || modifiedRange.endLineNumberExclusive > modifiedLines.length) {
++		return undefined;
++	}
++	if (previous && (previous.original.endLineNumberExclusive >= originalRange.startLineNumber || previous.modified.endLineNumberExclusive >= modifiedRange.startLineNumber)) {
++		return undefined;
++	}
++	if (next && (originalRange.endLineNumberExclusive >= next.original.startLineNumber || modifiedRange.endLineNumberExclusive >= next.modified.startLineNumber)) {
++		return undefined;
++	}
++	return new DetailedLineRangeMapping(originalRange, modifiedRange, [new RangeMapping(
++		new Range(originalRange.startLineNumber, 1, originalRange.endLineNumberExclusive, 1),
++		new Range(modifiedRange.startLineNumber, 1, modifiedRange.endLineNumberExclusive, 1),
++	)]);
++}
 diff --git a/src/vs/editor/common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.ts b/src/vs/editor/common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.ts
-index 0da7983f..e743dc75 100644
+index 0da7983f..463f6577 100644
 --- a/src/vs/editor/common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.ts
 +++ b/src/vs/editor/common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.ts
-@@ -89,7 +89,9 @@ export class DefaultLinesDiffComputer implements ILinesDiffComputer {
+@@ -15,6 +15,7 @@ import { DetailedLineRangeMapping, LineRangeMapping, lineRangeMappingFromRangeMa
+ import { DateTimeout, InfiniteTimeout, ITimeout, SequenceDiff } from './algorithms/diffAlgorithm.js';
+ import { DynamicProgrammingDiffing } from './algorithms/dynamicProgrammingDiffing.js';
+ import { MyersDiffAlgorithm } from './algorithms/myersDiffAlgorithm.js';
++import { alignSimilarLines, splitInsertedAndDeletedLines } from './alignSimilarLines.js';
+ import { computeMovedLines } from './computeMovedLines.js';
+ import { extendDiffsToEntireWordIfAppropriate, optimizeSequenceDiffs, removeShortMatches, removeVeryShortMatchingLinesBetweenDiffs, removeVeryShortMatchingTextBetweenLongDiffs } from './heuristicSequenceOptimizations.js';
+ import { LineSequence } from './lineSequence.js';
+@@ -89,7 +90,12 @@ export class DefaultLinesDiffComputer implements ILinesDiffComputer {
  		let lineAlignments = lineAlignmentResult.diffs;
  		let hitTimeout = lineAlignmentResult.hitTimeout;
  		lineAlignments = optimizeSequenceDiffs(sequence1, sequence2, lineAlignments);
@@ -10,14 +310,29 @@ index 0da7983f..e743dc75 100644
 +		if (!options.preserveShortMatchingLines) {
 +			lineAlignments = removeVeryShortMatchingLinesBetweenDiffs(sequence1, sequence2, lineAlignments);
 +		}
++		if (options.alignSimilarLines) {
++			lineAlignments = alignSimilarLines(lineAlignments, originalLines, modifiedLines, timeout);
++		}
  
  		const alignments: RangeMapping[] = [];
  
+@@ -144,7 +150,10 @@ export class DefaultLinesDiffComputer implements ILinesDiffComputer {
+ 		const original = new ArrayText(originalLines);
+ 		const modified = new ArrayText(modifiedLines);
+ 
+-		const changes = lineRangeMappingFromRangeMappings(alignments, original, modified);
++		let changes = lineRangeMappingFromRangeMappings(alignments, original, modified);
++		if (options.alignSimilarLines) {
++			changes = splitInsertedAndDeletedLines(changes, originalLines, modifiedLines);
++		}
+ 
+ 		let moves: MovedText[] = [];
+ 		if (options.computeMoves) {
 diff --git a/src/vs/editor/common/diff/documentDiffProvider.ts b/src/vs/editor/common/diff/documentDiffProvider.ts
-index 3e9c82fd..d40967fb 100644
+index 3e9c82fd..c13f1417 100644
 --- a/src/vs/editor/common/diff/documentDiffProvider.ts
 +++ b/src/vs/editor/common/diff/documentDiffProvider.ts
-@@ -47,6 +47,11 @@ export interface IDocumentDiffProviderOptions {
+@@ -47,6 +47,16 @@ export interface IDocumentDiffProviderOptions {
  	computeMoves: boolean;
  
  	extendToSubwords?: boolean;
@@ -26,14 +341,19 @@ index 3e9c82fd..d40967fb 100644
 +	 * Keep changes that are separated by a few short unchanged lines as separate changes.
 +	 */
 +	preserveShortMatchingLines?: boolean;
++
++	/**
++	 * Pair each edited line with its old version, and make whole lines inserted or deleted next to it a change of their own.
++	 */
++	alignSimilarLines?: boolean;
  }
  
  /**
 diff --git a/src/vs/editor/common/diff/linesDiffComputer.ts b/src/vs/editor/common/diff/linesDiffComputer.ts
-index 6a384b6d..af64dc03 100644
+index 6a384b6d..57dd2bb4 100644
 --- a/src/vs/editor/common/diff/linesDiffComputer.ts
 +++ b/src/vs/editor/common/diff/linesDiffComputer.ts
-@@ -14,6 +14,11 @@ export interface ILinesDiffComputerOptions {
+@@ -14,6 +14,17 @@ export interface ILinesDiffComputerOptions {
  	readonly maxComputationTimeMs: number;
  	readonly computeMoves: boolean;
  	readonly extendToSubwords?: boolean;
@@ -42,9 +362,152 @@ index 6a384b6d..af64dc03 100644
 +	 * (by default they are joined into one larger change for readability).
 +	 */
 +	readonly preserveShortMatchingLines?: boolean;
++	/**
++	 * Pair each edited line with its old version, even across inserted or deleted lines, and make whole lines
++	 * inserted or deleted next to an edited line a change of their own when an unchanged line can be put in between
++	 * (by default, a paragraph edited next to an inserted one can show as one change of whole paragraphs).
++	 */
++	readonly alignSimilarLines?: boolean;
  }
  
  export class LinesDiff {
+diff --git a/src/vs/editor/test/node/diffing/alignSimilarLines.test.ts b/src/vs/editor/test/node/diffing/alignSimilarLines.test.ts
+new file mode 100644
+index 00000000..f4e86c83
+--- /dev/null
++++ b/src/vs/editor/test/node/diffing/alignSimilarLines.test.ts
+@@ -0,0 +1,131 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import assert from 'assert';
++import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
++import { DefaultLinesDiffComputer } from '../../../common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.js';
++import { ILinesDiffComputerOptions } from '../../../common/diff/linesDiffComputer.js';
++import { DetailedLineRangeMapping } from '../../../common/diff/rangeMapping.js';
++
++suite('alignSimilarLines', () => {
++	ensureNoDisposablesAreLeakedInTestSuite();
++
++	// LaTeX prose, one paragraph per line, as an agent edits it.
++	const A = String.raw`Note that the setup ceremony verifies an epoch identifier without any interaction. To this end, the decryptor samples a succinct proof of correctness without any interaction. To this end, our construction aggregates the vector $\mathbf{x}$ of ciphertexts without any interaction~\cite{desmedt1989threshold}. Unlike prior work, each party broadcasts a partial decryption share which is the dominant cost in practice.`;
++	const B = String.raw`Concretely, the aggregator aggregates the batch commitment which is the dominant cost in practice. Note that the batch outputs the vector $\mathbf{x}$ of ciphertexts even if $t-1$ parties are corrupt. Note that our construction publishes the batch commitment as described in \Cref{sec:construction}.`;
++	const C = String.raw`The setup ceremony reconstructs a threshold signature on the digest without any interaction. In particular, the committee publishes an epoch identifier after the epoch closes, and each server sends a single group element regardless of the batch size~\cite{boneh2001short}.`;
++	const N = String.raw`We stress that the decryption shares are \emph{constant size}: each server sends a single group element per epoch, regardless of how many ciphertexts are in the batch.`;
++	const Z = String.raw`Our implementation is written in Rust on top of \texttt{arkworks} and runs on a single core; all numbers are the median of 50 runs.`;
++	const rename = (s: string) => s.replaceAll(String.raw`\mathbf{x}`, String.raw`\mathbf{y}`).replaceAll('without any interaction', 'non-interactively');
++	const head = [String.raw`\section{Introduction}\label{sec:intro}`, ''];
++	const tail = ['', String.raw`\subsection{Correctness}\label{sec:intro-3}`, ''];
++
++	const options: ILinesDiffComputerOptions = { ignoreTrimWhitespace: false, maxComputationTimeMs: 0, computeMoves: false, extendToSubwords: true, preserveShortMatchingLines: true };
++	function diff(original: string[], modified: string[], alignSimilarLines = true) {
++		const result = new DefaultLinesDiffComputer().computeDiff(original, modified, { ...options, alignSimilarLines });
++		assertConsistent(result.changes, original, modified);
++		return result.changes.map(c => `${c.original} -> ${c.modified}`);
++	}
++
++	/** Applying every inner change to the original gives the modified text, and an unchanged line separates the changes. */
++	function assertConsistent(changes: readonly DetailedLineRangeMapping[], original: string[], modified: string[]) {
++		const offsets = (lines: string[]) => {
++			const result = [0];
++			for (const l of lines) {
++				result.push(result[result.length - 1] + l.length + 1);
++			}
++			return result;
++		};
++		const o = offsets(original);
++		const m = offsets(modified);
++		let text = original.join('\n');
++		const edits = changes.flatMap(c => c.innerChanges ?? []).reverse();
++		const modifiedText = modified.join('\n');
++		for (const e of edits) {
++			const start = o[e.originalRange.startLineNumber - 1] + e.originalRange.startColumn - 1;
++			const end = o[e.originalRange.endLineNumber - 1] + e.originalRange.endColumn - 1;
++			const newText = modifiedText.slice(m[e.modifiedRange.startLineNumber - 1] + e.modifiedRange.startColumn - 1, m[e.modifiedRange.endLineNumber - 1] + e.modifiedRange.endColumn - 1);
++			text = text.slice(0, start) + newText + text.slice(end);
++		}
++		assert.strictEqual(text, modifiedText);
++		for (let i = 1; i < changes.length; i++) {
++			assert.ok(changes[i - 1].original.endLineNumberExclusive < changes[i].original.startLineNumber, `${changes[i - 1]} / ${changes[i]}`);
++			assert.ok(changes[i - 1].modified.endLineNumberExclusive < changes[i].modified.startLineNumber, `${changes[i - 1]} / ${changes[i]}`);
++		}
++	}
++
++	test('a paragraph edited next to a deleted paragraph: one-line edit, and the deletion on its own', () => {
++		const original = [...head, A, '', B, ...tail];
++		const modified = [...head, rename(A), ...tail];
++		// Without the option, both paragraphs are one change: the edited one deleted and inserted again.
++		assert.deepStrictEqual(diff(original, modified, false), ['[3,6) -> [3,4)']);
++		assert.deepStrictEqual(diff(original, modified), ['[3,4) -> [3,4)', '[5,7) -> [5,5)']);
++	});
++
++	test('a paragraph deleted before an edited one', () => {
++		const original = [...head, B, '', A, ...tail];
++		const modified = [...head, rename(A), ...tail];
++		assert.deepStrictEqual(diff(original, modified), ['[2,4) -> [2,2)', '[5,6) -> [3,4)']);
++	});
++
++	test('a paragraph inserted after an edited one', () => {
++		const original = [...head, A, '', C, ...tail];
++		const modified = [...head, rename(A), '', N, '', C, ...tail];
++		assert.deepStrictEqual(diff(original, modified), ['[3,4) -> [3,4)', '[5,5) -> [5,7)']);
++	});
++
++	test('a paragraph inserted before an edited one', () => {
++		const original = [...head, A, '', C, ...tail];
++		const modified = [...head, A, '', N, '', rename(C), ...tail];
++		assert.deepStrictEqual(diff(original, modified), ['[4,4) -> [4,6)', '[5,6) -> [7,8)']);
++	});
++
++	test('blank lines that could pair either way: each edited paragraph still pairs with its old version', () => {
++		// Two edited paragraphs, a new one glued to the second, and an extra blank line (polish-1, intro.tex).
++		const original = [...head, A, '', C, ...tail];
++		const modified = [...head, rename(A), '', rename(C), N, '', ...tail];
++		assert.deepStrictEqual(diff(original, modified), ['[3,4) -> [3,4)', '[5,6) -> [5,8)']);
++	});
++
++	test('one sentence per line: an edited sentence and a deleted one after it stay one change', () => {
++		// No unchanged line can separate them.
++		const sentences = A.split('. ').map(s => s + '.');
++		const original = [...head, ...sentences, ...tail];
++		const modified = [...head, rename(sentences[0]), ...sentences.slice(2), ...tail];
++		assert.deepStrictEqual(diff(original, modified), ['[3,5) -> [3,4)']);
++	});
++
++	test('unrelated paragraphs are not paired', () => {
++		// The same field, many shared words: still not similar, so this stays one change of whole paragraphs.
++		const original = [...head, A, '', C, ...tail];
++		const modified = [...head, B, ...tail];
++		assert.deepStrictEqual(diff(original, modified), ['[3,6) -> [3,4)']);
++	});
++
++	test('random paragraph edits, insertions and deletions: inner changes always rebuild the new text', () => {
++		const paragraphs = [A, B, C, N, Z, rename(A), rename(B), String.raw`\begin{equation}`, String.raw`\end{equation}`, '%', ''];
++		let seed = 7;
++		const random = (n: number) => {
++			seed = (seed * 1103515245 + 12345) % 2147483648;
++			return seed % n;
++		};
++		for (let round = 0; round < 300; round++) {
++			const original: string[] = [];
++			for (let i = random(12) + 1; i > 0; i--) {
++				original.push(paragraphs[random(paragraphs.length)], ...(random(3) ? [''] : []));
++			}
++			const modified = original.flatMap(l => {
++				switch (random(6)) {
++					case 0: return [];
++					case 1: return [rename(l)];
++					case 2: return [l, '', paragraphs[random(paragraphs.length)]];
++					case 3: return [l.replace('the', 'a')];
++					default: return [l];
++				}
++			});
++			diff(original, modified.length ? modified : ['']);
++		}
++	});
++});
 diff --git a/src/vs/editor/test/node/diffing/defaultLinesDiffComputer.test.ts b/src/vs/editor/test/node/diffing/defaultLinesDiffComputer.test.ts
 index 6bddad6b..1624a904 100644
 --- a/src/vs/editor/test/node/diffing/defaultLinesDiffComputer.test.ts

@@ -28,6 +28,9 @@ import { constObservable, derived, IObservable, observableValue } from '../../..
 import { basename } from '../../../../base/common/resources.js';
 import { URI } from '../../../../base/common/uri.js';
 import { getCodeEditor, ICodeEditor } from '../../../../editor/browser/editorBrowser.js';
+import { OffsetRange } from '../../../../editor/common/core/ranges/offsetRange.js';
+import { StringEdit, StringReplacement } from '../../../../editor/common/core/edits/stringEdit.js';
+import { DefaultLinesDiffComputer } from '../../../../editor/common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.js';
 import { IDocumentDiff } from '../../../../editor/common/diff/documentDiffProvider.js';
 import { DetailedLineRangeMapping } from '../../../../editor/common/diff/rangeMapping.js';
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
@@ -37,7 +40,8 @@ import { IModelService } from '../../../../editor/common/services/model.js';
 import { IResolvedTextEditorModel } from '../../../../editor/common/services/resolverService.js';
 import { IModelContentChangedEvent } from '../../../../editor/common/textModelEvents.js';
 import { localize } from '../../../../nls.js';
-import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
+import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { INotificationService, Severity } from '../../../../platform/notification/common/notification.js';
 import { IEditorPane, SaveReason } from '../../../common/editor.js';
@@ -194,6 +198,7 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 		));
 		this._changeService.extendToSubwords = true;
 		this._changeService.preserveShortMatchingLines = true;
+		this._changeService.alignSimilarLines = true;
 
 		this._register(this._changeService.onDidAcceptOrRejectAllHunks(state => {
 			this._stateObs.set(state, undefined);
@@ -313,6 +318,7 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 
 	/** The engine moved the baseline (user save folded in, git op, keep from the list, external write). */
 	async setBaseline(baseline: string, kind: AgentReviewKind): Promise<void> {
+		baseline = await this._instantiationService.invokeFunction(baselineWithUnsavedEdits, this.modifiedURI, baseline);
 		this._kind = kind;
 		const stateChanged = this._stateObs.get() !== ModifiedFileEntryState.Modified;
 		this._stateObs.set(ModifiedFileEntryState.Modified, undefined);
@@ -366,7 +372,11 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 
 	getEditorIntegration(pane: IEditorPane): IModifiedFileEntryEditorIntegration {
 		let value = this._integrations.get(pane);
-		if (!value) {
+		if (!value && pane.getId() === MERGE_EDITOR_ID) {
+			// The 3-way merge (agent's version vs unsaved edits) is the review there: no Keep/Undo in its result.
+			value = new NoReviewIntegration();
+			this._integrations.set(pane, value);
+		} else if (!value) {
 			const codeEditor = getCodeEditor(pane.getControl());
 			if (!codeEditor) {
 				throw new Error('agent review needs a code editor');
@@ -381,4 +391,73 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 		// renderDiffImmediately=true: there is no "streaming" phase for agent review.
 		return this._instantiationService.createInstance(ChatEditingCodeEditorIntegration, this, codeEditor, this.diffInfo, true);
 	}
+}
+
+/** `MergeEditor.ID` (not imported: that would load the merge editor with this file). */
+export const MERGE_EDITOR_ID = 'mergeEditor';
+
+/** For an editor that shows the file but reviews nothing. */
+class NoReviewIntegration implements IModifiedFileEntryEditorIntegration {
+	readonly currentIndex = constObservable(-1);
+	reveal(): void { }
+	next(): boolean { return false; }
+	previous(): boolean { return false; }
+	enableAccessibleDiffView(): void { }
+	async acceptNearestChange(): Promise<void> { }
+	async rejectNearestChange(): Promise<void> { }
+	async toggleDiff(): Promise<void> { }
+	dispose(): void { }
+}
+
+/**
+ * The baseline as the review shows it while the file has unsaved edits: with the user's edits (disk -> buffer) in
+ * it, where they don't touch a pending agent change (baseline -> disk), as typing is folded in while the entry
+ * exists. Without this, the user's own unsaved text showed as agent changes when the entry was created on a dirty
+ * buffer (a restart that restores unsaved edits) or got a new baseline (Keep from the list).
+ */
+export async function baselineWithUnsavedEdits(accessor: ServicesAccessor, uri: URI, baseline: string): Promise<string> {
+	const textFileService = accessor.get(ITextFileService);
+	const fileService = accessor.get(IFileService);
+	if (!textFileService.isDirty(uri)) {
+		return baseline;
+	}
+	const buffer = textFileService.files.get(uri)?.textEditorModel;
+	if (!buffer) {
+		return baseline;
+	}
+	let disk: string;
+	try {
+		disk = (await fileService.readFile(uri)).value.toString();
+	} catch {
+		return baseline; // e.g. deleted on disk: nothing to tell apart
+	}
+	return foldUnsavedEdits(baseline, disk, buffer.getValue(EndOfLinePreference.LF));
+}
+
+/** `baseline` plus the edits from `disk` to `buffer` that don't overlap an edit from `baseline` to `disk` (all as LF). */
+export function foldUnsavedEdits(baseline: string, disk: string, buffer: string): string {
+	baseline = baseline.replace(/\r\n/g, '\n');
+	disk = disk.replace(/\r\n/g, '\n');
+	const agent = stringEditOfDiff(baseline, disk);
+	const user = stringEditOfDiff(disk, buffer);
+	return user.rebaseSkipConflicting(agent.inverse(baseline)).apply(baseline);
+}
+
+function stringEditOfDiff(from: string, to: string): StringEdit {
+	const fromLines = from.split('\n');
+	const toLines = to.split('\n');
+	const offsets = (lines: string[]) => {
+		const result = [0];
+		for (const line of lines) {
+			result.push(result[result.length - 1] + line.length + 1);
+		}
+		return result;
+	};
+	const fromOffsets = offsets(fromLines);
+	const toOffsets = offsets(toLines);
+	const diff = new DefaultLinesDiffComputer().computeDiff(fromLines, toLines, { ignoreTrimWhitespace: false, computeMoves: false, maxComputationTimeMs: 1000 });
+	return StringEdit.create(diff.changes.flatMap(c => c.innerChanges ?? []).map(i => new StringReplacement(
+		new OffsetRange(fromOffsets[i.originalRange.startLineNumber - 1] + i.originalRange.startColumn - 1, fromOffsets[i.originalRange.endLineNumber - 1] + i.originalRange.endColumn - 1),
+		to.slice(toOffsets[i.modifiedRange.startLineNumber - 1] + i.modifiedRange.startColumn - 1, toOffsets[i.modifiedRange.endLineNumber - 1] + i.modifiedRange.endColumn - 1),
+	)));
 }

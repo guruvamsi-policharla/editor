@@ -56,14 +56,14 @@ To start over, run `scripts/demo-agent.sh setup` again.
 1. **Open your project folder** in Editor. Whatever is on disk at that point is the accepted state, so nothing is pending yet.
 2. **Run your agent.** You can run it in the integrated terminal (`claude`, `codex`, ...) or anywhere else, such as another terminal or tmux. Editor only watches the files. Alternatively, use the **Agent Terminal** docked to the right of the editor: run **Agent Review: Open Agent Terminal** from the command palette. It starts the command in the `agentReview.agent.command` setting (default `tact`; set it to `claude` or `codex`).
 3. **Review the changes** as they appear:
-   - **Each change:** **Keep** / **Undo** at its end (or under it when its last line is full), or **Ctrl/Cmd+Y** / **Ctrl/Cmd+N** with the cursor in it. **Ctrl/Cmd+Z** takes a Keep or an Undo back. A few changed words in a long line show as track changes (deleted words struck through in red, in the line).
-   - **A whole file:** the overlay at the bottom of the editor (Keep / Undo, ↑/↓ to move between changes and files).
+   - **Each change:** **Keep** / **Undo** at its end (or under it when its last line is full), or **Ctrl/Cmd+Y** / **Ctrl/Cmd+N** with the cursor in it. **Ctrl/Cmd+Z** takes a Keep or an Undo back. A few changed words in a long line show as track changes (deleted words struck through in red, in the line), also when the agent deleted or added a paragraph right next to it.
+   - **A whole file:** the bar at the bottom center of the editor, which starts with the file's name (Keep / Undo for the whole file, ↑/↓ to move between changes and files).
    - **Everything:** the **Agent Changes** list in the Explorer, with Keep All / Undo All and **Open All Changes** (a multi-file diff). Created and deleted files are reviewed there too.
 
    **Undo** writes the file right away, so the agent never reads undone text back. The exception is a file you have unsaved edits in: the undo then stays in the editor until you save.
 4. **Point the agent at text** by selecting lines and pressing **Ctrl/Cmd+L**. That types a reference such as `@paper/main.tex:L20-21` into the Agent Terminal (opening it if needed); then tell the agent what to do with it. The format is configurable (`agentReview.agent.referenceFormat`), and `agentReview.agent.includeSelectedText` also sends the selected text.
 
-Your own edits are never shown as agent changes. When you save, they're folded into the accepted state, and the agent's changes around them stay pending. If an agent writes a file while you have unsaved edits in it, nothing is overwritten: **Merge…** opens a 3-way merge. A `git commit` or checkout accepts what it moved (`git stash` and `git stash pop` don't: the changes come back with the pop). LaTeX build files (`.aux`, `.log`, the output PDF, ...), `node_modules` and anything in `.gitignore` are never shown. Pending changes survive a restart.
+Your own edits are never shown as agent changes. When you save, they're folded into the accepted state, and the agent's changes around them stay pending. Unsaved edits that come back after a restart are still yours, not the agent's. If an agent writes a file while you have unsaved edits in it, nothing is overwritten: **Merge…** opens a 3-way merge. A `git commit` or checkout accepts what it moved (`git stash` and `git stash pop` don't: the changes come back with the pop). LaTeX build files (`.aux`, `.log`, the output PDF, ...), `node_modules` and anything in `.gitignore` are never shown. Pending changes survive a restart.
 
 ## Status
 

@@ -19,11 +19,12 @@ import { localize } from '../../../../nls.js';
 import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IContextKeyService, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
-import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
-import { AgentReviewKind } from './agentReviewEntry.js';
+import { AgentReviewKind, MERGE_EDITOR_ID } from './agentReviewEntry.js';
+import { closeOrphanedAgentReviewMerges } from './agentReviewMerge.js';
 import { AgentReviewSaveParticipants } from './agentReviewSaveParticipant.js';
 import { AgentReviewService, IAgentReviewService } from './agentReviewService.js';
 
@@ -89,7 +90,7 @@ class AgentReviewEditorState extends Disposable implements IWorkbenchContributio
 		const isActive = ctxAgentReviewIsActive.bindTo(contextKeyService);
 		const updateActive = () => {
 			const uri = editorService.activeEditor?.resource;
-			isActive.set(!!uri && !!agentReviewService.getEntry(uri));
+			isActive.set(!!uri && !!agentReviewService.getEntry(uri) && editorService.activeEditorPane?.getId() !== MERGE_EDITOR_ID);
 		};
 		this._register(editorService.onDidActiveEditorChange(updateActive));
 		this._register(autorun(r => {
@@ -99,3 +100,12 @@ class AgentReviewEditorState extends Disposable implements IWorkbenchContributio
 	}
 }
 registerWorkbenchContribution2(AgentReviewEditorState.ID, AgentReviewEditorState, WorkbenchPhase.AfterRestored);
+
+/** Closes 3-way merges of agent writes restored from before a reload or restart (see agentReviewMerge.ts). */
+class AgentReviewOrphanedMerges implements IWorkbenchContribution {
+	static readonly ID = 'workbench.contrib.agentReviewOrphanedMerges';
+	constructor(@IInstantiationService instantiationService: IInstantiationService) {
+		instantiationService.invokeFunction(closeOrphanedAgentReviewMerges);
+	}
+}
+registerWorkbenchContribution2(AgentReviewOrphanedMerges.ID, AgentReviewOrphanedMerges, WorkbenchPhase.AfterRestored);

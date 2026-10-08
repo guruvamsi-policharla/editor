@@ -18,6 +18,7 @@
 
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { waitForState } from '../../../../base/common/observable.js';
+import { basename } from '../../../../base/common/resources.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
@@ -25,6 +26,8 @@ import { createTextBufferFactory } from '../../../../editor/common/model/textMod
 import { ITextModelService } from '../../../../editor/common/services/resolverService.js';
 import { localize } from '../../../../nls.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+import { INotificationService, Severity } from '../../../../platform/notification/common/notification.js';
+import { EditorsOrder } from '../../../common/editor.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
 import { MergeEditorInput, MergeEditorInputData } from '../../mergeEditor/browser/mergeEditorInput.js';
@@ -114,4 +117,28 @@ export async function openAgentReviewMerge(accessor: ServicesAccessor, uri: URI,
 		store.dispose();
 		throw err;
 	}
+}
+
+/**
+ * The merge's snapshots live in memory. A merge editor restored after a reload or restart can't open them (it showed
+ * "The editor could not be opened"): close it and say so. The file keeps the merge result so far, unsaved.
+ */
+export async function closeOrphanedAgentReviewMerges(accessor: ServicesAccessor): Promise<number> {
+	const editorService = accessor.get(IEditorService);
+	const modelService = accessor.get(IModelService);
+	const notificationService = accessor.get(INotificationService);
+	const orphans = editorService.getEditors(EditorsOrder.SEQUENTIAL).filter(({ editor }) =>
+		editor instanceof MergeEditorInput && editor.base.scheme === AGENT_REVIEW_MERGE_SCHEME && !modelService.getModel(editor.base));
+	if (orphans.length === 0) {
+		return 0;
+	}
+	await editorService.closeEditors(orphans, { preserveFocus: true });
+	for (const { editor } of orphans) {
+		const name = basename((editor as MergeEditorInput).result);
+		notificationService.notify({
+			severity: Severity.Info,
+			message: localize('agentReview.merge.orphaned', "The merge of {0} could not be reopened after the restart and was closed. The file keeps the merge result so far, unsaved.", name),
+		});
+	}
+	return orphans.length;
 }

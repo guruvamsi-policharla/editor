@@ -24,7 +24,7 @@ import { IUndoRedoService, UndoRedoElementType } from '../../../../platform/undo
 import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntry } from '../../chat/common/editing/chatEditingService.js';
 import { SaveReason } from '../../../common/editor.js';
 import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
-import { AGENT_REVIEW_BASELINE_SCHEME, AgentReviewEntry, AgentReviewKind, AgentReviewUndoHistory, IAgentReviewHunkEvent } from './agentReviewEntry.js';
+import { AGENT_REVIEW_BASELINE_SCHEME, AgentReviewEntry, baselineWithUnsavedEdits, AgentReviewKind, AgentReviewUndoHistory, IAgentReviewHunkEvent } from './agentReviewEntry.js';
 import { openAgentReviewMerge } from './agentReviewMerge.js';
 
 export const IAgentReviewService = createDecorator<IAgentReviewService>('agentReviewService');
@@ -167,7 +167,12 @@ export class AgentReviewService extends Disposable implements IAgentReviewServic
 			ref.dispose();
 			return undefined;
 		}
-		const entry = this._instantiationService.createInstance(AgentReviewEntry, ref, latest.baseline, latest.kind, this._undoHistory);
+		const baseline = await this._instantiationService.invokeFunction(baselineWithUnsavedEdits, uri, latest.baseline);
+		if (this._store.isDisposed || this._latest.get(uri) !== latest) {
+			ref.dispose();
+			return this._store.isDisposed || !this._latest.get(uri) ? undefined : this._createEntry(uri);
+		}
+		const entry = this._instantiationService.createInstance(AgentReviewEntry, ref, baseline, latest.kind, this._undoHistory);
 		const listener = entry.onDidHunkAction(e => {
 			this._onDidHunkAction.fire(e);
 			this._pushUndoForKeep(e);
