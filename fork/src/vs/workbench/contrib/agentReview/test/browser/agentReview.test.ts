@@ -12,7 +12,7 @@
 
 import assert from 'assert';
 import { timeout } from '../../../../../base/common/async.js';
-import { Event } from '../../../../../base/common/event.js';
+import { Emitter, Event } from '../../../../../base/common/event.js';
 import { Disposable, DisposableStore, IDisposable, IReference } from '../../../../../base/common/lifecycle.js';
 import { ResourceMap } from '../../../../../base/common/map.js';
 import { constObservable, waitForState } from '../../../../../base/common/observable.js';
@@ -20,7 +20,7 @@ import { URI } from '../../../../../base/common/uri.js';
 import { mock } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { IOverlayWidget, IViewZone, IViewZoneChangeAccessor } from '../../../../../editor/browser/editorBrowser.js';
-import { EditorOption } from '../../../../../editor/common/config/editorOptions.js';
+import { EditorLayoutInfo, EditorOption } from '../../../../../editor/common/config/editorOptions.js';
 import { EditOperation } from '../../../../../editor/common/core/editOperation.js';
 import { Range } from '../../../../../editor/common/core/range.js';
 import { ITextModel } from '../../../../../editor/common/model.js';
@@ -319,6 +319,28 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.ok(position && typeof position === 'object');
 		assert.ok(position.left > 50 + 'b TWO'.length * 7, 'right of the text');
 		assert.ok(position.top < editor.getTopForLineNumber(3), 'on line 2, not below it');
+	});
+
+	test('when the editor gets narrower (a split), a toolbar that no longer fits at the end of its line gets its own row', async () => {
+		const getOption = editor.getOption.bind(editor);
+		editor.getOption = (id => id === EditorOption.fontInfo ? { ...getOption(EditorOption.fontInfo), typicalHalfwidthCharacterWidth: 7 } : getOption(id)) as typeof editor.getOption;
+		let contentWidth = 800;
+		editor.getLayoutInfo = () => ({ ...getOption(EditorOption.layoutInfo), contentLeft: 50, contentWidth, verticalScrollbarWidth: 14 });
+		const line = 'y'.repeat(60);
+		model.setValue(`a one\n${line} TWO\nc three\n`);
+		await showPending(`a one\n${line} two\nc three\n`);
+		const toolbarRows = () => [...zones.values()].filter(z => z.domNode.classList.contains('agent-review-hunk-toolbar-row')).map(z => z.afterLineNumber);
+		assert.deepStrictEqual(toolbarRows(), [], '64 columns: room at the end of the line');
+
+		// The test editor ignores its container's size: report the new layout as the real editor does on a resize.
+		const relayout = (width: number) => { contentWidth = width; (editor as unknown as { _onDidLayoutChange: Emitter<EditorLayoutInfo> })._onDidLayoutChange.fire(editor.getLayoutInfo()); };
+		const keepUndoShown = () => hunkWidgets().length === 1 && hunkWidgets().every(w => w.getDomNode().querySelector('.monaco-toolbar'));
+		relayout(400); // about 55 columns
+		assert.deepStrictEqual(toolbarRows(), [2], 'no room any more: a row of its own, not over the text');
+		assert.ok(keepUndoShown(), 'Keep/Undo still there (not disposed by the previous rendering\'s layout listener)');
+		relayout(800);
+		assert.deepStrictEqual(toolbarRows(), [], 'wide again: back at the end of the line');
+		assert.ok(keepUndoShown());
 	});
 
 	test('unsaved user edits in the buffer when the entry is created (restored after a restart) are not agent changes', async () => {
