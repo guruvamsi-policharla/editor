@@ -14,7 +14,7 @@ import { AgentTerminal } from './agentTerminal';
 import { ConflictMerger } from './conflicts';
 import { normalizePath, ReviewController, UiPaths, type CoreBridge, type ReviewAction } from './controller';
 import { EditLogs } from './editLog';
-import { BASELINE_SCHEME, BaselineContentProvider, baselineUri, ReviewTree, type FileItem } from './reviewTree';
+import { BASELINE_SCHEME, BaselineContentProvider, baselineUri, deletedUri, ReviewTree, type FileItem } from './reviewTree';
 
 const CORE_SET_BASELINE = '_agentReview.setBaseline';
 const CORE_REMOVE = '_agentReview.remove';
@@ -95,10 +95,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // core -> extension
   context.subscriptions.push(
-    vscode.commands.registerCommand('agentReview.ext.onDidHunkAction', async (e: { uri: CoreUri; kind: ReviewAction['kind']; baseline?: string }) => {
+    vscode.commands.registerCommand('agentReview.ext.onDidHunkAction', async (e: { uri: CoreUri; kind: ReviewAction['kind']; baseline?: string | null }) => {
       const uri = toUri(e.uri);
       if (uri.scheme !== 'file') { return; }
-      const action = (e.kind === 'accepted' ? { kind: 'accepted', path: uri.fsPath, baseline: e.baseline ?? '' } : { kind: e.kind, path: uri.fsPath }) as ReviewAction;
+      const action = (e.kind === 'accepted' ? { kind: 'accepted', path: uri.fsPath, baseline: e.baseline ?? '' }
+        : e.kind === 'restore' ? { kind: 'restore', path: uri.fsPath, baseline: e.baseline ?? null }
+          : { kind: e.kind, path: uri.fsPath }) as ReviewAction;
       try {
         await ctl.onReviewAction(action);
       } catch (err) {
@@ -272,9 +274,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const real = normalizePath(p);
       const f = ctl.pendingFiles.find((x) => x.absPath === real);
       const left = baselineUri(ui.toUi(f?.oldAbsPath ?? real));
-      const right = f?.kind === 'deleted' ? undefined : uiUri(real);
-      if (!right) { await vscode.window.showTextDocument(left, { preview: true }); }
-      else { await vscode.commands.executeCommand('vscode.diff', left, right, `${path.basename(p)} (accepted ↔ current)`); }
+      // A deleted file: its accepted text against nothing, so it reads as deleted (all red), not as a normal file.
+      if (f?.kind === 'deleted') { await vscode.commands.executeCommand('vscode.diff', left, deletedUri(ui.toUi(real)), `${path.basename(p)} (deleted)`); }
+      else { await vscode.commands.executeCommand('vscode.diff', left, uiUri(real), `${path.basename(p)} (accepted ↔ current)`); }
     })),
     vscode.commands.registerCommand('agentReview.refresh', () => run('Rescan', async () => {
       for (const e of review!.engines.values()) { await e.rescan(); }

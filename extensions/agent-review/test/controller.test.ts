@@ -117,6 +117,32 @@ describe('ReviewController', () => {
     expect(ctl.pendingFiles).toEqual([]);
   });
 
+  it('Ctrl+Z after Keep (restore) puts the change back up for review, even after the last Keep cleared the file', async () => {
+    await open();
+    const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\nDiscussion.\n');
+    await ctl.onReviewAction({ kind: 'accepted', path: abs, baseline: 'Intro.\nNew methods.\nResults.\n' });
+    await ctl.onReviewAction({ kind: 'accepted', path: abs, baseline: read(abs) });
+    await ctl.idle();
+    expect(core.shown.has(abs)).toBe(false);
+
+    await ctl.onReviewAction({ kind: 'restore', path: abs, baseline: 'Intro.\nNew methods.\nResults.\n' });
+    await ctl.idle();
+    expect(core.shown.get(abs)).toEqual({ baseline: 'Intro.\nNew methods.\nResults.\n', kind: 'modified' });
+    await ctl.onReviewAction({ kind: 'restore', path: abs, baseline: 'Intro.\nMethods.\nResults.\n' });
+    await ctl.idle();
+    expect(core.shown.get(abs)).toEqual({ baseline: 'Intro.\nMethods.\nResults.\n', kind: 'modified' });
+    expect(read(abs)).toBe('Intro.\nNew methods.\nResults.\nDiscussion.\n'); // the disk is never touched
+
+    // A created file kept as a whole: null puts it back as a pending creation.
+    const created = await agentWrite('related.tex', 'Related work.\n');
+    await ctl.acceptFile(created);
+    await ctl.idle();
+    expect(core.shown.has(created)).toBe(false);
+    await ctl.onReviewAction({ kind: 'restore', path: created, baseline: null });
+    await ctl.idle();
+    expect(core.shown.get(created)).toEqual({ baseline: '', kind: 'created' });
+  });
+
   it('Keep on a file with mixed CRLF/LF line endings leaves nothing spurious pending', async () => {
     fs.writeFileSync(path.join(root, 'mixed.txt'), 'one\r\ntwo\nthree\r\nfour\n');
     await open();

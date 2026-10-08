@@ -9,6 +9,11 @@ export function baselineUri(absPath: string): vscode.Uri {
   return vscode.Uri.file(absPath).with({ scheme: BASELINE_SCHEME });
 }
 
+/** An empty document standing for a file that no longer exists (the right side of a deleted file's diff). */
+export function deletedUri(absPath: string): vscode.Uri {
+  return vscode.Uri.file(absPath).with({ scheme: BASELINE_SCHEME, query: 'deleted' });
+}
+
 export class BaselineContentProvider implements vscode.TextDocumentContentProvider, vscode.Disposable {
   private readonly emitter = new vscode.EventEmitter<vscode.Uri>();
   readonly onDidChange = this.emitter.event;
@@ -22,6 +27,7 @@ export class BaselineContentProvider implements vscode.TextDocumentContentProvid
   }
 
   async provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
+    if (uri.query === 'deleted') { return ''; }
     return (await this.ctl.baselineText(uri.fsPath)) ?? '';
   }
 

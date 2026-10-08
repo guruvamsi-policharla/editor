@@ -10,17 +10,21 @@
 // keybindings, and explorer decorations.
 
 import { Emitter, Event } from '../../../../base/common/event.js';
-import { Disposable, IDisposable } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableMap, IDisposable } from '../../../../base/common/lifecycle.js';
 import { ResourceMap } from '../../../../base/common/map.js';
 import { IObservable, IReader, observableValue } from '../../../../base/common/observable.js';
 import { isEqual } from '../../../../base/common/resources.js';
 import { URI } from '../../../../base/common/uri.js';
+import { localize } from '../../../../nls.js';
 import { ITextModel } from '../../../../editor/common/model.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
 import { ITextModelContentProvider, ITextModelService } from '../../../../editor/common/services/resolverService.js';
 import { createDecorator, IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { IUndoRedoService, UndoRedoElementType } from '../../../../platform/undoRedo/common/undoRedo.js';
 import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntry } from '../../chat/common/editing/chatEditingService.js';
-import { AGENT_REVIEW_BASELINE_SCHEME, AgentReviewEntry, AgentReviewKind, IAgentReviewHunkEvent } from './agentReviewEntry.js';
+import { SaveReason } from '../../../common/editor.js';
+import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
+import { AGENT_REVIEW_BASELINE_SCHEME, AgentReviewEntry, AgentReviewKind, AgentReviewUndoHistory, IAgentReviewHunkEvent } from './agentReviewEntry.js';
 import { openAgentReviewMerge } from './agentReviewMerge.js';
 
 export const IAgentReviewService = createDecorator<IAgentReviewService>('agentReviewService');
@@ -103,13 +107,20 @@ export class AgentReviewService extends Disposable implements IAgentReviewServic
 	private readonly _onDidHunkAction = this._register(new Emitter<IAgentReviewHunkEvent>());
 	readonly onDidHunkAction = this._onDidHunkAction.event;
 
+	private readonly _undoHistory = new AgentReviewUndoHistory();
+	private readonly _undoHistoryListeners = this._register(new DisposableMap<string>());
+
 	constructor(
 		@IChatEditingService chatEditingService: IChatEditingService,
 		@ITextModelService private readonly _textModelService: ITextModelService,
 		@IModelService private readonly _modelService: IModelService,
 		@IInstantiationService private readonly _instantiationService: IInstantiationService,
+		@IUndoRedoService private readonly _undoRedoService: IUndoRedoService,
+		@ITextFileService private readonly _textFileService: ITextFileService,
 	) {
 		super();
+		this._register(this._undoHistory);
+		this._register(this._undoHistory.onDidRemember(model => this._watchUndoOfUndo(model)));
 		this._register(chatEditingService.registerEditReviewSession(this._session));
 
 		// Lets "open side-by-side diff" (toggleDiff) resolve the in-memory baseline model.
@@ -156,11 +167,65 @@ export class AgentReviewService extends Disposable implements IAgentReviewServic
 			ref.dispose();
 			return undefined;
 		}
-		const entry = this._instantiationService.createInstance(AgentReviewEntry, ref, latest.baseline, latest.kind);
-		const listener = entry.onDidHunkAction(e => this._onDidHunkAction.fire(e));
+		const entry = this._instantiationService.createInstance(AgentReviewEntry, ref, latest.baseline, latest.kind, this._undoHistory);
+		const listener = entry.onDidHunkAction(e => {
+			this._onDidHunkAction.fire(e);
+			this._pushUndoForKeep(e);
+		});
 		this._entries.set(uri, { entry, listener });
 		this._session.entriesObs.set([...this._session.entriesObs.get(), entry], undefined);
 		return entry;
+	}
+
+	/**
+	 * Ctrl+Z after an Undo that was saved: save again, so that the disk shows the agent's text, pending, as the editor
+	 * does. With the entry gone (the Undo was the file's last change), the save is what brings the change back: the
+	 * engine sees an external write.
+	 */
+	private _watchUndoOfUndo(model: ITextModel): void {
+		const key = model.uri.toString();
+		if (this._undoHistoryListeners.has(key)) {
+			return;
+		}
+		const listener = model.onDidChangeContent(e => {
+			if (!this._undoHistory.match(model, e)?.saved) {
+				return;
+			}
+			setTimeout(() => { // not while the model is still dispatching this change
+				const entry = this.getEntry(model.uri);
+				if (entry) {
+					entry.saveUndo();
+				} else if (!model.isDisposed()) {
+					this._textFileService.save(model.uri, { reason: SaveReason.EXPLICIT, skipSaveParticipants: true });
+				}
+			}, 0);
+		});
+		const disposeListener = model.onWillDispose(() => {
+			this._undoHistory.forget(model.uri);
+			this._undoHistoryListeners.deleteAndDispose(key);
+		});
+		this._undoHistoryListeners.set(key, { dispose: () => { listener.dispose(); disposeListener.dispose(); } });
+	}
+
+	/**
+	 * Ctrl+Z after a Keep (hunk or file, in the editor) puts the change back up for review: the engine's baseline goes
+	 * back to what it was, and the change is pushed back in. Ctrl+Shift+Z keeps it again. The element lives on the
+	 * file's own undo stack, so it interleaves with typing and Undo, and works after the last Keep removed the entry.
+	 */
+	private _pushUndoForKeep(e: IAgentReviewHunkEvent): void {
+		if ((e.kind !== 'accepted' && e.kind !== 'acceptFile') || e.previousBaseline === undefined) {
+			return;
+		}
+		const { uri, previousBaseline } = e;
+		const redo: IAgentReviewHunkEvent = e.kind === 'accepted' ? { uri, kind: 'restore', baseline: e.baseline } : { uri, kind: 'acceptFile' };
+		this._undoRedoService.pushElement({
+			type: UndoRedoElementType.Resource,
+			resource: uri,
+			label: localize('agentReview.keepUndoLabel', "Keep Agent Change"),
+			code: 'agentReview.keep',
+			undo: () => this._onDidHunkAction.fire({ uri, kind: 'restore', baseline: previousBaseline }),
+			redo: () => this._onDidHunkAction.fire(redo),
+		});
 	}
 
 	remove(uri: URI): void {

@@ -1,7 +1,7 @@
 /**
  * Git-operation detection against real repositories (PLAN.md §5.1, §7):
  *  - index-only change (git add): accept pending hunks only in the staged files
- *  - any HEAD move (commit, checkout, reset, merge, rebase, stash): accept everything
+ *  - any HEAD move (commit, checkout, reset, merge, rebase): accept everything; `git stash` / pop accept nothing
  *  - the engine never touches the user's index, HEAD, refs, or stash
  */
 import * as nodeFs from 'node:fs';
@@ -115,7 +115,7 @@ describe.runIf(hasGit())('git operations', () => {
     await engine.handleFsEvents([ws.abs('a.txt'), ws.abs('feature-only.txt')]);
     expect(pendingPaths()).toEqual([]);
     await agentWrite('b.txt', 'pending before checkout\n');
-    ws.git('stash', '-q'); // keep the tree clean for checkout; the stash itself counts as a HEAD-like move
+    ws.git('stash', '-q'); // keep the tree clean for checkout; the stash and pop accept nothing (the checkout does)
     await engine.checkGit();
     ws.git('stash', 'pop', '-q');
     await engine.checkGit();
@@ -135,12 +135,19 @@ describe.runIf(hasGit())('git operations', () => {
     expect(await baselineFiles(engine)).toMatchObject({ 'a.txt': 'a1\na2\na3\na4\na5\na6\na7\n' });
   });
 
-  it('git stash (moves refs/stash, not HEAD) accepts all', async () => {
+  it('git stash + pop (refs/stash moves, HEAD does not) accepts nothing: the pending changes come back with pop', async () => {
     await agentWrite('b.txt', 'agent\n');
-    ws.git('stash', '-q');
-    const r = await engine.checkGit();
-    expect(r.kind).toBe('head');
-    expect(pendingPaths()).toEqual([]);
+    await agentWrite('a.txt', 'a1\nagent\na3\na4\na5\na6\na7\n');
+    ws.git('stash', '-q'); // what an agent does to check whether a failure was already there
+    expect((await engine.checkGit()).kind).not.toBe('head');
+    await engine.handleFsEvents([ws.abs('a.txt'), ws.abs('b.txt')]);
+    expect(pendingPaths()).toEqual([]); // the tree is back at HEAD = the baseline
+    expect(await baselineFiles(engine)).toMatchObject({ 'b.txt': 'b\n' });
+
+    ws.git('stash', 'pop', '-q');
+    expect((await engine.checkGit()).kind).not.toBe('head');
+    await engine.handleFsEvents([ws.abs('a.txt'), ws.abs('b.txt')]);
+    expect(pendingPaths()).toEqual(['a.txt', 'b.txt']); // still up for review
     expect(await baselineFiles(engine)).toMatchObject({ 'b.txt': 'b\n' });
   });
 

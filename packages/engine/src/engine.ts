@@ -1156,8 +1156,12 @@ export class ReviewEngine {
     const head = await readHeadState(this.fs, repo);
     const idxStat = await statIndex(this.fs, repo);
 
-    if (this.gitHead && !headStatesEqual(this.gitHead, head)) {
-      // HEAD moved (commit, checkout, pull, merge, rebase, reset, stash): everything on disk becomes the baseline.
+    const stashOnly = this.gitHead !== undefined && this.gitHead.head === head.head && this.gitHead.oid === head.oid;
+    if (this.gitHead && !headStatesEqual(this.gitHead, head) && !stashOnly) {
+      // HEAD moved (commit, checkout, pull, merge, rebase, reset): everything on disk becomes the baseline.
+      // Only refs/stash moving (`git stash`, `git stash pop`) is not a HEAD move: the stash takes the files back to
+      // HEAD and pop brings them back, as plain disk changes against the baseline. Agents run `git stash` + `pop` to
+      // check something; accepting there would end the review of everything they wrote.
       await this.fullScan({ trustStatCache: true });
       const accepted: string[] = [];
       for (const rel of [...this.pending]) {

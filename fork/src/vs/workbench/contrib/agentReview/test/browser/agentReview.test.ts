@@ -204,7 +204,28 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.strictEqual(hunkWidgets().length, 1, 'one per-hunk toolbar');
 	});
 
-	test('each Keep/Undo toolbar has its own row below its hunk, so it never covers text', async () => {
+	test('with word wrap on, deleted lines wrap like the editor\'s lines (a long LaTeX paragraph is not cut off)', async () => {
+		editor.updateOptions({ wordWrap: 'wordWrapColumn', wordWrapColumn: 20 });
+		await showPending('Intro sentence.\n' + 'This long paragraph was deleted by the agent, and all of it must stay readable.\n' + 'Closing sentence.\n');
+		const deleted = [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
+		assert.strictEqual(deleted.length, 1);
+		assert.ok(deleted[0].heightInLines! >= 4, `wrapped into several rows (got ${deleted[0].heightInLines})`);
+	});
+
+	test('a few words changed in a long line show as track changes (no red copy of the line); a rewrite keeps the red rows', async () => {
+		const paragraph = 'We present a batched threshold encryption scheme in which the committee never runs a key generation protocol.';
+		model.setValue(`Intro.\n${paragraph.replace('never runs', 'does not run')}\nUnchanged middle sentence.\nA completely different closing sentence.\n`);
+		await showPending(`Intro.\n${paragraph}\nUnchanged middle sentence.\nClosing.\n`);
+		const deletedZones = () => [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
+		const struck = model.getAllDecorations().filter(d => d.options.before?.inlineClassName?.includes('agent-review-deleted-text'));
+
+		assert.deepStrictEqual(struck.map(d => d.range.startLineNumber), [2], 'the deleted words, in the line');
+		assert.ok(struck.map(d => d.options.before?.content).join('').includes('never'));
+		assert.deepStrictEqual(deletedZones().map(z => z.afterLineNumber), [3], 'only the rewritten closing line gets red rows');
+		assert.strictEqual(hunkWidgets().length, 2, 'both still have Keep/Undo');
+	});
+
+	test('a Keep/Undo toolbar with no room at the end of its hunk has its own row below it, so it never covers text', async () => {
 		model.setValue('a one\nb TWO, rewritten by the agent\nc three\ne five\n');
 		const { entry } = await showPending('a one\nb two\nc three\nd four\ne five\n');
 		assert.strictEqual(entry.diffInfo.get().changes.length, 2, 'a rewrite and a pure deletion');
@@ -231,6 +252,27 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.ok(position && typeof position === 'object', 'widget moved to its row');
 		assert.ok(position.top < 137 + row.heightInPx!, 'inside the row');
 		assert.strictEqual(position.left, editor.getLayoutInfo().contentLeft);
+	});
+
+	test('the toolbar sits at the end of the hunk\'s last line when it fits there, else in its own row', async () => {
+		// A 7px-wide monospace font in an 800px-wide editor: about 110 columns.
+		const getOption = editor.getOption.bind(editor);
+		editor.getOption = (id => id === EditorOption.fontInfo ? { ...getOption(EditorOption.fontInfo), typicalHalfwidthCharacterWidth: 7 } : getOption(id)) as typeof editor.getOption;
+		editor.getLayoutInfo = () => ({ ...getOption(EditorOption.layoutInfo), contentLeft: 50, contentWidth: 800, verticalScrollbarWidth: 14 });
+		const long = 'x'.repeat(100);
+		model.setValue(`a one\nb TWO\nc three\n${long} LONG\ne five\n`);
+		await showPending(`a one\nb two\nc three\n${long} long\ne five\n`);
+
+		const rows = [...zones.values()].filter(z => z.domNode.classList.contains('agent-review-hunk-toolbar-row'));
+		assert.deepStrictEqual(rows.map(r => r.afterLineNumber), [4], 'only the line that runs to the edge gets a toolbar row');
+		const widgets = hunkWidgets();
+		assert.strictEqual(widgets.length, 2);
+		const atEnd = widgets.filter(w => w.getDomNode().classList.contains('at-line-end'));
+		assert.strictEqual(atEnd.length, 1);
+		const position = atEnd[0].getPosition()?.preference;
+		assert.ok(position && typeof position === 'object');
+		assert.ok(position.left > 50 + 'b TWO'.length * 7, 'right of the text');
+		assert.ok(position.top < editor.getTopForLineNumber(3), 'on line 2, not below it');
 	});
 
 	test('Ctrl+Y/Ctrl+N context: "cursor in a change" follows the file the editor shows, not the last integration created', async () => {
@@ -285,6 +327,50 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.deepStrictEqual(hunkEvents.map(e => e.kind), ['rejected']);
 		assert.strictEqual(saves.length, 1);
 		assert.strictEqual(saves[0]?.skipSaveParticipants, true);
+	});
+
+	test('Ctrl+Z after Keep puts the change back up for review (restore the previous baseline); Ctrl+Shift+Z keeps it again', async () => {
+		const { integration } = await showPending();
+		await integration.acceptNearestChange(hunkWidgets()[0]);
+		assert.deepStrictEqual(hunkEvents.map(e => [e.kind, e.baseline]), [['accepted', DISK]]);
+
+		await model.undo();
+		assert.strictEqual(model.getValue(), DISK, 'the buffer is not touched');
+		assert.deepStrictEqual(hunkEvents.slice(1).map(e => [e.kind, e.baseline]), [['restore', BASELINE]]);
+		await model.redo();
+		assert.deepStrictEqual(hunkEvents.slice(2).map(e => [e.kind, e.baseline]), [['restore', DISK]]);
+		assert.deepStrictEqual(saves, []);
+	});
+
+	test('Ctrl+Z after Undo brings the agent text back as a pending change (saved, like the Undo), not as user typing', async () => {
+		trackSaves = true;
+		savedVersion = model.getAlternativeVersionId();
+		const { entry, integration } = await showPending();
+		await integration.rejectNearestChange(hunkWidgets()[0]);
+		assert.strictEqual(model.getValue(), BASELINE);
+		assert.strictEqual(saves.length, 1);
+
+		await model.undo();
+		assert.strictEqual(model.getValue(), DISK);
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 ? d : undefined));
+		assert.strictEqual(entry.originalModel.getValue(), BASELINE, 'not folded into the baseline as if the user typed it');
+		await timeout(10);
+		assert.strictEqual(saves.length, 2, 'saved, so the disk shows the change again');
+		assert.strictEqual(saves[1]?.skipSaveParticipants, true);
+
+		await model.redo();
+		assert.strictEqual(model.getValue(), BASELINE);
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 0 ? d : undefined));
+		await timeout(10);
+		assert.strictEqual(saves.length, 3);
+
+		// The extension removes the entry once nothing is pending. Ctrl+Z still saves the agent text back to
+		// disk, where the engine sees it as an external write and pushes the change again.
+		service.remove(uri);
+		await model.undo();
+		assert.strictEqual(model.getValue(), DISK);
+		await timeout(10);
+		assert.strictEqual(saves.length, 4);
 	});
 
 	test('Undo never saves a buffer that has unsaved user edits', async () => {

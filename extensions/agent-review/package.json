@@ -191,6 +191,21 @@
           "command": "agentReview.rejectFile",
           "when": "view == agentReview.changes && viewItem =~ /^agentReview\\.file/",
           "group": "inline@3"
+        },
+        {
+          "command": "agentReview.acceptFile",
+          "when": "view == agentReview.changes && viewItem =~ /^agentReview\\.file/",
+          "group": "1_review@1"
+        },
+        {
+          "command": "agentReview.rejectFile",
+          "when": "view == agentReview.changes && viewItem =~ /^agentReview\\.file/",
+          "group": "1_review@2"
+        },
+        {
+          "command": "agentReview.openFileDiff",
+          "when": "view == agentReview.changes && viewItem =~ /^agentReview\\.file/",
+          "group": "2_open@1"
         }
       ],
       "commandPalette": [

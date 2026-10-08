@@ -21,6 +21,16 @@ All screenshots come from the packaged `VSCode-linux-x64/editor` built by `fork/
 | [`after-restart.png`](img/phase2/after-restart.png) | The app is quit and restarted, and the same pending hunk and file list come back (the baselines persist in workspace storage). Changes made while the app was closed are picked up too (integration test) |
 | [`agent-terminal.png`](img/phase2/agent-terminal.png) | **Ctrl+L** with lines selected opens the agent terminal, docked to the right of the editor, and types `@paper/main.tex:L20-21` into it. For the screenshot the agent command is `cat`; the default is `tact` |
 
+### polish-1 (packaged build, the generated 739-line paper in `/workspace/cc/polish-1-smoke`)
+
+| Screenshot | What it shows |
+|---|---|
+| [`before-prose.png`](img/polish-1/before-prose.png) | **Before** (phase-2-finish build, word wrap on): a two-phrase edit shows the whole paragraph in red and again in green, the red rows are cut off at the edge (no wrap), and every hunk has a Keep/Undo row |
+| [`after-prose.png`](img/polish-1/after-prose.png) | **After**, same edits: the reword and the equation change are track changes in the line, the deleted paragraph wraps, Keep/Undo sit at the end of each hunk's last row |
+| [`after-rename-light.png`](img/polish-1/after-rename-light.png) | A rename `x`→`y` across the paper in the light theme: one struck red `x` and a green `y` per occurrence, no extra rows; the long equation line gets its own Keep/Undo row |
+| [`after-narrow-agent-terminal.png`](img/polish-1/after-narrow-agent-terminal.png) | Narrow editor next to the Agent Terminal after **Ctrl+L** (`@sections/prelims.tex:L20`) |
+| [`after-ctrlz-undo.png`](img/polish-1/after-ctrlz-undo.png) | **Ctrl+Z** after Undo on the equation: the agent's text is back, pending, and on disk (clean tab) |
+
 Also checked by hand in the packaged app:
 
 - The ↑/↓ overlay arrows move between hunks and files with chat disabled.
@@ -75,6 +85,8 @@ The rule: after Undo, the file on disk matches what the user sees (as in Cursor)
 | **Undo** a hunk, or a file in the editor | The baseline text goes back into the buffer, which is **saved right away** (without save participants, so formatters can't touch other pending lines). Disk = what you see | The undo stays **in the buffer**, which stays dirty; it reaches the disk with the user's next save (and is attributed correctly then). Until then the agent still sees its own text on disk |
 | **Undo** from the list / **Undo All** | The engine writes the baseline (or deletes a created file, restores a deleted one) | Undone in the buffer as above, not saved. Created/deleted files and files in conflict are skipped, with a message |
 
+**Ctrl/Cmd+Z** takes a Keep or an Undo back. After a Keep (a hunk, or a file from the overlay), the change is up for review again: the engine's baseline goes back to what it was, and the disk isn't touched. After an Undo, the agent's text comes back as a pending change, and it's saved if the Undo was saved. Redo repeats the Keep or Undo. Before this, Ctrl+Z after Keep undid the agent's last write in the buffer instead, and Ctrl+Z after Undo brought the agent's text back as if the user had typed it, so it was accepted on the next save.
+
 If the save after an Undo fails or is cancelled (disk full, permissions, a newer version on disk), a warning says the undo isn't on disk yet and offers **Save**. Two Undos in quick succession both get saved, even while the first save is still running.
 
 ## Scope status
@@ -83,9 +95,9 @@ If the save after an Undo fails or is cancelled (disk full, permissions, a newer
 |---|---|
 | **C1** agentReview contribution wired to the real engine | Done. File watching, folding user edits on save, persistence, and git ops all go through the engine |
 | **C3** disk reload vs. user edit | Done. `ChatEditingTextModelChangeService`'s external-edit predicate now gets the content-change event, and the entry tests `detailedReasons` for `reloadFromDisk`. This replaces the spike's listener-order trick |
-| **C4** word-level highlights | Done. `extendToSubwords` is passed to the diff, so inner changes are word/subword ranges |
+| **C4** word-level highlights | Done. `extendToSubwords` is passed to the diff, so inner changes are word/subword ranges. A hunk that changes only a few words within its lines (at most 30% of their text, every change within one line) is shown as track changes: the deleted words struck through in red right before the new ones, in the line itself, instead of the whole lines again in red above. Larger rewrites keep the red rows. Opt-in per entry (`trackChanges`) |
 | **C5** nav without chat, `agentReview.isActive` | Done. The ↑/↓ navigate actions are enabled when `chatIsEnabled` **or** `agentReview.isActive` is set; the latter tracks the active editor having pending changes. Keep/Undo labels and keybindings are unchanged; the chat wording around them is agent-review wording: "Go to Next/Previous Agent Change", "Keep/Undo Agent Changes (in this File)", "Keep All Agent Changes", "Toggle Diff Editor / Show Accessible Diff View for Agent Changes", the diff title "file (agent changes)" and the explorer tooltip "Pending agent changes". All of them are in the **Agent Review** palette category (upstream: "Chat"), next to the extension's commands |
-| **C6** always-visible hunk buttons | Done. Each hunk's Keep/Undo toolbar has its own row (a view zone) directly below the hunk, aligned with the start of the text, so it never covers text at any editor width (upstream floats it over the hunk's first line, at the right edge, on hover only, which covered text in narrow editors). Plain buttons (Keep primary, Undo secondary), opacity 0.85, and 1 on hover or with the cursor in the hunk. Opt-in per entry (`hunkToolbarRows`), so chat sessions keep the upstream placement |
+| **C6** always-visible hunk buttons | Done. Each hunk's Keep/Undo toolbar is always visible and never covers text. It sits at the right end of the hunk's last row when that row leaves room for it (the short last row of a wrapped paragraph, an equation, the last red row of a deletion), and otherwise gets its own row (a view zone) directly below the hunk, aligned with the start of the text. Upstream floats it over the hunk's first line, at the right edge, on hover only, which covered text in narrow editors. The room is estimated from the editor's own line breaks and the font's character width (exact for monospace fonts). Plain buttons (Keep primary, Undo secondary), opacity 0.85, and 1 on hover or with the cursor in the hunk. Opt-in per entry (`hunkToolbarRows`), so chat sessions keep the upstream placement |
 | Hunk merging | Done. New diff option `preserveShortMatchingLines` skips the heuristic that joins hunks separated by short unchanged lines (≤4 non-whitespace chars, e.g. a lone `}`), so each hunk can be kept or undone on its own. The default diff behavior is unchanged (all upstream diff fixtures pass) |
 | **C8** created / deleted files | Done. Created files inline; deleted (and renamed/binary) in the list with a diff and Keep/Undo |
 | **C7** multi-file review | Done, extension-side. The **Agent Changes** view (explorer) lists every file with kind and +/− and has Keep/Undo per file plus Keep All / Undo All. **Open All Changes** opens a multi-file diff (`vscode.changes`). An activity badge shows the file count |
@@ -101,9 +113,9 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 
 | Patch | Lines | Upstream files touched |
 |---|---|---|
-| `90-diff-preserve-short-matching-lines.patch` | +27 −1 (diff option + 2 unit tests) | `linesDiffComputer.ts`, `documentDiffProvider.ts`, `defaultLinesDiffComputer.ts`, the diff test file |
-| `91-chat-editing-review-hooks.patch` | +113 −30 | `chatEditingTextModelChangeService.ts` (C3 predicate gets the event; public `extendToSubwords` / `preserveShortMatchingLines`), `chatEditingEditorActions.ts` (C5 precondition; agent-review titles and the "Agent Review" category; 3 classes exported for tests), `chatEditingCodeEditorIntegration.ts` (the hunk toolbar's own row, opt-in via `hunkToolbarRows`), `chatEditingCodeEditorIntegration.ts` / `chatEditingNotebookEditorIntegration.ts` (diff title; the cursor-in-change context key per editor), `chatEditingServiceImpl.ts` (explorer tooltip) |
-| `92-agent-review.patch` | +1568 (incl. blank lines): new `contrib/agentReview/` (entry, service, contribution, save-attribution participants, 3-way merge, CSS, 23 tests in 3 files) + 1 import line in `workbench.common.main.ts` | `workbench.common.main.ts` (1 line) |
+| `90-diff-preserve-short-matching-lines.patch` | +32 −1 (diff option + 2 unit tests) | `linesDiffComputer.ts`, `documentDiffProvider.ts`, `defaultLinesDiffComputer.ts`, the diff test file |
+| `91-chat-editing-review-hooks.patch` | +310 −36 | `chatEditingTextModelChangeService.ts` (C3 predicate gets the event; public `extendToSubwords` / `preserveShortMatchingLines`), `chatEditingEditorActions.ts` (C5 precondition; agent-review titles and the "Agent Review" category; 3 classes exported for tests), `chatEditingCodeEditorIntegration.ts` (hunk toolbar at the end of the last row or in its own row, opt-in via `hunkToolbarRows`; track changes, opt-in via `trackChanges`; deleted lines wrap), `chatEditingCodeEditorIntegration.ts` / `chatEditingNotebookEditorIntegration.ts` (diff title; the cursor-in-change context key per editor), `chatEditingServiceImpl.ts` (explorer tooltip) |
+| `92-agent-review.patch` | +1812 (incl. blank lines): new `contrib/agentReview/` (entry, service, contribution, save-attribution participants, 3-way merge, CSS, 28 tests in 3 files) + 1 import line in `workbench.common.main.ts` | `workbench.common.main.ts` (1 line) |
 | `93-default-layout.patch` | +2 −2 | Secondary side bar hidden by default (`workbench.contribution.ts`, `themeMainServiceImpl.ts`) |
 
 ## Engine additions
@@ -124,7 +136,7 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 7. **Branding lives in one place,** `fork/branding.env` (name "Editor", binary `editor`, data folder `.editor`, bundle id `dev.editor.Editor`). Rename there; no icons yet.
 8. **The pin lives in `fork/upstream.env`:** VSCodium `5b01560` (VS Code 1.135.0) and Node 24.18.0.
 9. **The Agent Changes view goes in the explorer,** below the file tree, rather than in a new activity-bar container. That's one less icon, and the activity badge still shows the count.
-10. **Hunk buttons get their own row below the hunk.** That costs one short row per hunk, but the buttons never hide text, are always visible, and sit in the same place at every width (including a narrow editor next to the docked agent terminal). They are dimmed slightly (0.85) except for the hunk with the cursor or the pointer.
+10. **Hunk buttons float at the end of the hunk when there's room, else get their own row.** The phase-2-finish build always gave them a row below the hunk. With track changes most prose hunks are a single paragraph line, and that row was a large part of each hunk's height (a rename across a paper added dozens of rows). At the end of the last row they cost nothing and sit where Cursor puts them. When the last row runs to the edge (a long unwrapped line, a narrow editor next to the docked agent terminal) they still get their own row, so they never hide text. They are dimmed slightly (0.85) except for the hunk with the cursor or the pointer.
 11. **Nothing is relabeled.** Keep/Undo labels and the Ctrl/Cmd+Y / Ctrl/Cmd+N keybindings are VS Code's own. Ctrl+N (New File) is shadowed only while the cursor is in a hunk, as upstream.
 
 ## Remaining work (not in this PR)
@@ -137,8 +149,8 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 | Suite | Count | Command |
 |---|---|---|
 | Engine (vitest) | 162 (14 files) | `npm test -w @editor/engine` |
-| Extension integration (vitest, real engine on temp dirs, fake core / fake terminal) | 35 | `npm test -w agent-review` |
-| Core `contrib/agentReview` (Electron) | 23 | `fork/scripts/test-core.sh` |
+| Extension integration (vitest, real engine on temp dirs, fake core / fake terminal) | 36 | `npm test -w agent-review` |
+| Core `contrib/agentReview` (Electron) | 28 | `fork/scripts/test-core.sh` |
 | Upstream chat-editing regression (Electron) | 49 | `fork/scripts/test-core.sh` |
 | Upstream diff + fixtures (node, incl. 2 new) | 125 | `fork/scripts/test-core.sh` |
 | Core typecheck of the patched tree (tsgo) | 0 errors | `npm run typecheck-client` (CI `patches` job) |
