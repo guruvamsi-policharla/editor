@@ -41,6 +41,23 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
+      - name: macOS build script runs under the stock bash 3.2 (syntax + prerequisite check)
+        if: runner.os == 'macOS'
+        env:
+          MIN_FREE_GB: "0"
+        run: |
+          /bin/bash --version | head -1
+          for f in fork/scripts/*.sh fork/ci/*.sh; do /bin/bash -n "$f"; done
+          /bin/bash fork/scripts/build-macos.sh --check
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: shellcheck --version && shellcheck -x fork/scripts/*.sh fork/ci/*.sh
 
   patches:
     name: Patches apply + core typecheck

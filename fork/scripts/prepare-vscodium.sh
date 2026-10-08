@@ -8,7 +8,9 @@
 #
 # Usage: fork/scripts/prepare-vscodium.sh [--patches-only] [WORKDIR]   (default WORKDIR: ~/.cache/editor-fork-build)
 #   --patches-only  stop after applying patches (no npm ci, no extension): the cheap CI patch check.
-# Env: VSCODIUM_REF (overrides fork/upstream.env), MAX_OLD_SPACE_SIZE (default 8192), OS_NAME, VSCODE_ARCH.
+# Env: VSCODIUM_REF (overrides fork/upstream.env), MAX_OLD_SPACE_SIZE (default 8192),
+#      OS_NAME (linux|osx, default: host), VSCODE_ARCH (x64|arm64, default: host).
+# bash 3.2 / BSD userland compatible (it runs on stock macOS; so do VSCodium's scripts it sources).
 set -euo pipefail
 
 PATCHES_ONLY=no
@@ -26,6 +28,7 @@ mkdir -p "${WORKDIR}"
 cd "${WORKDIR}"
 rm -rf vscodium
 git init -q vscodium
+# shellcheck disable=SC2153 # VSCODIUM_REPO comes from upstream.env
 git -C vscodium fetch -q --depth 1 "${VSCODIUM_REPO}" "${VSCODIUM_REF}"
 git -C vscodium checkout -q FETCH_HEAD
 cd vscodium
@@ -46,16 +49,29 @@ jq -n --arg name "${APP_NAME}" --arg bin "${BINARY_NAME}" --arg data "${DATA_FOL
   }' > ../product.overlay.json
 jq -s '.[0] * .[1]' product.json ../product.overlay.json > product.json.tmp && mv product.json.tmp product.json
 
+# Host defaults. (No `case` inside `$(...)`: bash 3.2 can't parse its `)` there.)
+if [[ -z "${OS_NAME:-}" ]]; then
+  if [[ "$(uname -s)" == "Darwin" ]]; then OS_NAME=osx; else OS_NAME=linux; fi
+fi
+if [[ -z "${VSCODE_ARCH:-}" ]]; then
+  if [[ "$(uname -m)" == "arm64" || "$(uname -m)" == "aarch64" ]]; then VSCODE_ARCH=arm64; else VSCODE_ARCH=x64; fi
+fi
 export APP_NAME BINARY_NAME ORG_NAME GH_REPO_PATH
 export ASSETS_REPOSITORY="${GH_REPO_PATH}" CI_BUILD="${CI_BUILD:-no}" SHOULD_BUILD="yes" SKIP_ASSETS="yes" \
   VSCODE_LATEST="no" VSCODE_QUALITY="stable" VSCODE_SKIP_NODE_VERSION_CHECK="yes" DISABLE_UPDATE="yes" \
-  OS_NAME="${OS_NAME:-linux}" VSCODE_ARCH="${VSCODE_ARCH:-x64}"
+  OS_NAME VSCODE_ARCH
 export MAX_OLD_SPACE_SIZE="${MAX_OLD_SPACE_SIZE:-8192}"
 
 # VSCodium's scripts are written for `set -e` only.
 set +u
 rm -rf vscode
 . get_repo.sh
+# version.sh hashes RELEASE_VERSION with sha1sum and, where that is missing (stock macOS), falls back
+# to `npm install -g checksum`. Compute the same value with shasum instead of installing a global package.
+if [[ -z "${BUILD_SOURCEVERSION:-}" ]] && ! command -v sha1sum >/dev/null 2>&1; then
+  BUILD_SOURCEVERSION="$(echo "${RELEASE_VERSION/-*/}" | shasum -a 1 | cut -d' ' -f1)"
+  export BUILD_SOURCEVERSION
+fi
 . version.sh
 
 if [[ "${PATCHES_ONLY}" == "yes" ]]; then
