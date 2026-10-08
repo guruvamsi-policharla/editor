@@ -218,8 +218,10 @@ export class TurnRenderer {
 	}
 
 	/**
-	 * Ops to close the turn: an open thinking block, and tool cards that never completed (a stopped or interrupted
-	 * turn), so none keeps spinning.
+	 * Ops to close the turn: an open thinking block, and tool cards that never completed, so none keeps spinning.
+	 * This works when the turn ends with calls still open or the adapter crashes. After Stop, core has already
+	 * cancelled the response and drops these updates: an open command card keeps its spinner (core only cancels
+	 * invocations still streaming; see the agent-chat README, Known issues).
 	 */
 	finish(how: 'ended' | 'stopped' | 'interrupted' = 'ended'): RenderOp[] {
 		const ops: RenderOp[] = this.thinking ? [{ op: 'thinkingDone', id: this.thinking }] : [];

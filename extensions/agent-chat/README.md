@@ -23,3 +23,9 @@ The ACP chat panel ([PLAN.md](../../PLAN.md) §5.4 and Phase 4, design in [docs/
 `src/typings/` holds copies of the VS Code 1.135 proposal `.d.ts` files (`src/vscode-dts`). Refresh them on upstream merges.
 
 Tests (`npm test`): rendering against a recorded Claude run, pickers from recorded config options, prompt blocks. The protocol side is tested in `packages/acp-client` (fake agent, contract tests).
+
+## Known issues
+
+- **Stop with a command card open:** a command that was waiting for permission or running when you pressed Stop keeps its spinner. The turn did stop (`session/cancel`, the prompt answered `cancelled`, the command never ran), but core drops stream updates after a cancel and only cancels tool invocations that are still streaming their input (`ChatResponseModel.cancel`). Fix: a few lines in core to move executing external invocations to Cancelled on cancel (a future `94-agent-chat.patch`).
+- **Model picker order:** core sorts the harness's models alphabetically.
+- **Restored chats:** after a reload, an old chat's transcript isn't restored (phase D: `session/load`).
