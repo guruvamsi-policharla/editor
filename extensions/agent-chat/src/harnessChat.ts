@@ -448,6 +448,9 @@ export class HarnessChat implements vscode.Disposable {
 			});
 			const result = await session.prompt(blocks);
 			writer.write(renderer.finish());
+			// The contract guard, in the app too: the agent must never call fs/* or terminal/* (we don't serve them).
+			const forbidden = this.client?.supervisor.running?.connection.forbiddenInbound() ?? [];
+			this.env.log[forbidden.length ? 'error' : 'info'](`[${this.profile.id}] turn ended: ${result.stopReason}; fs/terminal requests from the agent: ${forbidden.length ? forbidden.join(', ') : 'none'}`);
 			return this.result(result, stream, session);
 		} catch (e) {
 			writer.write(renderer.finish());
