@@ -8,13 +8,14 @@ PR dependencies: this branch is `phase-0` (#2) plus a merge of `phase-1-engine` 
 
 ## What works end to end (packaged Linux build)
 
-All screenshots come from the packaged `VSCode-linux-x64/editor` built by `fork/scripts/build.sh`. The sample project and the agent edits come from `fork/scripts/simulate-agent.mjs`, which writes to disk while the app runs.
+All screenshots come from the packaged `VSCode-linux-x64/editor` built by `fork/scripts/build.sh`. The sample project and the agent edits come from `fork/scripts/simulate-agent.mjs`, which writes to disk while the app runs. The first four are from the final smoke run on this branch (`scripts/demo-agent.sh`); the others are from the earlier phase-2 run, so they still show the old floating hunk toolbar.
 
 | Screenshot | What it shows |
 |---|---|
-| [`pending.png`](img/phase2/pending.png) | A live agent write, shown inline. The rewritten words are highlighted within the line (word level), the deleted sentence is a red row, and the inserted paragraph is green. Every hunk has Keep/Undo, and the overlay reads "change 2 of 6" with arrows. The **Agent Changes** list shows four files: deleted, created, and two modified, each with +/− counts |
-| [`after-keep.png`](img/phase2/after-keep.png) | After **Keep** on the "eleven of them" hunk: the hunk is gone, the file on disk is unchanged, and the list count drops (+4 −2). The engine's baseline moved (E1) |
-| [`after-undo.png`](img/phase2/after-undo.png) | After **Undo** on the intro hunk: the original sentence and the deleted line are back, both in the buffer and **on disk** (saved, no dirty marker). The remaining hunk is untouched and the list reads +2 −0 |
+| [`pending.png`](img/phase2/pending.png) | The try-it demo (`scripts/demo-agent.sh` on `examples/paper`, opened through a symlinked folder): a deleted sentence as a red row, an added `\input` line, and a changed result with word-level highlights (`0.6`→`0.4`, "most of"). Each hunk has Keep/Undo in its own row below it; the overlay reads "3 of 6" across the files |
+| [`after-keep.png`](img/phase2/after-keep.png) | After **Ctrl+Y** on the `\input{sections/related}` line: that change is gone and the file on disk is unchanged (the engine's baseline moved). Packaged-app smoke check |
+| [`after-undo.png`](img/phase2/after-undo.png) | After **Ctrl+N** on the changed result: the original sentence is back in the buffer **and on disk** right away (no unsaved marker; the smoke script checks the file). The deleted abstract sentence is still pending |
+| [`narrow-agent-terminal.png`](img/phase2/narrow-agent-terminal.png) | A narrow editor with the Agent Terminal docked right (after **Ctrl+L** sent `@sections/intro.tex:L2` to it): the Keep/Undo rows never cover the text |
 | [`multi-file.png`](img/phase2/multi-file.png) | **Open All Changes**: a multi-file diff of every pending file against its baseline (deleted, created, modified), from the Agent Changes title bar |
 | [`created-file.png`](img/phase2/created-file.png) | A file the agent created is reviewed inline as all-green against an empty baseline. Undoing it deletes the file |
 | [`after-restart.png`](img/phase2/after-restart.png) | The app is quit and restarted, and the same pending hunk and file list come back (the baselines persist in workspace storage). Changes made while the app was closed are picked up too (integration test) |
@@ -101,8 +102,8 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 | Patch | Lines | Upstream files touched |
 |---|---|---|
 | `90-diff-preserve-short-matching-lines.patch` | +27 −1 (diff option + 2 unit tests) | `linesDiffComputer.ts`, `documentDiffProvider.ts`, `defaultLinesDiffComputer.ts`, the diff test file |
-| `91-chat-editing-review-hooks.patch` | +89 −28 | `chatEditingTextModelChangeService.ts` (C3 predicate gets the event; public `extendToSubwords` / `preserveShortMatchingLines`), `chatEditingEditorActions.ts` (C5 precondition; agent-review titles and the "Agent Review" category; 3 classes exported for tests), `chatEditingCodeEditorIntegration.ts` (the hunk toolbar's own row, opt-in via `hunkToolbarRows`), `chatEditingCodeEditorIntegration.ts` / `chatEditingNotebookEditorIntegration.ts` (diff title), `chatEditingServiceImpl.ts` (explorer tooltip) |
-| `92-agent-review.patch` | +1345 (incl. blank lines): new `contrib/agentReview/` (entry, service, contribution, save-attribution participants, 3-way merge, CSS, 22 tests in 3 files) + 1 import line in `workbench.common.main.ts` | `workbench.common.main.ts` (1 line) |
+| `91-chat-editing-review-hooks.patch` | +113 −30 | `chatEditingTextModelChangeService.ts` (C3 predicate gets the event; public `extendToSubwords` / `preserveShortMatchingLines`), `chatEditingEditorActions.ts` (C5 precondition; agent-review titles and the "Agent Review" category; 3 classes exported for tests), `chatEditingCodeEditorIntegration.ts` (the hunk toolbar's own row, opt-in via `hunkToolbarRows`), `chatEditingCodeEditorIntegration.ts` / `chatEditingNotebookEditorIntegration.ts` (diff title; the cursor-in-change context key per editor), `chatEditingServiceImpl.ts` (explorer tooltip) |
+| `92-agent-review.patch` | +1568 (incl. blank lines): new `contrib/agentReview/` (entry, service, contribution, save-attribution participants, 3-way merge, CSS, 23 tests in 3 files) + 1 import line in `workbench.common.main.ts` | `workbench.common.main.ts` (1 line) |
 | `93-default-layout.patch` | +2 −2 | Secondary side bar hidden by default (`workbench.contribution.ts`, `themeMainServiceImpl.ts`) |
 
 ## Engine additions
@@ -137,7 +138,7 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 |---|---|---|
 | Engine (vitest) | 162 (14 files) | `npm test -w @editor/engine` |
 | Extension integration (vitest, real engine on temp dirs, fake core / fake terminal) | 35 | `npm test -w agent-review` |
-| Core `contrib/agentReview` (Electron) | 22 | `fork/scripts/test-core.sh` |
+| Core `contrib/agentReview` (Electron) | 23 | `fork/scripts/test-core.sh` |
 | Upstream chat-editing regression (Electron) | 49 | `fork/scripts/test-core.sh` |
 | Upstream diff + fixtures (node, incl. 2 new) | 125 | `fork/scripts/test-core.sh` |
 | Core typecheck of the patched tree (tsgo) | 0 errors | `npm run typecheck-client` (CI `patches` job) |
