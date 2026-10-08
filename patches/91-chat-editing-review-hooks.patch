@@ -1,5 +1,5 @@
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
-index 2e43b458..ee7303c8 100644
+index 2e43b458..68215db2 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
 +++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
 @@ -17,12 +17,13 @@ import { AccessibleDiffViewer, IAccessibleDiffViewerModel } from '../../../../..
@@ -151,20 +151,31 @@ index 2e43b458..ee7303c8 100644
  	private _updateDiffRendering(diff: IDocumentDiff2, reviewMode: boolean, diffMode: boolean): void {
  
  		const chatDiffAddDecoration = ModelDecorationOptions.createDynamic({
-@@ -334,6 +401,12 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -334,6 +401,23 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  			...diffWholeLineAddDecoration,
  			stickiness: TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
  		});
++		// Agent review marks its lines and words with classes of their own (high contrast themes style them, see agentReview.css).
++		const agentReviewAddDecoration = ModelDecorationOptions.createDynamic({
++			...diffAddDecoration,
++			className: 'char-insert agent-review-inserted-text',
++			stickiness: TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges
++		});
++		const agentReviewWholeLineAddDecoration = ModelDecorationOptions.createDynamic({
++			...diffWholeLineAddDecoration,
++			className: 'char-insert agent-review-inserted-line',
++			stickiness: TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
++		});
 +		// Track changes: a lighter tint for the lines, so the inserted words (the same tint, on top) stand out.
 +		const trackChangesWholeLineDecoration = ModelDecorationOptions.createDynamic({
 +			...diffWholeLineAddDecoration,
-+			className: 'char-insert agent-review-track-changes-line',
++			className: 'char-insert agent-review-track-changes-line agent-review-inserted-line',
 +			stickiness: TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
 +		});
  		const createOverviewDecoration = (overviewRulerColor: string, minimapColor: string) => {
  			return ModelDecorationOptions.createDynamic({
  				description: 'chat-editing-decoration',
-@@ -347,33 +420,100 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -347,33 +431,100 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  
  		this._diffHunksRenderStore.clear();
  		this._diffHunkWidgets.length = 0;
@@ -233,7 +244,7 @@ index 2e43b458..ee7303c8 100644
 +						if (deletedLines && !diffMode) {
 +							// Whole lines deleted next to the edited words: red rows, as in a deletion of their own.
 +							const domNode = document.createElement('div');
-+							domNode.className = 'chat-editing-original-zone view-lines line-delete monaco-mouse-cursor-text';
++							domNode.className = `chat-editing-original-zone view-lines line-delete monaco-mouse-cursor-text${toolbarRows ? ' agent-review-deleted-lines' : ''}`;
 +							const lines = deletedLines.lines;
 +							const result = renderLines(new LineSource(
 +								lines.mapToLineArray(l => diff.originalModel.tokenization.getLineTokens(l)),
@@ -268,16 +279,25 @@ index 2e43b458..ee7303c8 100644
  						decorations.push(new InlineDecoration(
  							i.originalRange.delta(-(diffEntry.original.startLineNumber - 1)),
  							diffDeleteDecoration.className!,
-@@ -396,7 +536,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -383,7 +534,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 						// If the original range is empty, the start line number is 1 and the new range spans the entire file, don't draw an Added decoration
+ 						if (!(i.originalRange.isEmpty() && i.originalRange.startLineNumber === 1 && i.modifiedRange.endLineNumber === editorLineCount) && !i.modifiedRange.isEmpty()) {
+ 							modifiedVisualDecorations.push({
+-								range: i.modifiedRange, options: chatDiffAddDecoration
++								range: i.modifiedRange, options: toolbarRows ? agentReviewAddDecoration : chatDiffAddDecoration
+ 							});
+ 						}
+ 					}
+@@ -396,7 +547,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  				if (!diffEntry.modified.isEmpty) {
  					modifiedVisualDecorations.push({
  						range: diffEntry.modified.toInclusiveRange()!,
 -						options: chatDiffWholeLineAddDecoration
-+						options: trackChanges ? trackChangesWholeLineDecoration : chatDiffWholeLineAddDecoration
++						options: trackChanges ? trackChangesWholeLineDecoration : toolbarRows ? agentReviewWholeLineAddDecoration : chatDiffWholeLineAddDecoration
  					});
  				}
  
-@@ -421,21 +561,31 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -421,21 +572,31 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  				}
  
  				let extraLines = 0;
@@ -286,7 +306,8 @@ index 2e43b458..ee7303c8 100644
 +				let lastDeletedRowText: string | undefined;
  				if (reviewMode && !diffMode) {
  					const domNode = document.createElement('div');
- 					domNode.className = 'chat-editing-original-zone view-lines line-delete monaco-mouse-cursor-text';
+-					domNode.className = 'chat-editing-original-zone view-lines line-delete monaco-mouse-cursor-text';
++					domNode.className = `chat-editing-original-zone view-lines line-delete monaco-mouse-cursor-text${toolbarRows ? ' agent-review-deleted-lines' : ''}`;
  					const result = renderLines(source, renderOptions, decorations, domNode);
 -					extraLines = result.heightInLines;
 -					if (!isCreatedContent) {
@@ -312,7 +333,7 @@ index 2e43b458..ee7303c8 100644
  					}
  				}
  
-@@ -456,6 +606,39 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -456,6 +617,39 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  						this._diffHunkWidgetPool.putBack(widget);
  					}));
  
@@ -352,7 +373,7 @@ index 2e43b458..ee7303c8 100644
  					widget.layout(diffEntry.modified.startLineNumber);
  
  					this._diffHunkWidgets.push(widget);
-@@ -470,8 +653,26 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -470,8 +664,26 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  			}
  
  			this._diffVisualDecorations.set(!diffMode ? modifiedVisualDecorations : []);
@@ -379,7 +400,7 @@ index 2e43b458..ee7303c8 100644
  		const diffHunkDecoCollection = this._editor.createDecorationsCollection(diffHunkDecorations);
  
  		this._diffHunksRenderStore.add(toDisposable(() => {
-@@ -514,7 +715,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -514,7 +726,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  			if (e.target.type === MouseTargetType.CONTENT_VIEW_ZONE) {
  				const zone = e.target.detail;
  				const idx = this._viewZones.findIndex(id => id === zone.viewZoneId);
@@ -388,7 +409,7 @@ index 2e43b458..ee7303c8 100644
  					this._editor.setPosition(e.target.position);
  					this._editor.focus();
  				}
-@@ -532,7 +733,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -532,7 +744,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  			} else if (e.target.type === MouseTargetType.CONTENT_VIEW_ZONE) {
  				const zone = e.target.detail;
  				const idx = this._viewZones.findIndex(id => id === zone.viewZoneId);
@@ -398,7 +419,7 @@ index 2e43b458..ee7303c8 100644
  
  			} else if (e.target.position) {
  				const { position } = e.target;
-@@ -545,6 +747,9 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -545,6 +758,9 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  		}));
  
  		this._diffHunksRenderStore.add(Event.any(this._editor.onDidScrollChange, this._editor.onDidLayoutChange)(() => {
@@ -408,7 +429,7 @@ index 2e43b458..ee7303c8 100644
  			for (let i = 0; i < this._diffHunkWidgets.length; i++) {
  				const widget = this._diffHunkWidgets[i];
  				const range = diffHunkDecoCollection.getRange(i);
-@@ -642,7 +847,14 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -642,7 +858,14 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  		if (!this._editor.hasModel()) {
  			return undefined;
  		}
@@ -424,7 +445,7 @@ index 2e43b458..ee7303c8 100644
  		let closestWidget: DiffHunkWidget | undefined;
  		let closestDistance = Number.MAX_VALUE;
  
-@@ -699,7 +911,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -699,7 +922,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  				original: { resource: this._entry.originalURI },
  				modified: { resource: this._entry.modifiedURI },
  				options: { selection },
@@ -433,7 +454,7 @@ index 2e43b458..ee7303c8 100644
  			});
  
  			if (diffEditor && diffEditor.input) {
-@@ -735,6 +947,54 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -735,6 +958,54 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  	}
  }
  
@@ -488,7 +509,7 @@ index 2e43b458..ee7303c8 100644
  class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  
  	private static _idPool = 0;
-@@ -745,6 +1005,19 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+@@ -745,6 +1016,19 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  	private _position: IOverlayWidgetPosition | undefined;
  	private _lastStartLineNumber: number | undefined;
  	private _removed: boolean = false;
@@ -508,7 +529,7 @@ index 2e43b458..ee7303c8 100644
  
  	constructor(
  		private readonly _editor: ICodeEditor,
-@@ -806,13 +1079,87 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+@@ -806,13 +1090,87 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  		return this._id;
  	}
  
@@ -597,7 +618,7 @@ index 2e43b458..ee7303c8 100644
  			stackOrdinal: 1,
  			preference: {
  				top: this._editor.getTopForLineNumber(startLineNumber) - scrollTop - (lineHeight * this._lineDelta),
-@@ -853,6 +1200,10 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+@@ -853,6 +1211,10 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  		return this._lastStartLineNumber;
  	}
  

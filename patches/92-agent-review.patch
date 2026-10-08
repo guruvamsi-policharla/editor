@@ -1175,10 +1175,10 @@ index 00000000..b9867bdb
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css b/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css
 new file mode 100644
-index 00000000..aad60b47
+index 00000000..6728ebe8
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,178 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -1302,12 +1302,67 @@ index 00000000..aad60b47
 +.monaco-editor .char-insert.agent-review-track-changes-line {
 +	background-color: color-mix(in srgb, var(--vscode-diffEditor-insertedTextBackground) 40%, transparent);
 +}
++
++/*
++ * High contrast themes have no diff fills: their diff colors are borders, which the diff editor draws dashed around
++ * every line and word. For agent review that read as faint outlines, and the change's Keep/Undo (no button
++ * backgrounds in high contrast) as plain text. Here a change gets a solid bar at its left and a light tint of the
++ * theme's own inserted/removed border color, and Keep/Undo are bordered buttons like the rest of the workbench's.
++ */
++.monaco-editor.hc-black .char-insert.agent-review-inserted-line,
++.monaco-editor.hc-light .char-insert.agent-review-inserted-line {
++	border: none;
++	border-left: 4px solid var(--vscode-diffEditor-insertedTextBorder);
++	background-color: color-mix(in srgb, var(--vscode-diffEditor-insertedTextBorder) 16%, transparent);
++}
++
++/* Inserted words: a stronger tint of the same color, instead of a dashed box around each one (and each whole new line). */
++.monaco-editor.hc-black .char-insert.agent-review-inserted-text,
++.monaco-editor.hc-light .char-insert.agent-review-inserted-text {
++	border: none;
++	background-color: color-mix(in srgb, var(--vscode-diffEditor-insertedTextBorder) 35%, transparent);
++}
++
++.monaco-editor.hc-black .chat-editing-original-zone.agent-review-deleted-lines,
++.monaco-editor.hc-light .chat-editing-original-zone.agent-review-deleted-lines {
++	border: none;
++	border-left: 4px solid var(--vscode-diffEditor-removedTextBorder);
++	background-color: color-mix(in srgb, var(--vscode-diffEditor-removedTextBorder) 16%, transparent);
++}
++
++.monaco-editor.hc-black .inline-deleted-text.agent-review-deleted-text,
++.monaco-editor.hc-light .inline-deleted-text.agent-review-deleted-text {
++	text-decoration-color: var(--vscode-diffEditor-removedTextBorder);
++	text-decoration-thickness: 2px;
++}
++
++.hc-black .chat-diff-change-content-widget.agent-review-hunk-toolbar,
++.hc-light .chat-diff-change-content-widget.agent-review-hunk-toolbar {
++	opacity: 1;
++}
++
++.hc-black .chat-diff-change-content-widget.agent-review-hunk-toolbar .monaco-action-bar .action-item .action-label:not(.codicon),
++.hc-light .chat-diff-change-content-widget.agent-review-hunk-toolbar .monaco-action-bar .action-item .action-label:not(.codicon) {
++	padding: 0 7px;
++	border: 1px solid var(--vscode-button-border, var(--vscode-contrastBorder));
++}
++
++.hc-black .chat-diff-change-content-widget.agent-review-hunk-toolbar .monaco-action-bar .action-item.primary .action-label:not(.codicon),
++.hc-light .chat-diff-change-content-widget.agent-review-hunk-toolbar .monaco-action-bar .action-item.primary .action-label:not(.codicon) {
++	font-weight: 600;
++}
++
++.monaco-workbench.hc-black .chat-diff-change-content-widget.agent-review-hunk-toolbar .monaco-action-bar .action-item .action-label:hover,
++.monaco-workbench.hc-light .chat-diff-change-content-widget.agent-review-hunk-toolbar .monaco-action-bar .action-item .action-label:hover {
++	outline: 1px dashed var(--vscode-contrastActiveBorder);
++	outline-offset: -1px;
++}
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
 new file mode 100644
-index 00000000..7417d631
+index 00000000..86b84181
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
-@@ -0,0 +1,854 @@
+@@ -0,0 +1,862 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -2160,6 +2215,14 @@ index 00000000..7417d631
 +		modelService.updateModel(model, DISK + 'Agent line.\n', EditSources.reloadFromDisk());
 +		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 ? d : undefined));
 +		assert.strictEqual(entry.state.get(), ModifiedFileEntryState.Modified);
++	});
++
++	test('#19: agent-review lines carry their own classes (high contrast styles them)', async () => {
++		model.setValue('a one\nb TWO, rewritten by the agent completely\nc three\nnew line\n');
++		await showPending('a one\nb two\nc three\n');
++		const inserted = model.getAllDecorations().filter(d => d.options.className?.includes('agent-review-inserted-line'));
++		assert.ok(inserted.length >= 1);
++		assert.ok([...zones.values()].some(z => z.domNode.classList.contains('agent-review-deleted-lines')));
 +	});
 +});
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReviewMerge.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReviewMerge.test.ts

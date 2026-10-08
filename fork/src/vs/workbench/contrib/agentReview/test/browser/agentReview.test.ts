@@ -851,4 +851,12 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 ? d : undefined));
 		assert.strictEqual(entry.state.get(), ModifiedFileEntryState.Modified);
 	});
+
+	test('#19: agent-review lines carry their own classes (high contrast styles them)', async () => {
+		model.setValue('a one\nb TWO, rewritten by the agent completely\nc three\nnew line\n');
+		await showPending('a one\nb two\nc three\n');
+		const inserted = model.getAllDecorations().filter(d => d.options.className?.includes('agent-review-inserted-line'));
+		assert.ok(inserted.length >= 1);
+		assert.ok([...zones.values()].some(z => z.domNode.classList.contains('agent-review-deleted-lines')));
+	});
 });
