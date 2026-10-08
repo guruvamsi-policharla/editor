@@ -218,6 +218,10 @@ print_result() {
   echo "  in ${APP_NAME}: Cmd+Shift+P > \"Shell Command: Install '${BINARY_NAME}' command in PATH\""
   echo "  or by hand:    ln -sf \"${app}/${bin_rel}\" /usr/local/bin/${BINARY_NAME}"
   echo "                 (any directory on your PATH works, e.g. /opt/homebrew/bin or ~/.local/bin)"
+  echo
+  echo "Try Keep/Undo without an agent (README.md, \"Try it\"):"
+  echo "  ${REPO_ROOT}/scripts/demo-agent.sh setup && open -a \"${app}\" ${TMPDIR:-/tmp}/editor-demo/paper"
+  echo "  ${REPO_ROOT}/scripts/demo-agent.sh run"
 }
 
 check_prerequisites || exit 1
