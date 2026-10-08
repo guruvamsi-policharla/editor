@@ -36,6 +36,7 @@ describe('entries → updates', () => {
 		expect(m.turnEnd({ id: 5, revision: 1, parent: null, kind: 'turn_completed', duration_ns: 1 })).toBeUndefined();
 		expect(m.turnEnd({ id: 6, revision: 1, parent: null, kind: 'interrupted', count: 1 })).toEqual({ kind: 'interrupted' });
 		expect(m.turnEnd({ id: 7, revision: 1, parent: null, kind: 'error', message: 'HTTP 401' })).toEqual({ kind: 'error', message: 'HTTP 401' });
+		expect(m.turnEnd({ id: 8, revision: 1, parent: null, kind: 'error', message: 'handshake was rejected with HTTP 401: {\n  "error": {' })).toEqual({ kind: 'error', message: 'handshake was rejected with HTTP 401' });
 	});
 
 	it('tool details: patch paths, command output', () => {

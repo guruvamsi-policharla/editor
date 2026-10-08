@@ -161,5 +161,5 @@ export function matchChat(query: string, title: string, text: string): string | 
 	}
 	const start = Math.max(0, hit - 40);
 	const end = Math.min(text.length, hit + 80);
-	return `${start > 0 ? '…' : ''}${text.slice(start, end).replace(/\s+/g, ' ').trim()}${end < text.length ? '…' : ''}`;
+	return `${start > 0 ? '…' : ''}${text.slice(start, end).replace(/`{3}[\w-]*/g, ' ').replace(/\s+/g, ' ').trim()}${end < text.length ? '…' : ''}`;
 }

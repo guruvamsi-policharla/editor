@@ -64,6 +64,7 @@ describe('transcript', () => {
 	it('search matches every word in the title or the text, with a snippet from the text', () => {
 		expect(matchChat('fold argument', 'Intro', 'Please fold in the argument from section 3')).toBe('Please fold in the argument from section 3');
 		expect(matchChat('intro', 'Fix the intro', 'nothing here')).toBe('');
+		expect(matchChat('KZG', 't', 'It reads:\n```latex\nKZG needs setup\n```')).toBe('It reads: KZG needs setup');
 		expect(matchChat('missing', 'Fix the intro', 'nothing here')).toBeUndefined();
 		expect(matchChat('needle', 't', `${'a '.repeat(100)}needle${' b'.repeat(100)}`)).toMatch(/^….*needle.*…$/);
 	});

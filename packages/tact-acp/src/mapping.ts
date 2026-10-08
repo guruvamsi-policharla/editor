@@ -95,7 +95,7 @@ export class EntryMapper {
 			case 'interrupted':
 				return { kind: 'interrupted' };
 			case 'error':
-				return { kind: 'error', message: String(entry.message ?? 'tact reported an error') };
+				return { kind: 'error', message: errorText(String(entry.message ?? 'tact reported an error')) };
 			default:
 				return undefined;
 		}
@@ -159,11 +159,11 @@ export function configOptions(s: TactSettings, catalog: ModelCatalog | undefined
 	];
 	const modes = model?.reasoning_modes ?? [];
 	if (modes.length > 1 && !s.started) {
-		options.push({ id: 'reasoning_mode', name: 'Reasoning', category: '_reasoning_mode', type: 'select', currentValue: s.reasoning_mode, options: modes.map(m => ({ value: m, name: m === 'pro' ? 'Pro' : 'Standard' })) });
+		options.push({ id: 'reasoning_mode', name: 'Reasoning', category: '_reasoning_mode', type: 'select', currentValue: s.reasoning_mode, options: modes.map(m => ({ value: m, name: m === 'pro' ? 'Pro reasoning' : 'Standard reasoning' })) });
 	}
 	const speeds = catalog?.speeds ?? [];
 	if (speeds.length > 1) {
-		options.push({ id: 'speed', name: 'Speed', category: 'model_config', type: 'select', currentValue: s.speed, options: speeds.map(v => ({ value: v, name: cap(v) })) });
+		options.push({ id: 'speed', name: 'Speed', category: 'model_config', type: 'select', currentValue: s.speed, options: speeds.map(v => ({ value: v, name: v === 'standard' ? 'Standard speed' : cap(v) })) });
 	}
 	// Shown so the user knows: Nanocodex runs every command and edit without asking (approval "never", full access).
 	options.push({ id: 'approvals', name: 'Approvals', category: 'mode', type: 'select', currentValue: 'never', options: [{ value: 'never', name: 'Never asks', description: 'tact runs commands and edits files without asking (it has no approval mode). Edits in the workspace still show up for review.' }] });
@@ -183,4 +183,9 @@ export function promptText(blocks: readonly acp.ContentBlock[]): string {
 	const text = blocks.flatMap(b => (b.type === 'text' ? [b.text] : [])).join('\n');
 	const links = blocks.flatMap(b => (b.type === 'resource_link' && !text.includes(b.name) ? [`@${b.name}`] : []));
 	return links.length ? `${text}\n\n${links.join(' ')}` : text;
+}
+
+/** tact's error without the raw response body it sometimes appends (`…rejected with HTTP 401: { "error": …`). */
+export function errorText(message: string): string {
+	return message.replace(/:\s*\{[\s\S]*$/, '').trim() || message;
 }
