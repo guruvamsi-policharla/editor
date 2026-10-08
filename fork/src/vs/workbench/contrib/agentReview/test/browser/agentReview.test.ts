@@ -19,6 +19,7 @@ import { URI } from '../../../../../base/common/uri.js';
 import { mock } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { IOverlayWidget, IViewZone, IViewZoneChangeAccessor } from '../../../../../editor/browser/editorBrowser.js';
+import { EditorOption } from '../../../../../editor/common/config/editorOptions.js';
 import { EditOperation } from '../../../../../editor/common/core/editOperation.js';
 import { Range } from '../../../../../editor/common/core/range.js';
 import { ITextModel } from '../../../../../editor/common/model.js';
@@ -154,8 +155,9 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 	test('deleted baseline lines render as real rows in a view zone, with one Keep/Undo widget', async () => {
 		await showPending();
 
-		assert.strictEqual(zones.size, 1, 'one view zone for the deleted block');
-		const zone = [...zones.values()][0];
+		const deleted = [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
+		assert.strictEqual(deleted.length, 1, 'one view zone for the deleted block');
+		const zone = deleted[0];
 		assert.strictEqual(zone.afterLineNumber, 1, 'deleted block sits after line 1');
 		assert.strictEqual(zone.heightInLines, 1, 'one deleted row');
 		assert.ok(zone.domNode.classList.contains('line-delete'));
@@ -164,6 +166,35 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.ok(zone.domNode.textContent?.replace(/\u00a0/g, ' ').includes('This sentence was deleted by the agent.'));
 
 		assert.strictEqual(hunkWidgets().length, 1, 'one per-hunk toolbar');
+	});
+
+	test('each Keep/Undo toolbar has its own row below its hunk, so it never covers text', async () => {
+		model.setValue('a one\nb TWO, rewritten by the agent\nc three\ne five\n');
+		const { entry } = await showPending('a one\nb two\nc three\nd four\ne five\n');
+		assert.strictEqual(entry.diffInfo.get().changes.length, 2, 'a rewrite and a pure deletion');
+
+		const rows = [...zones.values()].filter(z => z.domNode.classList.contains('agent-review-hunk-toolbar-row'));
+		const deleted = [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
+		const widgets = hunkWidgets();
+		assert.strictEqual(rows.length, 2, 'one row per hunk');
+		assert.strictEqual(widgets.length, 2);
+		assert.ok(widgets.every(w => w.getDomNode().classList.contains('in-own-row')));
+
+		// Rewrite of line 2: the row follows the rewritten line. Pure deletion before line 4: the row
+		// follows the deleted rows (same line, higher ordinal).
+		assert.deepStrictEqual(rows.map(r => r.afterLineNumber).sort(), [2, 3]);
+		const deletionRow = rows.find(r => r.afterLineNumber === 3)!;
+		const deletionZone = deleted.find(z => z.afterLineNumber === 3)!;
+		assert.ok(deletionRow.ordinal! > deletionZone.ordinal!, 'row comes after the deleted lines');
+		assert.ok(rows.every(r => r.heightInPx! >= editor.getOption(EditorOption.lineHeight)), 'a full row, not an overlay on text');
+
+		// The toolbar sits where its row is (as the editor reports it while scrolling), at the text's left edge.
+		const row = rows.find(r => r.afterLineNumber === 2)!;
+		row.onDomNodeTop!(137);
+		const position = widgets.map(w => w.getPosition()?.preference).find(p => p && typeof p === 'object' && p.top >= 137);
+		assert.ok(position && typeof position === 'object', 'widget moved to its row');
+		assert.ok(position.top < 137 + row.heightInPx!, 'inside the row');
+		assert.strictEqual(position.left, editor.getLayoutInfo().contentLeft);
 	});
 
 	test('Keep folds the hunk into the baseline, reports the full baseline, and leaves the buffer alone', async () => {

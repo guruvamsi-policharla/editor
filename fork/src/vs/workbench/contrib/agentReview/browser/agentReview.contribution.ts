@@ -12,11 +12,9 @@
 // A typed proposed API can replace the commands later.
 
 import './media/agentReview.css';
-import { Disposable, DisposableMap, DisposableStore } from '../../../../base/common/lifecycle.js';
+import { Disposable } from '../../../../base/common/lifecycle.js';
 import { autorun } from '../../../../base/common/observable.js';
 import { URI, UriComponents } from '../../../../base/common/uri.js';
-import { ICodeEditor } from '../../../../editor/browser/editorBrowser.js';
-import { ICodeEditorService } from '../../../../editor/browser/services/codeEditorService.js';
 import { localize } from '../../../../nls.js';
 import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IContextKeyService, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
@@ -69,51 +67,26 @@ registerWorkbenchContribution2(AgentReviewBridge.ID, AgentReviewBridge, Workbenc
 // Tells the extension which buffer edits of a save were made by save participants (formatters), not the user.
 registerWorkbenchContribution2(AgentReviewSaveParticipants.ID, AgentReviewSaveParticipants, WorkbenchPhase.BlockRestore);
 
-/**
- * Keeps `agentReview.isActive` in sync with the active editor, and marks code editors that show a
- * file under review with the `agent-review-editor` class (always-visible hunk buttons, see CSS).
- */
+/** Keeps `agentReview.isActive` in sync with the active editor (enables the ↑/↓ navigation without chat). */
 class AgentReviewEditorState extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.agentReviewEditorState';
 
-	private readonly _editors = this._register(new DisposableMap<ICodeEditor, DisposableStore>());
-
 	constructor(
-		@IAgentReviewService private readonly _agentReviewService: IAgentReviewService,
-		@IEditorService private readonly _editorService: IEditorService,
-		@ICodeEditorService codeEditorService: ICodeEditorService,
+		@IAgentReviewService agentReviewService: IAgentReviewService,
+		@IEditorService editorService: IEditorService,
 		@IContextKeyService contextKeyService: IContextKeyService,
 	) {
 		super();
 		const isActive = ctxAgentReviewIsActive.bindTo(contextKeyService);
 		const updateActive = () => {
-			const uri = this._editorService.activeEditor?.resource;
-			isActive.set(!!uri && !!this._agentReviewService.getEntry(uri));
+			const uri = editorService.activeEditor?.resource;
+			isActive.set(!!uri && !!agentReviewService.getEntry(uri));
 		};
-		this._register(this._editorService.onDidActiveEditorChange(updateActive));
-
-		const track = (editor: ICodeEditor) => {
-			const store = new DisposableStore();
-			store.add(editor.onDidChangeModel(() => this._updateEditor(editor)));
-			this._editors.set(editor, store);
-			this._updateEditor(editor);
-		};
-		codeEditorService.listCodeEditors().forEach(track);
-		this._register(codeEditorService.onCodeEditorAdd(track));
-		this._register(codeEditorService.onCodeEditorRemove(editor => this._editors.deleteAndDispose(editor)));
-
+		this._register(editorService.onDidActiveEditorChange(updateActive));
 		this._register(autorun(r => {
-			this._agentReviewService.entries.read(r);
+			agentReviewService.entries.read(r);
 			updateActive();
-			for (const editor of this._editors.keys()) {
-				this._updateEditor(editor);
-			}
 		}));
-	}
-
-	private _updateEditor(editor: ICodeEditor): void {
-		const uri = editor.getModel()?.uri;
-		editor.getContainerDomNode().classList.toggle('agent-review-editor', !!uri && !!this._agentReviewService.getEntry(uri));
 	}
 }
 registerWorkbenchContribution2(AgentReviewEditorState.ID, AgentReviewEditorState, WorkbenchPhase.AfterRestored);

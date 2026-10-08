@@ -1,9 +1,9 @@
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts b/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts
 new file mode 100644
-index 00000000..e5626a30
+index 00000000..b382e98c
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,92 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -18,11 +18,9 @@ index 00000000..e5626a30
 +// A typed proposed API can replace the commands later.
 +
 +import './media/agentReview.css';
-+import { Disposable, DisposableMap, DisposableStore } from '../../../../base/common/lifecycle.js';
++import { Disposable } from '../../../../base/common/lifecycle.js';
 +import { autorun } from '../../../../base/common/observable.js';
 +import { URI, UriComponents } from '../../../../base/common/uri.js';
-+import { ICodeEditor } from '../../../../editor/browser/editorBrowser.js';
-+import { ICodeEditorService } from '../../../../editor/browser/services/codeEditorService.js';
 +import { localize } from '../../../../nls.js';
 +import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 +import { IContextKeyService, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
@@ -75,60 +73,35 @@ index 00000000..e5626a30
 +// Tells the extension which buffer edits of a save were made by save participants (formatters), not the user.
 +registerWorkbenchContribution2(AgentReviewSaveParticipants.ID, AgentReviewSaveParticipants, WorkbenchPhase.BlockRestore);
 +
-+/**
-+ * Keeps `agentReview.isActive` in sync with the active editor, and marks code editors that show a
-+ * file under review with the `agent-review-editor` class (always-visible hunk buttons, see CSS).
-+ */
++/** Keeps `agentReview.isActive` in sync with the active editor (enables the ↑/↓ navigation without chat). */
 +class AgentReviewEditorState extends Disposable implements IWorkbenchContribution {
 +	static readonly ID = 'workbench.contrib.agentReviewEditorState';
 +
-+	private readonly _editors = this._register(new DisposableMap<ICodeEditor, DisposableStore>());
-+
 +	constructor(
-+		@IAgentReviewService private readonly _agentReviewService: IAgentReviewService,
-+		@IEditorService private readonly _editorService: IEditorService,
-+		@ICodeEditorService codeEditorService: ICodeEditorService,
++		@IAgentReviewService agentReviewService: IAgentReviewService,
++		@IEditorService editorService: IEditorService,
 +		@IContextKeyService contextKeyService: IContextKeyService,
 +	) {
 +		super();
 +		const isActive = ctxAgentReviewIsActive.bindTo(contextKeyService);
 +		const updateActive = () => {
-+			const uri = this._editorService.activeEditor?.resource;
-+			isActive.set(!!uri && !!this._agentReviewService.getEntry(uri));
++			const uri = editorService.activeEditor?.resource;
++			isActive.set(!!uri && !!agentReviewService.getEntry(uri));
 +		};
-+		this._register(this._editorService.onDidActiveEditorChange(updateActive));
-+
-+		const track = (editor: ICodeEditor) => {
-+			const store = new DisposableStore();
-+			store.add(editor.onDidChangeModel(() => this._updateEditor(editor)));
-+			this._editors.set(editor, store);
-+			this._updateEditor(editor);
-+		};
-+		codeEditorService.listCodeEditors().forEach(track);
-+		this._register(codeEditorService.onCodeEditorAdd(track));
-+		this._register(codeEditorService.onCodeEditorRemove(editor => this._editors.deleteAndDispose(editor)));
-+
++		this._register(editorService.onDidActiveEditorChange(updateActive));
 +		this._register(autorun(r => {
-+			this._agentReviewService.entries.read(r);
++			agentReviewService.entries.read(r);
 +			updateActive();
-+			for (const editor of this._editors.keys()) {
-+				this._updateEditor(editor);
-+			}
 +		}));
-+	}
-+
-+	private _updateEditor(editor: ICodeEditor): void {
-+		const uri = editor.getModel()?.uri;
-+		editor.getContainerDomNode().classList.toggle('agent-review-editor', !!uri && !!this._agentReviewService.getEntry(uri));
 +	}
 +}
 +registerWorkbenchContribution2(AgentReviewEditorState.ID, AgentReviewEditorState, WorkbenchPhase.AfterRestored);
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
 new file mode 100644
-index 00000000..77436ac5
+index 00000000..5980da33
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
-@@ -0,0 +1,243 @@
+@@ -0,0 +1,245 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -211,6 +184,8 @@ index 00000000..77436ac5
 +	readonly rewriteRatio = constObservable(1);
 +	readonly waitsForLastEdits = constObservable(false);
 +	readonly reviewMode = constObservable(true);
++	/** Read by ChatEditingCodeEditorIntegration: each hunk's Keep/Undo toolbar gets its own row below the hunk. */
++	readonly hunkToolbarRows = true;
 +	readonly autoAcceptController = constObservable<{ total: number; remaining: number; cancel(): void } | undefined>(undefined);
 +
 +	private readonly _changeService: ChatEditingTextModelChangeService;
@@ -781,33 +756,85 @@ index 00000000..ac216fba
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css b/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css
 new file mode 100644
-index 00000000..8d72ddc8
+index 00000000..68180ed8
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,69 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
 + *--------------------------------------------------------------------------------------------*/
 +
 +/*
-+ * Agent review: the per-hunk Keep/Undo buttons are always visible (the chat UI only shows them on
-+ * hover). They are slightly dimmed until the pointer or the cursor is in the change.
++ * Agent review: each hunk's Keep/Undo toolbar is always visible, in its own row below the hunk
++ * (`in-own-row`, see ChatEditingCodeEditorIntegration), aligned with the start of the text. Nothing is
++ * under it, so it's drawn as plain buttons rather than a floating box. It's slightly dimmed until the
++ * pointer or the cursor is in the change. (The chat UI floats it over the hunk's first line on hover.)
 + */
-+.agent-review-editor .chat-diff-change-content-widget {
-+	opacity: 0.8;
++.chat-diff-change-content-widget.in-own-row {
++	opacity: 0.85;
++	box-shadow: none;
++	border-radius: 4px;
++	overflow: visible;
 +}
 +
-+.agent-review-editor .chat-diff-change-content-widget.hover,
-+.agent-review-editor .chat-diff-change-content-widget:hover {
++.chat-diff-change-content-widget.in-own-row.hover,
++.chat-diff-change-content-widget.in-own-row:hover {
 +	opacity: 1;
++}
++
++.chat-diff-change-content-widget.in-own-row .monaco-action-bar {
++	padding: 0;
++	border: none;
++	background-color: transparent;
++}
++
++.chat-diff-change-content-widget.in-own-row .monaco-action-bar .actions-container {
++	gap: 6px;
++}
++
++.chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item .action-label {
++	padding: 1px 8px;
++	font-size: 11px;
++	line-height: 16px;
++	border-radius: 4px;
++	background-color: var(--vscode-button-secondaryBackground);
++	color: var(--vscode-button-secondaryForeground);
++}
++
++.monaco-workbench .chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item .action-label:hover {
++	background-color: var(--vscode-button-secondaryHoverBackground);
++}
++
++.chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item.primary .action-label {
++	background-color: var(--vscode-button-background);
++	color: var(--vscode-button-foreground);
++}
++
++.monaco-workbench .chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item.primary .action-label:hover {
++	background-color: var(--vscode-button-hoverBackground);
++}
++
++/* The "open diff" icon: a plain icon button, not a pill. */
++.chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item .action-label.codicon:not(.separator) {
++	width: 18px;
++	height: 18px;
++	padding: 0;
++	font-size: 14px;
++	line-height: 18px;
++	background-color: transparent;
++	color: var(--vscode-icon-foreground);
++}
++
++.monaco-workbench .chat-diff-change-content-widget.in-own-row .monaco-action-bar .action-item .action-label.codicon:not(.separator):hover {
++	background-color: var(--vscode-toolbar-hoverBackground);
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
 new file mode 100644
-index 00000000..69fa9437
+index 00000000..65ae9186
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
-@@ -0,0 +1,305 @@
+@@ -0,0 +1,336 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -829,6 +856,7 @@ index 00000000..69fa9437
 +import { mock } from '../../../../../base/test/common/mock.js';
 +import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 +import { IOverlayWidget, IViewZone, IViewZoneChangeAccessor } from '../../../../../editor/browser/editorBrowser.js';
++import { EditorOption } from '../../../../../editor/common/config/editorOptions.js';
 +import { EditOperation } from '../../../../../editor/common/core/editOperation.js';
 +import { Range } from '../../../../../editor/common/core/range.js';
 +import { ITextModel } from '../../../../../editor/common/model.js';
@@ -964,8 +992,9 @@ index 00000000..69fa9437
 +	test('deleted baseline lines render as real rows in a view zone, with one Keep/Undo widget', async () => {
 +		await showPending();
 +
-+		assert.strictEqual(zones.size, 1, 'one view zone for the deleted block');
-+		const zone = [...zones.values()][0];
++		const deleted = [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
++		assert.strictEqual(deleted.length, 1, 'one view zone for the deleted block');
++		const zone = deleted[0];
 +		assert.strictEqual(zone.afterLineNumber, 1, 'deleted block sits after line 1');
 +		assert.strictEqual(zone.heightInLines, 1, 'one deleted row');
 +		assert.ok(zone.domNode.classList.contains('line-delete'));
@@ -974,6 +1003,35 @@ index 00000000..69fa9437
 +		assert.ok(zone.domNode.textContent?.replace(/\u00a0/g, ' ').includes('This sentence was deleted by the agent.'));
 +
 +		assert.strictEqual(hunkWidgets().length, 1, 'one per-hunk toolbar');
++	});
++
++	test('each Keep/Undo toolbar has its own row below its hunk, so it never covers text', async () => {
++		model.setValue('a one\nb TWO, rewritten by the agent\nc three\ne five\n');
++		const { entry } = await showPending('a one\nb two\nc three\nd four\ne five\n');
++		assert.strictEqual(entry.diffInfo.get().changes.length, 2, 'a rewrite and a pure deletion');
++
++		const rows = [...zones.values()].filter(z => z.domNode.classList.contains('agent-review-hunk-toolbar-row'));
++		const deleted = [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
++		const widgets = hunkWidgets();
++		assert.strictEqual(rows.length, 2, 'one row per hunk');
++		assert.strictEqual(widgets.length, 2);
++		assert.ok(widgets.every(w => w.getDomNode().classList.contains('in-own-row')));
++
++		// Rewrite of line 2: the row follows the rewritten line. Pure deletion before line 4: the row
++		// follows the deleted rows (same line, higher ordinal).
++		assert.deepStrictEqual(rows.map(r => r.afterLineNumber).sort(), [2, 3]);
++		const deletionRow = rows.find(r => r.afterLineNumber === 3)!;
++		const deletionZone = deleted.find(z => z.afterLineNumber === 3)!;
++		assert.ok(deletionRow.ordinal! > deletionZone.ordinal!, 'row comes after the deleted lines');
++		assert.ok(rows.every(r => r.heightInPx! >= editor.getOption(EditorOption.lineHeight)), 'a full row, not an overlay on text');
++
++		// The toolbar sits where its row is (as the editor reports it while scrolling), at the text's left edge.
++		const row = rows.find(r => r.afterLineNumber === 2)!;
++		row.onDomNodeTop!(137);
++		const position = widgets.map(w => w.getPosition()?.preference).find(p => p && typeof p === 'object' && p.top >= 137);
++		assert.ok(position && typeof position === 'object', 'widget moved to its row');
++		assert.ok(position.top < 137 + row.heightInPx!, 'inside the row');
++		assert.strictEqual(position.left, editor.getLayoutInfo().contentLeft);
 +	});
 +
 +	test('Keep folds the hunk into the baseline, reports the full baseline, and leaves the buffer alone', async () => {

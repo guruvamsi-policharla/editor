@@ -80,6 +80,8 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 	readonly rewriteRatio = constObservable(1);
 	readonly waitsForLastEdits = constObservable(false);
 	readonly reviewMode = constObservable(true);
+	/** Read by ChatEditingCodeEditorIntegration: each hunk's Keep/Undo toolbar gets its own row below the hunk. */
+	readonly hunkToolbarRows = true;
 	readonly autoAcceptController = constObservable<{ total: number; remaining: number; cancel(): void } | undefined>(undefined);
 
 	private readonly _changeService: ChatEditingTextModelChangeService;

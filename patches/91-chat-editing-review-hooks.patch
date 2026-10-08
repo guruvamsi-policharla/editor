@@ -1,8 +1,79 @@
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
-index 2e43b458..2fe7541c 100644
+index 2e43b458..c4ccfdd8 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
 +++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
-@@ -699,7 +699,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -91,6 +91,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 	private readonly _diffHunkWidgetPool = this._store.add(new ObjectPool<DiffHunkWidget>());
+ 	private readonly _diffHunkWidgets: DiffHunkWidget[] = [];
+ 	private _viewZones: string[] = [];
++	/** Agent review: one row per hunk, below it, holding the hunk's Keep/Undo toolbar (index = widget index). */
++	private _toolbarRowZones: string[] = [];
+ 
+ 	private readonly _accessibleDiffViewVisible = observableValue<boolean>(this, false);
+ 
+@@ -312,11 +314,12 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 
+ 	private _clearDiffRendering() {
+ 		this._editor.changeViewZones((viewZoneChangeAccessor) => {
+-			for (const id of this._viewZones) {
++			for (const id of [...this._viewZones, ...this._toolbarRowZones]) {
+ 				viewZoneChangeAccessor.removeZone(id);
+ 			}
+ 		});
+ 		this._viewZones = [];
++		this._toolbarRowZones = [];
+ 		this._diffHunksRenderStore.clear();
+ 		for (const widget of this._diffHunkWidgetPool.free) {
+ 			widget.remove();
+@@ -348,12 +351,14 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 		this._diffHunksRenderStore.clear();
+ 		this._diffHunkWidgets.length = 0;
+ 		const diffHunkDecorations: IModelDeltaDecoration[] = [];
++		const toolbarRows = reviewMode && !diffMode && (this._entry as { readonly hunkToolbarRows?: boolean }).hunkToolbarRows === true;
+ 
+ 		this._editor.changeViewZones((viewZoneChangeAccessor) => {
+-			for (const id of this._viewZones) {
++			for (const id of [...this._viewZones, ...this._toolbarRowZones]) {
+ 				viewZoneChangeAccessor.removeZone(id);
+ 			}
+ 			this._viewZones = [];
++			this._toolbarRowZones = [];
+ 			const modifiedVisualDecorations: IModelDeltaDecoration[] = [];
+ 			const mightContainNonBasicASCII = diff.originalModel.mightContainNonBasicASCII();
+ 			const mightContainRTL = diff.originalModel.mightContainRTL();
+@@ -456,6 +461,21 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 						this._diffHunkWidgetPool.putBack(widget);
+ 					}));
+ 
++					if (toolbarRows) {
++						// Agent review: the toolbar gets its own row below the hunk, so it never covers text
++						// (it is always visible there, and lines often reach the right edge in a narrow editor).
++						const rowWidget = widget;
++						const rowDomNode = document.createElement('div');
++						rowDomNode.className = 'agent-review-hunk-toolbar-row';
++						this._toolbarRowZones.push(viewZoneChangeAccessor.addZone({
++							afterLineNumber: diffEntry.modified.isEmpty ? diffEntry.modified.startLineNumber - 1 : diffEntry.modified.endLineNumberExclusive - 1,
++							heightInPx: DiffHunkWidget.toolbarRowHeight(this._editor),
++							domNode: rowDomNode,
++							ordinal: 50000 + 3, // after the deleted lines of a pure deletion (50000 + 2)
++							onDomNodeTop: top => rowWidget.setRowTop(top),
++						}));
++					}
++					widget.setInOwnRow(toolbarRows);
+ 					widget.layout(diffEntry.modified.startLineNumber);
+ 
+ 					this._diffHunkWidgets.push(widget);
+@@ -532,7 +552,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 			} else if (e.target.type === MouseTargetType.CONTENT_VIEW_ZONE) {
+ 				const zone = e.target.detail;
+ 				const idx = this._viewZones.findIndex(id => id === zone.viewZoneId);
+-				toggleWidget(this._diffHunkWidgets[idx]);
++				const rowIdx = this._toolbarRowZones.findIndex(id => id === zone.viewZoneId);
++				toggleWidget(this._diffHunkWidgets[rowIdx >= 0 ? rowIdx : idx]);
+ 
+ 			} else if (e.target.position) {
+ 				const { position } = e.target;
+@@ -699,7 +720,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  				original: { resource: this._entry.originalURI },
  				modified: { resource: this._entry.modifiedURI },
  				options: { selection },
@@ -11,6 +82,61 @@ index 2e43b458..2fe7541c 100644
  			});
  
  			if (diffEditor && diffEditor.input) {
+@@ -745,6 +766,13 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+ 	private _position: IOverlayWidgetPosition | undefined;
+ 	private _lastStartLineNumber: number | undefined;
+ 	private _removed: boolean = false;
++	private _inOwnRow = false;
++	private _rowTop = -1_000_000;
++
++	/** Height of the row that holds the toolbar when it sits below its hunk (agent review). */
++	static toolbarRowHeight(editor: ICodeEditor): number {
++		return Math.max(24, editor.getOption(EditorOption.lineHeight) + 6);
++	}
+ 
+ 	constructor(
+ 		private readonly _editor: ICodeEditor,
+@@ -806,13 +834,39 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+ 		return this._id;
+ 	}
+ 
++	/** Agent review: place the toolbar in its own row below the hunk (see `setRowTop`) instead of over its first line. */
++	setInOwnRow(inOwnRow: boolean): void {
++		this._inOwnRow = inOwnRow;
++		this._rowTop = -1_000_000; // off-screen until the row reports where it is (pooled widgets move between hunks)
++		this._domNode.classList.toggle('in-own-row', inOwnRow);
++	}
++
++	/** Called by the row's view zone with its top (relative to the scrolled viewport). */
++	setRowTop(top: number): void {
++		this._rowTop = top;
++		if (this._inOwnRow && !this._removed) {
++			// Also move the node now: the view zones render after this frame's overlay widgets.
++			this._domNode.style.top = `${this._rowOffsetTop()}px`;
++			if (this._lastStartLineNumber !== undefined) {
++				this.layout(this._lastStartLineNumber);
++			}
++		}
++	}
++
++	private _rowOffsetTop(): number {
++		return this._rowTop + Math.max(0, Math.floor((DiffHunkWidget.toolbarRowHeight(this._editor) - this._domNode.offsetHeight) / 2));
++	}
++
+ 	layout(startLineNumber: number): void {
+ 
+ 		const lineHeight = this._editor.getOption(EditorOption.lineHeight);
+ 		const { contentLeft, contentWidth, verticalScrollbarWidth } = this._editor.getLayoutInfo();
+ 		const scrollTop = this._editor.getScrollTop();
+ 
+-		this._position = {
++		this._position = this._inOwnRow ? {
++			stackOrdinal: 1,
++			preference: { top: this._rowOffsetTop(), left: contentLeft }
++		} : {
+ 			stackOrdinal: 1,
+ 			preference: {
+ 				top: this._editor.getTopForLineNumber(startLineNumber) - scrollTop - (lineHeight * this._lineDelta),
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts
 index 01fe8016..d1784e0e 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts
