@@ -1,9 +1,9 @@
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts b/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts
 new file mode 100644
-index 00000000..2cbd16ac
+index 00000000..0362ae67
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReview.contribution.ts
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,111 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -25,11 +25,12 @@ index 00000000..2cbd16ac
 +import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 +import { IContextKeyService, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
 +import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
-+import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
++import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 +import { ILogService } from '../../../../platform/log/common/log.js';
 +import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 +import { IEditorService } from '../../../services/editor/common/editorService.js';
 +import { AgentReviewKind, MERGE_EDITOR_ID } from './agentReviewEntry.js';
++import { closeOrphanedAgentReviewMerges } from './agentReviewMerge.js';
 +import { AgentReviewSaveParticipants } from './agentReviewSaveParticipant.js';
 +import { AgentReviewService, IAgentReviewService } from './agentReviewService.js';
 +
@@ -105,6 +106,15 @@ index 00000000..2cbd16ac
 +	}
 +}
 +registerWorkbenchContribution2(AgentReviewEditorState.ID, AgentReviewEditorState, WorkbenchPhase.AfterRestored);
++
++/** Closes 3-way merges of agent writes restored from before a reload or restart (see agentReviewMerge.ts). */
++class AgentReviewOrphanedMerges implements IWorkbenchContribution {
++	static readonly ID = 'workbench.contrib.agentReviewOrphanedMerges';
++	constructor(@IInstantiationService instantiationService: IInstantiationService) {
++		instantiationService.invokeFunction(closeOrphanedAgentReviewMerges);
++	}
++}
++registerWorkbenchContribution2(AgentReviewOrphanedMerges.ID, AgentReviewOrphanedMerges, WorkbenchPhase.AfterRestored);
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
 new file mode 100644
 index 00000000..4523abaf
@@ -518,10 +528,10 @@ index 00000000..4523abaf
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewMerge.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewMerge.ts
 new file mode 100644
-index 00000000..c82f759f
+index 00000000..77cb4f5b
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewMerge.ts
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,144 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -542,6 +552,7 @@ index 00000000..c82f759f
 +
 +import { DisposableStore } from '../../../../base/common/lifecycle.js';
 +import { waitForState } from '../../../../base/common/observable.js';
++import { basename } from '../../../../base/common/resources.js';
 +import { URI } from '../../../../base/common/uri.js';
 +import { ILanguageService } from '../../../../editor/common/languages/language.js';
 +import { IModelService } from '../../../../editor/common/services/model.js';
@@ -549,6 +560,8 @@ index 00000000..c82f759f
 +import { ITextModelService } from '../../../../editor/common/services/resolverService.js';
 +import { localize } from '../../../../nls.js';
 +import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
++import { INotificationService, Severity } from '../../../../platform/notification/common/notification.js';
++import { EditorsOrder } from '../../../common/editor.js';
 +import { IEditorService } from '../../../services/editor/common/editorService.js';
 +import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
 +import { MergeEditorInput, MergeEditorInputData } from '../../mergeEditor/browser/mergeEditorInput.js';
@@ -638,6 +651,30 @@ index 00000000..c82f759f
 +		store.dispose();
 +		throw err;
 +	}
++}
++
++/**
++ * The merge's snapshots live in memory. A merge editor restored after a reload or restart can't open them (it showed
++ * "The editor could not be opened"): close it and say so. The file keeps the merge result so far, unsaved.
++ */
++export async function closeOrphanedAgentReviewMerges(accessor: ServicesAccessor): Promise<number> {
++	const editorService = accessor.get(IEditorService);
++	const modelService = accessor.get(IModelService);
++	const notificationService = accessor.get(INotificationService);
++	const orphans = editorService.getEditors(EditorsOrder.SEQUENTIAL).filter(({ editor }) =>
++		editor instanceof MergeEditorInput && editor.base.scheme === AGENT_REVIEW_MERGE_SCHEME && !modelService.getModel(editor.base));
++	if (orphans.length === 0) {
++		return 0;
++	}
++	await editorService.closeEditors(orphans, { preserveFocus: true });
++	for (const { editor } of orphans) {
++		const name = basename((editor as MergeEditorInput).result);
++		notificationService.notify({
++			severity: Severity.Info,
++			message: localize('agentReview.merge.orphaned', "The merge of {0} could not be reopened after the restart and was closed. The file keeps the merge result so far, unsaved.", name),
++		});
++	}
++	return orphans.length;
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewSaveParticipant.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewSaveParticipant.ts
 new file mode 100644
@@ -1735,10 +1772,10 @@ index 00000000..2bc19709
 +});
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReviewMerge.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReviewMerge.test.ts
 new file mode 100644
-index 00000000..589f6950
+index 00000000..1ff7019e
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReviewMerge.test.ts
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,133 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -1762,7 +1799,11 @@ index 00000000..589f6950
 +import { TestServiceAccessor, workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
 +import { TestWorkerService } from '../../../inlineChat/test/browser/testWorkerService.js';
 +import { MergeEditorInput } from '../../../mergeEditor/browser/mergeEditorInput.js';
-+import { AGENT_REVIEW_MERGE_SCHEME, openAgentReviewMerge } from '../../browser/agentReviewMerge.js';
++import { AGENT_REVIEW_MERGE_SCHEME, closeOrphanedAgentReviewMerges, openAgentReviewMerge } from '../../browser/agentReviewMerge.js';
++import { mock } from '../../../../../base/test/common/mock.js';
++import { INotification, INotificationService } from '../../../../../platform/notification/common/notification.js';
++import { IEditorService } from '../../../../services/editor/common/editorService.js';
++import { IEditorIdentifier } from '../../../../common/editor.js';
 +
 +suite('AgentReview: 3-way merge for agent writes under unsaved edits', () => {
 +
@@ -1840,6 +1881,31 @@ index 00000000..589f6950
 +		await model.revert();
 +		for (const r of resources) {
 +			assert.strictEqual(models().getModel(r), null);
++		}
++	});
++
++	test('a merge restored after a restart (its snapshots gone) is closed, with a message, instead of failing to open', async () => {
++		const merge = (await insta.invokeFunction(openAgentReviewMerge, uri, { base: BASE, noOpen: true }))!;
++		const closed: unknown[] = [];
++		const notifications: INotification[] = [];
++		const child = insta.createChild(new ServiceCollection(
++			[IEditorService, new class extends mock<IEditorService>() {
++				override getEditors() { return [{ editor: merge.input, groupId: 1 }]; }
++				override async closeEditors(editors: readonly IEditorIdentifier[]) { closed.push(...editors.map(e => e.editor)); }
++			}()],
++			[INotificationService, new class extends mock<INotificationService>() {
++				override notify(n: INotification) { notifications.push(n); return undefined!; }
++			}()],
++		));
++		try {
++			assert.strictEqual(await child.invokeFunction(closeOrphanedAgentReviewMerges), 0, 'a merge whose snapshots exist stays');
++			await close(merge.input); // as after a restart: the restored input's snapshots don't exist
++			assert.strictEqual(await child.invokeFunction(closeOrphanedAgentReviewMerges), 1);
++			assert.deepStrictEqual(closed, [merge.input]);
++			assert.match(String(notifications[0].message), /paper\.tex could not be reopened/);
++		} finally {
++			child.dispose();
++			await model.revert();
 +		}
 +	});
 +});
