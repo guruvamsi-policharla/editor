@@ -75,4 +75,37 @@ describe('format on save with the user text', () => {
     expect(b).not.toMatch(/Mine\. here/); // the agent's "here." is not folded in with the user's line
     expect(engine.listChanges().map((c) => c.path)).toEqual(['a.tex']);
   });
+
+  // Found by the stress harness (seed 22): a reflow moved base words into the agent's new sentence's line.
+  it('a reflow that moves base words into the agent\'s line keeps them in the baseline (Undo must not delete them)', async () => {
+    const base = 'The b17 scheme b18 a b19 b20 of b21 and b22~\\cite{b23}.\nWe b24 it b25 the b26 in b27.\n';
+    const ws = memWorkspace({ 'p.tex': base });
+    const engine = await ws.open();
+    const agent = 'The b17 scheme b18 a b19 b20 of b21 and b22~\\cite{b23}.\nThe ag9 result ag10 holds.\nWe b24 it b25 the b26 in b27.\n';
+    await engine.handleFsEvents([ws.write('p.tex', agent)]);
+    const saved = 'The b17 scheme b18 a b19 b20 of b21 and\nb22~\\cite{b23}. The ag9 result ag10 holds. We b24\nit b25 the b26 in b27.\n';
+    await engine.reportUserSave('p.tex', saved, { userContent: agent });
+    await engine.handleFsEvents([ws.write('p.tex', saved)]);
+    const b = (await baselineFiles(engine))['p.tex']!;
+    for (const w of ['b22', 'b23', 'b24', 'b21', 'b25']) { expect(b).toContain(w); }
+    expect(b).not.toContain('ag9');
+    await engine.rejectFile('p.tex');
+    expect(ws.read('p.tex')).toBe(b); // Undo brings back every base word
+  });
+
+  // Found by the stress harness (seed 18): the user's joined line reflowed together with the agent's sentence.
+  it('the user\'s words reflowed into a line with agent words stay in the baseline as the user wrote them', async () => {
+    const base = 'The b6 scheme b7 a b8 b9 of b10 and\nb11~\\cite{b12}. We b13 it b14 the b15 in b16.\n';
+    const ws = memWorkspace({ 'p.tex': base });
+    const engine = await ws.open();
+    const agent = `The ag4 result ag5 holds.\n${base}`;
+    await engine.handleFsEvents([ws.write('p.tex', agent)]);
+    const user = 'The ag4 result ag5 holds.\nThe b6 scheme b7 a b8 b9 of b10 and b11~\\cite{b12}. We b13 it b14 the b15 in b16.\n'; // joined
+    const saved = 'The ag4 result ag5 holds. The b6 scheme b7 a b8 b9\nof b10 and b11~\\cite{b12}. We b13 it b14 the b15\nin b16.\n';
+    await engine.reportUserSave('p.tex', saved, { userContent: user, edits: [{ offset: agent.indexOf('and\n') + 3, length: 1, text: ' ', origin: 'user' }] });
+    await engine.handleFsEvents([ws.write('p.tex', saved)]);
+    const b = (await baselineFiles(engine))['p.tex']!;
+    expect(b).toBe('The b6 scheme b7 a b8 b9 of b10 and b11~\\cite{b12}. We b13 it b14 the b15 in b16.\n');
+    expect(engine.listChanges().map((c) => c.path)).toEqual(['p.tex']);
+  });
 });

@@ -40,6 +40,16 @@ export interface SavedLine {
   origin?: EditOrigin;
   /** A formatter's line that contains words from an agent-added line: never folded into the baseline on its own. */
   agentText?: boolean;
+  /**
+   * A formatter's line with words from other lines than the one it replaces (a reflow moved words across lines), so
+   * it can't stand in for that line alone.
+   */
+  moved?: boolean;
+  /**
+   * Not in the saved content: a line of the user's, before format on save mixed it into agent text, that goes into
+   * the baseline in its place (see addFormatterPass).
+   */
+  ghost?: boolean;
 }
 
 export interface Provenance {
@@ -203,8 +213,12 @@ export function addFormatterPass(user: Provenance, userText: string, saved: stri
       if (l.src < 0) { return l.origin === 'user' ? 'user' : 'common'; }
       return isAgentLine(l.src) ? 'agent' : 'common';
     };
-    const oldWords: { word: string; kind: 'agent' | 'user' | 'common' }[] = [];
-    for (let i = r.aStart; i < r.aEnd; i++) { for (const w of u[i]!.match(WORD_RE) ?? []) { oldWords.push({ word: w, kind: kindOf(i) }); } }
+    const oldWords: { word: string; kind: 'agent' | 'user' | 'common'; line: number }[] = [];
+    for (let i = r.aStart; i < r.aEnd; i++) { for (const w of u[i]!.match(WORD_RE) ?? []) { oldWords.push({ word: w, kind: kindOf(i), line: i }); } }
+    const paired = r.aEnd - r.aStart === r.bEnd - r.bStart;
+    const moved = new Set<number>();
+    /** New lines with a (letter/digit) word of the user's. */
+    const userWords = new Set<number>();
     const newWords: { word: string; line: number }[] = [];
     for (let j = r.bStart; j < r.bEnd; j++) { for (const w of s[j]!.match(WORD_RE) ?? []) { newWords.push({ word: w, line: j }); } }
     const found = new Map<number, Set<string>>();
@@ -215,6 +229,8 @@ export function addFormatterPass(user: Provenance, userText: string, saved: stri
         while (oi < oEnd) {
           const line = newWords[ni++]!.line;
           const kinds = found.get(line) ?? new Set<string>();
+          if (!paired || oldWords[oi]!.line - r.aStart !== line - r.bStart) { moved.add(line); }
+          if (oldWords[oi]!.kind === 'user' && /[\p{L}\p{N}]/u.test(oldWords[oi]!.word)) { userWords.add(line); }
           kinds.add(oldWords[oi++]!.kind);
           if (!found.has(line)) { found.set(line, kinds); }
         }
@@ -224,20 +240,38 @@ export function addFormatterPass(user: Provenance, userText: string, saved: stri
         // A word that isn't in the region's old lines was moved here from elsewhere (formatters add whitespace and
         // punctuation, not words): it may be the agent's.
         for (let k = w.bStart; k < w.bEnd; k++) {
-          if (/[\p{L}\p{N}]/u.test(newWords[k]!.word)) { found.set(newWords[k]!.line, new Set(['agent'])); }
+          if (/[\p{L}\p{N}]/u.test(newWords[k]!.word)) {
+            found.set(newWords[k]!.line, new Set(['agent']));
+            moved.add(newWords[k]!.line);
+          }
         }
         oi = w.aEnd;
         ni = w.bEnd;
       }
       matchUntil(oldWords.length);
     } else {
-      // Too big to trace: assume any line may carry agent text.
-      for (let j = r.bStart; j < r.bEnd; j++) { found.set(j, new Set(['agent'])); }
+      // Too big to trace: assume any line may carry agent text, from anywhere.
+      for (let j = r.bStart; j < r.bEnd; j++) {
+        found.set(j, new Set(['agent']));
+        moved.add(j);
+      }
+    }
+    // The formatter mixed the user's words into a line with agent words: that line stays pending, so the user's text
+    // in it would be lost from the baseline (and Undo would delete it). Keep the user's lines of this region as they
+    // were before formatting in the baseline instead (ghosts), and fold none of the region's new lines.
+    let mixed = false;
+    for (let j = r.bStart; j < r.bEnd; j++) { if (found.get(j)?.has('agent') && userWords.has(j)) { mixed = true; } }
+    if (mixed) {
+      for (let i = r.aStart; i < r.aEnd; i++) {
+        if (kindOf(i) === 'user') { lines.push({ text: u[i]!.endsWith('\n') ? u[i]! : `${u[i]!}\n`, src: -1, origin: 'user', ghost: true, moved: true }); }
+      }
     }
     for (let j = r.bStart; j < r.bEnd; j++) {
       const kinds = found.get(j);
-      if (kinds?.has('agent')) { lines.push({ text: s[j]!, src: -1, origin: 'formatter', agentText: true }); }
-      else { lines.push({ text: s[j]!, src: -1, origin: kinds?.has('user') ? 'user' : 'formatter' }); }
+      const line: SavedLine = kinds?.has('agent') ? { text: s[j]!, src: -1, origin: 'formatter', agentText: true }
+        : { text: s[j]!, src: -1, origin: kinds?.has('user') && !mixed ? 'user' : 'formatter' };
+      if (moved.has(j) || mixed) { line.moved = true; }
+      lines.push(line);
     }
     ui = r.aEnd;
     si = r.bEnd;
@@ -319,10 +353,12 @@ export function foldUserSave(baseline: readonly string[], disk: readonly string[
     while (j < S.length && S[j]!.src < 0) { j++; }
     const nextD = j < S.length ? S[j]!.src : nD;
     const gap = S.slice(i, j);
-    if (gap.length > 0 && gap.length === nextD - p && gap.some((l) => l.origin === 'formatter')) {
+    if (gap.length > 0 && gap.length === nextD - p && gap.some((l) => l.origin === 'formatter') && !gap.some((l) => l.moved)) {
       // A line-for-line rewrite that a formatter took part in (format on save touches runs of adjacent lines,
       // often next to or across agent hunks): pair each new line with the disk line it replaced and decide per
-      // line. A rewritten agent line stays pending unless the user wrote it; any other line folds in.
+      // line. A rewritten agent line stays pending unless the user wrote it; any other line folds in. Not when the
+      // formatter moved words across lines (a reflow): then a new line isn't its old line reformatted, and folding
+      // it would drop the words it lost from the baseline (and Undo would delete them).
       for (let k = 0; k < gap.length; k++) {
         emitDeletions(p + k);
         if ((dCommon[p + k] !== -1 && !gap[k]!.agentText) || gap[k]!.origin === 'user') { out.push(gap[k]!.text); }
