@@ -80,7 +80,7 @@
             "chat"
           ],
           "enumDescriptions": [
-            "Whichever of the agent terminal and the agent chat you used last.",
+            "The agent chat, unless you used the agent terminal more recently (falls back to the terminal when there is no agent chat).",
             "Always the agent terminal.",
             "Always the agent chat's input."
           ],

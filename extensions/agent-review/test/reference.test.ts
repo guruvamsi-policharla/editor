@@ -61,12 +61,14 @@ describe('EditLogs', () => {
 });
 
 describe('Ctrl/Cmd+L target', () => {
-  it('auto: whichever of chat and terminal was used last; the terminal when neither or only it was', () => {
-    expect(chooseTarget('auto', {})).toBe('terminal');
+  it('auto: the chat, unless the terminal was used more recently', () => {
+    expect(chooseTarget('auto', {})).toBe('chat');
+    expect(chooseTarget(undefined, {})).toBe('chat');
     expect(chooseTarget('auto', { terminal: 5 })).toBe('terminal');
     expect(chooseTarget('auto', { chat: 5 })).toBe('chat');
     expect(chooseTarget('auto', { terminal: 5, chat: 9 })).toBe('chat');
     expect(chooseTarget('auto', { terminal: 9, chat: 5 })).toBe('terminal');
+    expect(chooseTarget('auto', { terminal: 5, chat: 5 })).toBe('chat');
     expect(chooseTarget(undefined, { chat: 1 })).toBe('chat');
   });
   it('a fixed setting wins', () => {

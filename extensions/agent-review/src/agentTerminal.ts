@@ -56,7 +56,7 @@ export class AgentTerminal implements vscode.Disposable {
 
   /**
    * Ctrl/Cmd+L: send `@path:L42-58` to the agent terminal (optionally with the selected text), or insert it into
-   * the agent chat's input (`agentReview.agent.target`; `auto` = whichever was used last).
+   * the agent chat's input (`agentReview.agent.target`; `auto` = the chat unless the terminal was used more recently).
    */
   async sendSelection(): Promise<void> {
     const editor = vscode.window.activeTextEditor;

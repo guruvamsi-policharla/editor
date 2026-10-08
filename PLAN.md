@@ -107,7 +107,7 @@ For agents that speak [ACP](https://agentclientprotocol.com) (Claude Code via [c
   Codex applies mode, model, effort and fast changes from the next turn. Effort and fast appear only for models that support them.
 - **Defaults.** Claude starts in Accept edits (commands still prompt); Codex starts in Workspace access. Claude's Bypass is hidden; Codex's Full access needs a confirmation. The chat lives in the secondary side bar (right), and sessions can also open as editor tabs. The user's installed `claude`/`codex` are used when found on PATH; otherwise pinned adapters are downloaded on first use.
 - **Standing permission rules aren't in ACP.** A rules editor edits the harness's own files: `permissions.allow/deny/ask` in Claude's `settings.json` files, and `prefix_rule` in `~/.codex/rules/default.rules`. Then it restarts the agent and resumes the chat.
-- **Cmd+L** inserts `@path:L42-58` into the chat input when the chat is the active agent target (`agentReview.agent.target`: auto / terminal / chat; auto = whichever was used last). The reference goes to the agent as text, plus a `resource_link` for the file.
+- **Cmd+L** inserts `@path:L42-58` into the chat input when the chat is the active agent target (`agentReview.agent.target`: auto / terminal / chat; auto = the chat unless the terminal was used more recently). The reference goes to the agent as text, plus a `resource_link` for the file.
 - **Permission safety:**
   - only an explicit click answers a prompt;
   - prompts show the exact command or paths and whether "always" writes a persistent rule;

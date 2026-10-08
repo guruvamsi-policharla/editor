@@ -39,10 +39,11 @@ export function selectionLines(start: { line: number }, end: { line: number; cha
 export type AgentTarget = 'auto' | 'terminal' | 'chat';
 
 /**
- * Where Ctrl/Cmd+L sends the reference. `auto`: whichever of the agent terminal and the agent chat was used last
- * (timestamps; the chat's comes from agent-chat), else the terminal.
+ * Where Ctrl/Cmd+L sends the reference. `auto`: the agent chat, unless the agent terminal was used more recently
+ * (timestamps, in memory since launch; the chat's comes from agent-chat). So after a relaunch it is the chat. The
+ * caller still falls back to the terminal when there is no agent chat.
  */
 export function chooseTarget(setting: AgentTarget | undefined, last: { terminal?: number; chat?: number }): 'terminal' | 'chat' {
   if (setting === 'terminal' || setting === 'chat') { return setting; }
-  return last.chat !== undefined && (last.terminal === undefined || last.chat > last.terminal) ? 'chat' : 'terminal';
+  return last.terminal !== undefined && (last.chat === undefined || last.terminal > last.chat) ? 'terminal' : 'chat';
 }
