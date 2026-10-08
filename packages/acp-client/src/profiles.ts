@@ -1,0 +1,148 @@
+/**
+ * Harness profiles: the tailoring data for one ACP harness. Everything the UI shows comes from what the adapter
+ * advertises; a profile only says how to launch it, which defaults to apply, which values to hide or confirm,
+ * and when a changed option takes effect.
+ */
+
+/**
+ * When a config option change takes effect.
+ * - `live`: the harness applies it immediately, mid-turn included (Claude: everything).
+ * - `next-turn`: accepted at once, applied from the next prompt (Codex: mode, model, effort, fast).
+ * - `launch`: only at adapter start (env/flags); shown read-only until a restart.
+ */
+export type OptionTiming = 'live' | 'next-turn' | 'launch';
+
+export interface HarnessProfile {
+	/** Stable id: `claude`, `codex`. The chat session type is `agent-<id>`. */
+	readonly id: string;
+	readonly label: string;
+	/** The pinned ACP adapter, installed from npm on first use unless `adapterPath` overrides it. */
+	readonly adapter: { readonly npm: string; readonly version: string; readonly bin: string };
+	/**
+	 * The harness's own CLI. When found on PATH it's passed to the adapter through `env`, so the user's install,
+	 * version and login are shared (and the adapter's bundled copy isn't needed). `bundled` is the adapter's own
+	 * copy (a node script, relative to the install's node_modules), used for login when the CLI isn't on PATH.
+	 */
+	readonly harness: { readonly binary: string; readonly env?: string; readonly bundled?: string; readonly fallbackPaths?: readonly string[] };
+	/** Extra adapter environment. */
+	readonly env?: Readonly<Record<string, string>>;
+	/** Defaults that can only be set at launch: config id → env var carrying `defaults[id]`. */
+	readonly launchEnv?: Readonly<Record<string, string>>;
+	/** `session/new` `_meta`. */
+	readonly sessionMeta?: Readonly<Record<string, unknown>>;
+	/** Applied with `session/set_config_option` after `session/new`, only if the agent offers the value. */
+	readonly defaults?: Readonly<Record<string, string>>;
+	/** Values never offered in the UI (Claude's Bypass). Keyed by config id. */
+	readonly hiddenValues?: Readonly<Record<string, readonly string[]>>;
+	/** Values that need an explicit confirmation (Codex Full access). Keyed by config id. */
+	readonly dangerousValues?: Readonly<Record<string, readonly string[]>>;
+	/** When option changes apply: per config id, else `default`. */
+	readonly timing: { readonly default: OptionTiming; readonly byId?: Readonly<Record<string, OptionTiming>> };
+	/** Where plan mode lives (`mode=plan` for Claude, `collaboration_mode=plan` for Codex). */
+	readonly planOption?: { readonly configId: string; readonly value: string };
+	/** The harness's login command, run in a terminal: `<binary> ...args`. */
+	readonly login: { readonly args: readonly string[] };
+	/** Shown in the model picker before the adapter has started for the first time. */
+	readonly placeholderModel: { readonly id: string; readonly name: string };
+	/** Standing permission rules (phase C rules editor). */
+	readonly rules?: { readonly format: 'claude-settings' | 'codex-execpolicy'; readonly files: readonly string[] };
+}
+
+export const CLAUDE: HarnessProfile = {
+	id: 'claude',
+	label: 'Claude Code',
+	adapter: { npm: '@agentclientprotocol/claude-agent-acp', version: '0.87.0', bin: 'claude-agent-acp' },
+	harness: { binary: 'claude', env: 'CLAUDE_CODE_EXECUTABLE', fallbackPaths: ['~/.local/bin/claude', '~/.claude/local/claude'] },
+	// Bypass leaves the session's mode list; Accept edits is the approved default (commands still prompt).
+	sessionMeta: { claudeCode: { options: { allowDangerouslySkipPermissions: false } } },
+	defaults: { mode: 'acceptEdits' },
+	hiddenValues: { mode: ['bypassPermissions'] },
+	dangerousValues: { mode: ['bypassPermissions'] },
+	timing: { default: 'live' },
+	planOption: { configId: 'mode', value: 'plan' },
+	login: { args: ['auth', 'login'] },
+	placeholderModel: { id: 'default', name: 'Default (recommended)' },
+	rules: { format: 'claude-settings', files: ['~/.claude/settings.json', '${workspace}/.claude/settings.json', '${workspace}/.claude/settings.local.json'] },
+};
+
+export const CODEX: HarnessProfile = {
+	id: 'codex',
+	label: 'Codex',
+	adapter: { npm: '@agentclientprotocol/codex-acp', version: '2.1.1', bin: 'codex-acp' },
+	harness: { binary: 'codex', env: 'CODEX_PATH', bundled: '@openai/codex/bin/codex.js' },
+	// Device-code login needs URL elicitation, which we don't advertise; logins go through `codex login` in a terminal.
+	env: { NO_BROWSER: '1' },
+	// Codex reads its initial mode only from the environment; Workspace access is the approved default.
+	launchEnv: { mode: 'INITIAL_AGENT_MODE' },
+	defaults: { mode: 'workspace-write' },
+	dangerousValues: { mode: ['agent-full-access'] },
+	// The adapter sends approval policy, sandbox, model, effort and speed with each turn.
+	timing: { default: 'next-turn', byId: { collaboration_mode: 'live' } },
+	planOption: { configId: 'collaboration_mode', value: 'plan' },
+	login: { args: ['login'] },
+	placeholderModel: { id: 'default', name: 'Default' },
+	rules: { format: 'codex-execpolicy', files: ['~/.codex/rules/default.rules'] },
+};
+
+export const BUILTIN_PROFILES: readonly HarnessProfile[] = [CLAUDE, CODEX];
+
+/** User overrides from settings (`agentChat.harnesses.<id>`). */
+export interface ProfileOverride {
+	/** An installed adapter command to run instead of the pinned npm install. */
+	adapterPath?: string;
+	/** The harness CLI to use instead of the one found on PATH. */
+	harnessPath?: string;
+	env?: Record<string, string>;
+	defaults?: Record<string, string>;
+}
+
+export function withOverride(profile: HarnessProfile, override: ProfileOverride | undefined): HarnessProfile {
+	if (!override) {
+		return profile;
+	}
+	return {
+		...profile,
+		env: { ...profile.env, ...override.env },
+		defaults: { ...profile.defaults, ...override.defaults },
+	};
+}
+
+export function optionTiming(profile: HarnessProfile, configId: string): OptionTiming {
+	return profile.timing.byId?.[configId] ?? profile.timing.default;
+}
+
+export interface AgentLaunch {
+	command: string;
+	args?: readonly string[];
+	/** Merged over the parent environment. */
+	env?: Record<string, string | undefined>;
+	cwd?: string;
+}
+
+export interface LaunchInputs {
+	/** The adapter: an installed JS entry run with `node`, or a user-provided command. */
+	adapter: { kind: 'script'; path: string } | { kind: 'command'; command: string };
+	/** The node to run JS entries with. In the editor that's the extension host's Electron (`ELECTRON_RUN_AS_NODE`). */
+	node: { path: string; env?: Record<string, string> };
+	/** The harness CLI to hand to the adapter, if found. */
+	harnessPath?: string;
+	cwd: string;
+}
+
+/** The adapter's command line and environment. No shell is involved: argv is explicit. */
+export function launchFor(profile: HarnessProfile, inputs: LaunchInputs): AgentLaunch {
+	const env: Record<string, string> = { ...profile.env };
+	for (const [configId, variable] of Object.entries(profile.launchEnv ?? {})) {
+		const value = profile.defaults?.[configId];
+		if (value) {
+			env[variable] = value;
+		}
+	}
+	if (inputs.harnessPath && profile.harness.env) {
+		env[profile.harness.env] = inputs.harnessPath;
+	}
+	if (inputs.adapter.kind === 'script') {
+		return { command: inputs.node.path, args: [inputs.adapter.path], env: { ...inputs.node.env, ...env }, cwd: inputs.cwd };
+	}
+	return { command: inputs.adapter.command, args: [], env, cwd: inputs.cwd };
+}

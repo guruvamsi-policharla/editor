@@ -1,24 +1,19 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
 import * as acp from '@agentclientprotocol/sdk';
+import type { AgentLaunch } from './profiles.js';
 
 /**
  * The client capabilities we advertise. Deliberately no `fs` and no `terminal`: the harness reads, writes
  * and runs commands with its own tools, and the review engine sees its edits on disk like any other agent's.
+ * (No `_meta.terminal_output` either: Claude's adapter would then send `terminal` content pointing at a
+ * client terminal we don't have. Without it, command output arrives as ordinary text content.)
  */
 export const CLIENT_CAPABILITIES: acp.ClientCapabilities = Object.freeze({});
 
 /** Agent → client methods we never serve. Receiving one is a contract violation. */
 export function isForbiddenClientMethod(method: string): boolean {
 	return method.startsWith('fs/') || method.startsWith('terminal/');
-}
-
-export interface AgentLaunch {
-	command: string;
-	args?: readonly string[];
-	/** Merged over the parent environment. */
-	env?: Record<string, string | undefined>;
-	cwd?: string;
 }
 
 export type PermissionHandler = (request: acp.RequestPermissionRequest) => Promise<acp.RequestPermissionResponse>;
@@ -30,6 +25,22 @@ export interface WireRecord {
 	id?: string | number | null;
 }
 
+export interface ExitInfo {
+	code: number | null;
+	signal: NodeJS.Signals | null;
+	/** True when we ended it (dispose). */
+	expected: boolean;
+}
+
+export interface ClientInfo {
+	name: string;
+	title?: string;
+	version: string;
+}
+
+/** The most wire records kept (oldest dropped). The forbidden-method list is kept separately, in full. */
+const WIRE_LIMIT = 5000;
+
 /**
  * One adapter process and its ACP connection. Every agent → client message is recorded from the raw byte
  * stream, so "the agent never called fs/terminal" doesn't depend on how the SDK routes unknown methods.
@@ -39,14 +50,22 @@ export class AgentConnection {
 	readonly updates: acp.SessionNotification[] = [];
 	readonly permissionRequests: acp.RequestPermissionRequest[] = [];
 	stderr = '';
+	exitInfo: ExitInfo | undefined;
 
 	private readonly child: ChildProcess;
 	private readonly connection: acp.ClientConnection;
+	private readonly forbidden: string[] = [];
 	private readonly updateListeners = new Set<(n: acp.SessionNotification) => void>();
+	private readonly exitListeners = new Set<(e: ExitInfo) => void>();
 	private permissionHandler: PermissionHandler = async () => ({ outcome: { outcome: 'cancelled' } });
-	private exited = false;
+	private disposing = false;
+	/** Keep every update (tests, contract traces). Off in the editor, where updates are consumed as they come. */
+	private readonly keepUpdates: boolean;
+	private readonly clientInfo: ClientInfo;
 
-	constructor(launch: AgentLaunch) {
+	constructor(launch: AgentLaunch, options: { keepUpdates?: boolean; clientInfo?: ClientInfo } = {}) {
+		this.keepUpdates = options.keepUpdates ?? true;
+		this.clientInfo = options.clientInfo ?? { name: 'editor', title: 'Editor', version: '0.0.1' };
 		this.child = spawn(launch.command, [...(launch.args ?? [])], {
 			cwd: launch.cwd,
 			env: { ...process.env, ...launch.env },
@@ -54,25 +73,48 @@ export class AgentConnection {
 			// Own process group, so dispose() also ends the harness the adapter starts (Claude Code, codex app-server).
 			detached: process.platform !== 'win32',
 		});
-		this.child.on('exit', () => { this.exited = true; });
 		this.child.stderr!.setEncoding('utf8');
 		this.child.stderr!.on('data', (chunk: string) => {
 			this.stderr = (this.stderr + chunk).slice(-64_000);
 		});
+		// A failed spawn (ENOENT, EACCES) reports through 'error' and may never 'exit'.
+		this.child.on('error', err => {
+			this.stderr += `\n${err.message}`;
+			this.onExited({ code: null, signal: null, expected: false });
+		});
+		this.child.on('exit', (code, signal) => this.onExited({ code, signal, expected: this.disposing }));
 
+		const record = (direction: 'in' | 'out', msg: WireRecord) => {
+			if (direction === 'in' && msg.method && isForbiddenClientMethod(msg.method)) {
+				this.forbidden.push(msg.method);
+			}
+			this.wire.push(msg);
+			if (this.wire.length > WIRE_LIMIT) {
+				this.wire.splice(0, this.wire.length - WIRE_LIMIT);
+			}
+		};
 		const input = Readable.toWeb(this.child.stdout!) as ReadableStream<Uint8Array>;
 		const output = Writable.toWeb(this.child.stdin!) as WritableStream<Uint8Array>;
-		const stream = acp.ndJsonStream(tap(output, 'out', this.wire), input.pipeThrough(tapTransform('in', this.wire)));
+		const stream = acp.ndJsonStream(tap(output, 'out', record), input.pipeThrough(tapTransform('in', record)));
 
-		this.connection = acp.client({ name: 'editor' })
+		// Unknown notifications (the adapters' `_auth/status_update` and the like) are ignored by the SDK.
+		this.connection = acp.client({ name: this.clientInfo.name })
 			.onRequest(acp.methods.client.session.requestPermission, async ctx => {
-				this.permissionRequests.push(ctx.params);
+				if (this.keepUpdates) {
+					this.permissionRequests.push(ctx.params);
+				}
 				return this.permissionHandler(ctx.params);
 			})
 			.onNotification(acp.methods.client.session.update, async ctx => {
-				this.updates.push(ctx.params);
-				for (const listener of this.updateListeners) {
-					listener(ctx.params);
+				if (this.keepUpdates) {
+					this.updates.push(ctx.params);
+				}
+				for (const listener of [...this.updateListeners]) {
+					try {
+						listener(ctx.params);
+					} catch {
+						// a listener's bug must not break the connection
+					}
 				}
 			})
 			.connect(stream);
@@ -82,9 +124,29 @@ export class AgentConnection {
 		return this.child.pid;
 	}
 
+	/** False once the process exited or its stream closed (the 'exit' event can come a little later). */
+	get alive(): boolean {
+		return this.exitInfo === undefined && !this.connection.signal.aborted;
+	}
+
+	/** Resolves when the process has exited. */
+	readonly exited: Promise<ExitInfo> = new Promise(resolve => this.exitListeners.add(resolve));
+
+	private onExited(info: ExitInfo): void {
+		if (this.exitInfo) {
+			return;
+		}
+		this.exitInfo = info;
+		// Pending requests (a running prompt) reject instead of hanging.
+		this.connection.close(new Error(`agent exited (${info.signal ?? `code ${info.code}`})`));
+		for (const listener of [...this.exitListeners]) {
+			listener(info);
+		}
+	}
+
 	/** Methods the agent sent us that we must never receive. */
 	forbiddenInbound(): string[] {
-		return this.wire.filter(r => r.direction === 'in' && r.method && isForbiddenClientMethod(r.method)).map(r => r.method!);
+		return [...this.forbidden];
 	}
 
 	setPermissionHandler(handler: PermissionHandler): void {
@@ -96,10 +158,15 @@ export class AgentConnection {
 		return () => this.updateListeners.delete(listener);
 	}
 
+	onExit(listener: (e: ExitInfo) => void): () => void {
+		this.exitListeners.add(listener);
+		return () => this.exitListeners.delete(listener);
+	}
+
 	initialize(): Promise<acp.InitializeResponse> {
 		return this.connection.agent.request(acp.methods.agent.initialize, {
 			protocolVersion: acp.PROTOCOL_VERSION,
-			clientInfo: { name: 'editor', title: 'Editor', version: '0.0.1' },
+			clientInfo: this.clientInfo,
 			clientCapabilities: CLIENT_CAPABILITIES,
 		});
 	}
@@ -108,8 +175,18 @@ export class AgentConnection {
 		return this.connection.agent.request(acp.methods.agent.session.new, params);
 	}
 
-	prompt(sessionId: string, text: string): Promise<acp.PromptResponse> {
-		return this.connection.agent.request(acp.methods.agent.session.prompt, { sessionId, prompt: [{ type: 'text', text }] });
+	resumeSession(params: acp.ResumeSessionRequest): Promise<acp.ResumeSessionResponse> {
+		return this.connection.agent.request(acp.methods.agent.session.resume, params);
+	}
+
+	closeSession(sessionId: string): Promise<acp.CloseSessionResponse> {
+		return this.connection.agent.request(acp.methods.agent.session.close, { sessionId });
+	}
+
+	/** A prompt: plain text, or content blocks (text plus `resource_link`s). */
+	prompt(sessionId: string, prompt: string | acp.ContentBlock[]): Promise<acp.PromptResponse> {
+		const blocks: acp.ContentBlock[] = typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt;
+		return this.connection.agent.request(acp.methods.agent.session.prompt, { sessionId, prompt: blocks });
 	}
 
 	setConfigOption(sessionId: string, configId: string, value: string): Promise<acp.SetSessionConfigOptionResponse> {
@@ -140,8 +217,9 @@ export class AgentConnection {
 
 	/** Kills the adapter's whole process group (SIGTERM, then SIGKILL). */
 	async dispose(): Promise<void> {
+		this.disposing = true;
 		const pid = this.child.pid;
-		if (pid === undefined || this.exited) {
+		if (pid === undefined || this.exitInfo) {
 			return;
 		}
 		const signal = (sig: NodeJS.Signals) => {
@@ -160,19 +238,19 @@ export class AgentConnection {
 	}
 }
 
-function record(wire: WireRecord[], direction: 'in' | 'out', line: string): void {
+function parse(line: string): WireRecord | undefined {
 	if (!line.trim()) {
-		return;
+		return undefined;
 	}
 	try {
 		const msg = JSON.parse(line) as { method?: string; id?: string | number | null };
-		wire.push({ direction, method: msg.method, id: msg.id });
+		return { direction: 'in', method: msg.method, id: msg.id };
 	} catch {
-		wire.push({ direction, method: '<unparsable>' });
+		return { direction: 'in', method: '<unparsable>' };
 	}
 }
 
-function tapTransform(direction: 'in' | 'out', wire: WireRecord[]): TransformStream<Uint8Array, Uint8Array> {
+function tapTransform(direction: 'in' | 'out', record: (direction: 'in' | 'out', msg: WireRecord) => void): TransformStream<Uint8Array, Uint8Array> {
 	const decoder = new TextDecoder();
 	let buffer = '';
 	return new TransformStream({
@@ -180,7 +258,10 @@ function tapTransform(direction: 'in' | 'out', wire: WireRecord[]): TransformStr
 			buffer += decoder.decode(chunk, { stream: true });
 			let nl: number;
 			while ((nl = buffer.indexOf('\n')) >= 0) {
-				record(wire, direction, buffer.slice(0, nl));
+				const msg = parse(buffer.slice(0, nl));
+				if (msg) {
+					record(direction, { ...msg, direction });
+				}
 				buffer = buffer.slice(nl + 1);
 			}
 			controller.enqueue(chunk);
@@ -188,8 +269,8 @@ function tapTransform(direction: 'in' | 'out', wire: WireRecord[]): TransformStr
 	});
 }
 
-function tap(output: WritableStream<Uint8Array>, direction: 'in' | 'out', wire: WireRecord[]): WritableStream<Uint8Array> {
-	const t = tapTransform(direction, wire);
+function tap(output: WritableStream<Uint8Array>, direction: 'in' | 'out', record: (direction: 'in' | 'out', msg: WireRecord) => void): WritableStream<Uint8Array> {
+	const t = tapTransform(direction, record);
 	void t.readable.pipeTo(output).catch(() => undefined);
 	return t.writable;
 }
