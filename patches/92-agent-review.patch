@@ -969,10 +969,10 @@ index 00000000..155f9ac4
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css b/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css
 new file mode 100644
-index 00000000..5e81478f
+index 00000000..f289a598
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/media/agentReview.css
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,85 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -1047,9 +1047,20 @@ index 00000000..5e81478f
 +.monaco-workbench .chat-diff-change-content-widget.agent-review-hunk-toolbar .monaco-action-bar .action-item .action-label.codicon:not(.separator):hover {
 +	background-color: var(--vscode-toolbar-hoverBackground);
 +}
++
++/*
++ * Track changes: deleted words struck through in the line, right before the new ones. The struck text and the
++ * strike are tinted red, so that a short word (a renamed `x`) still reads as a deleted letter, not as `*`.
++ */
++.monaco-editor .inline-deleted-text.agent-review-deleted-text {
++	text-decoration-line: line-through;
++	text-decoration-thickness: 1px;
++	text-decoration-color: var(--vscode-editorGutter-deletedBackground);
++	color: var(--vscode-gitDecoration-deletedResourceForeground);
++}
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
 new file mode 100644
-index 00000000..1d947694
+index 00000000..81684a36
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
 @@ -0,0 +1,560 @@
@@ -1272,7 +1283,7 @@ index 00000000..1d947694
 +		model.setValue(`Intro.\n${paragraph.replace('never runs', 'does not run')}\nUnchanged middle sentence.\nA completely different closing sentence.\n`);
 +		await showPending(`Intro.\n${paragraph}\nUnchanged middle sentence.\nClosing.\n`);
 +		const deletedZones = () => [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
-+		const struck = model.getAllDecorations().filter(d => d.options.before?.inlineClassName === 'inline-deleted-text');
++		const struck = model.getAllDecorations().filter(d => d.options.before?.inlineClassName?.includes('agent-review-deleted-text'));
 +
 +		assert.deepStrictEqual(struck.map(d => d.range.startLineNumber), [2], 'the deleted words, in the line');
 +		assert.ok(struck.map(d => d.options.before?.content).join('').includes('never'));

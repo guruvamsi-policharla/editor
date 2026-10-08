@@ -217,7 +217,7 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		model.setValue(`Intro.\n${paragraph.replace('never runs', 'does not run')}\nUnchanged middle sentence.\nA completely different closing sentence.\n`);
 		await showPending(`Intro.\n${paragraph}\nUnchanged middle sentence.\nClosing.\n`);
 		const deletedZones = () => [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
-		const struck = model.getAllDecorations().filter(d => d.options.before?.inlineClassName === 'inline-deleted-text');
+		const struck = model.getAllDecorations().filter(d => d.options.before?.inlineClassName?.includes('agent-review-deleted-text'));
 
 		assert.deepStrictEqual(struck.map(d => d.range.startLineNumber), [2], 'the deleted words, in the line');
 		assert.ok(struck.map(d => d.options.before?.content).join('').includes('never'));

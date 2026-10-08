@@ -72,3 +72,14 @@
 .monaco-workbench .chat-diff-change-content-widget.agent-review-hunk-toolbar .monaco-action-bar .action-item .action-label.codicon:not(.separator):hover {
 	background-color: var(--vscode-toolbar-hoverBackground);
 }
+
+/*
+ * Track changes: deleted words struck through in the line, right before the new ones. The struck text and the
+ * strike are tinted red, so that a short word (a renamed `x`) still reads as a deleted letter, not as `*`.
+ */
+.monaco-editor .inline-deleted-text.agent-review-deleted-text {
+	text-decoration-line: line-through;
+	text-decoration-thickness: 1px;
+	text-decoration-color: var(--vscode-editorGutter-deletedBackground);
+	color: var(--vscode-gitDecoration-deletedResourceForeground);
+}
