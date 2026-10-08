@@ -65,27 +65,7 @@
         "agentReview.agent.referenceFormat": {
           "type": "string",
           "default": "@${relativePath}:${range}",
-          "markdownDescription": "Text sent to the agent terminal or chat by **Send Selection to Agent** (`Ctrl/Cmd+L`). Placeholders: `${relativePath}`, `${absolutePath}`, `${range}` (`L42-58`, or `L42` for one line), `${startLine}`, `${endLine}`."
-        },
-        "agentReview.agent.includeSelectedText": {
-          "type": "boolean",
-          "default": false,
-          "description": "Also send the selected text (as a bracketed paste after the reference). Agent terminal only."
-        },
-        "agentReview.agent.target": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "terminal",
-            "chat"
-          ],
-          "enumDescriptions": [
-            "Whichever of the agent terminal and the agent chat you used last.",
-            "Always the agent terminal.",
-            "Always the agent chat's input."
-          ],
-          "default": "auto",
-          "markdownDescription": "Where **Send Selection to Agent** (`Ctrl/Cmd+L`) puts the reference."
+          "markdownDescription": "Text that **Send Selection to Agent** (`Ctrl/Cmd+L`) inserts into the agent chat's input. Placeholders: `${relativePath}`, `${absolutePath}`, `${range}` (`L42-58`, or `L42` for one line), `${startLine}`, `${endLine}`."
         }
       }
     },
