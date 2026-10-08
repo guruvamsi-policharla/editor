@@ -248,13 +248,6 @@
           "when": "resourceScheme == agent-review-deleted"
         }
       ],
-      "editor/context": [
-        {
-          "command": "agentReview.addToChat",
-          "when": "editorTextFocus && editorHasSelection",
-          "group": "1_chat@1"
-        }
-      ],
       "editor/title": [
         {
           "command": "agentReview.keepDeletion",
