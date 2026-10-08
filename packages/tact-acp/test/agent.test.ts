@@ -158,6 +158,21 @@ describe('TactAgent on a fake tact (hidden pty, web API)', () => {
 		await expect(a.prompt({ sessionId, prompt: [{ type: 'text', text: 'fail' }] })).rejects.toMatchObject({ message: expect.stringContaining('HTTP 401') });
 	});
 
+	it('a tact that exited is started again (--resume) on the next prompt', async () => {
+		const a = agent();
+		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
+		await a.prompt({ sessionId, prompt: [{ type: 'text', text: 'one' }] });
+		const pid = Number(readdirSync(join(home, 'web', 'instances'))[0]!.replace('.json', ''));
+		process.kill(pid, 'SIGTERM');
+		while (readdirSync(join(home, 'web', 'instances')).length) {
+			await new Promise(r => setTimeout(r, 20));
+		}
+		await new Promise(r => setTimeout(r, 100));
+		updates = [];
+		expect((await a.prompt({ sessionId, prompt: [{ type: 'text', text: 'two' }] })).stopReason).toBe('end_turn');
+		expect(text('agent_message_chunk')).toBe('echo: two');
+	});
+
 	it('not signed in: tact exits at start, reported as auth required', async () => {
 		const a = agent({ FAKE_TACT_NOCREDS: '1' });
 		await expect(a.newSession({ cwd: ws, mcpServers: [] })).rejects.toMatchObject({ code: -32000 });

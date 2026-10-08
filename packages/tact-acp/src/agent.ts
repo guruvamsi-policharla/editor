@@ -139,7 +139,7 @@ class TactSession {
 
 	async prompt(text: string): Promise<TurnEnd> {
 		if (!this.alive) {
-			throw acp.RequestError.internalError(undefined, 'tact is no longer running for this chat; send your message again to restart it');
+			throw failure('tact is no longer running for this chat');
 		}
 		this.mapper.baseline = this.mapper.lastId;
 		const rev = new Promise<number>(resolve => this.drafts.push({ text, resolve }));
@@ -166,6 +166,8 @@ class TactSession {
 
 export class TactAgent {
 	private readonly sessions = new Map<string, TactSession>();
+	/** session id → its workspace (to restart a tact that exited) */
+	private readonly cwds = new Map<string, string>();
 	private checked = false;
 
 	constructor(private readonly options: TactAgentOptions, private readonly notify: (sessionId: string, update: acp.SessionUpdate) => Promise<void>) { }
@@ -182,7 +184,7 @@ export class TactAgent {
 	private async start(cwd: string, resume: string | undefined, replay: boolean): Promise<TactSession> {
 		if (!this.checked && !this.options.skipCheck) {
 			if (!hasWebApi(this.options.tact)) {
-				throw acp.RequestError.internalError(undefined, `This tact (${this.options.tact}) has no web API, which the editor talks to. It's on tact's main branch after v0.8.3: install it with \`cargo install --locked --git https://github.com/clabby/tact tact\`, or \`tact update\` once a release has it.`);
+				throw failure(`This tact (${this.options.tact}) has no web API, which the editor talks to. It's on tact's main branch after v0.8.3: install it with \`cargo install --locked --git https://github.com/clabby/tact tact\`, or \`tact update\` once a release has it.`);
 			}
 			this.checked = true;
 		}
@@ -193,7 +195,7 @@ export class TactAgent {
 			if (e instanceof TactStartError && e.kind === 'auth') {
 				throw acp.RequestError.authRequired(undefined, e.message);
 			}
-			throw acp.RequestError.internalError(undefined, e instanceof Error ? e.message : String(e));
+			throw failure(e instanceof Error ? e.message : String(e));
 		}
 		const web = new TactWeb(instance.port, instance.token);
 		let sessionId = resume;
@@ -218,6 +220,7 @@ export class TactAgent {
 			}
 		}
 		this.sessions.set(sessionId, session);
+		this.cwds.set(sessionId, cwd);
 		return session;
 	}
 
@@ -247,10 +250,15 @@ export class TactAgent {
 	}
 
 	async prompt(p: acp.PromptRequest): Promise<acp.PromptResponse> {
-		const s = this.session(p.sessionId);
+		let s = this.session(p.sessionId);
+		const cwd = this.cwds.get(p.sessionId);
+		if (!s.alive && cwd) {
+			// tact exited (crashed, or was closed): start it again on the same session.
+			s = await this.start(cwd, p.sessionId, false);
+		}
 		const end = await s.prompt(promptText(p.prompt));
 		if (end.kind === 'error') {
-			throw acp.RequestError.internalError(undefined, end.message);
+			throw failure(end.message);
 		}
 		return { stopReason: end.kind === 'interrupted' ? 'cancelled' : 'end_turn' };
 	}
@@ -287,6 +295,11 @@ function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> 
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	return Promise.race([
 		p.finally(() => clearTimeout(timer)),
-		new Promise<never>((_, reject) => { timer = setTimeout(() => reject(acp.RequestError.internalError(undefined, message)), ms); }),
+		new Promise<never>((_, reject) => { timer = setTimeout(() => reject(failure(message)), ms); }),
 	]);
+}
+
+/** An error whose message is just tact's (no "Internal error:" prefix). */
+function failure(message: string): acp.RequestError {
+	return new acp.RequestError(-32603, message);
 }
