@@ -1,5 +1,5 @@
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
-index 2e43b458..0441ad03 100644
+index 2e43b458..bf106ea7 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
 +++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
 @@ -17,12 +17,13 @@ import { AccessibleDiffViewer, IAccessibleDiffViewerModel } from '../../../../..
@@ -356,7 +356,23 @@ index 2e43b458..0441ad03 100644
  
  			} else if (e.target.position) {
  				const { position } = e.target;
-@@ -699,7 +883,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -642,7 +826,14 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+ 		if (!this._editor.hasModel()) {
+ 			return undefined;
+ 		}
+-		const lineRelativeTop = this._editor.getTopForLineNumber(this._editor.getPosition().lineNumber) - this._editor.getScrollTop();
++		// The change the cursor is in. Its Keep/Undo may be further away than another change's: agent review puts them
++		// at the end of the change, which for a long wrapped paragraph is several rows below the cursor.
++		const lineNumber = this._editor.getPosition().lineNumber;
++		const containing = this._diffHunkWidgets.find(w => w.modifiedLines.contains(lineNumber));
++		if (containing) {
++			return containing;
++		}
++		const lineRelativeTop = this._editor.getTopForLineNumber(lineNumber) - this._editor.getScrollTop();
+ 		let closestWidget: DiffHunkWidget | undefined;
+ 		let closestDistance = Number.MAX_VALUE;
+ 
+@@ -699,7 +890,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  				original: { resource: this._entry.originalURI },
  				modified: { resource: this._entry.modifiedURI },
  				options: { selection },
@@ -365,7 +381,7 @@ index 2e43b458..0441ad03 100644
  			});
  
  			if (diffEditor && diffEditor.input) {
-@@ -735,6 +919,54 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -735,6 +926,54 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  	}
  }
  
@@ -420,7 +436,7 @@ index 2e43b458..0441ad03 100644
  class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  
  	private static _idPool = 0;
-@@ -745,6 +977,19 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+@@ -745,6 +984,19 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  	private _position: IOverlayWidgetPosition | undefined;
  	private _lastStartLineNumber: number | undefined;
  	private _removed: boolean = false;
@@ -440,7 +456,7 @@ index 2e43b458..0441ad03 100644
  
  	constructor(
  		private readonly _editor: ICodeEditor,
-@@ -806,13 +1051,87 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+@@ -806,13 +1058,87 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  		return this._id;
  	}
  
@@ -529,6 +545,17 @@ index 2e43b458..0441ad03 100644
  			stackOrdinal: 1,
  			preference: {
  				top: this._editor.getTopForLineNumber(startLineNumber) - scrollTop - (lineHeight * this._lineDelta),
+@@ -853,6 +1179,10 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+ 		return this._lastStartLineNumber;
+ 	}
+ 
++	get modifiedLines(): LineRange {
++		return this._change.modified;
++	}
++
+ 	// ---
+ 
+ 	async reject(): Promise<boolean> {
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts
 index 01fe8016..13568ccd 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingEditorActions.ts

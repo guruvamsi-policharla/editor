@@ -1061,10 +1061,10 @@ index 00000000..f289a598
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
 new file mode 100644
-index 00000000..b38ee480
+index 00000000..5eea8955
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
-@@ -0,0 +1,583 @@
+@@ -0,0 +1,597 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -1363,6 +1363,20 @@ index 00000000..b38ee480
 +		assert.ok(position && typeof position === 'object');
 +		assert.ok(position.left > 50 + 'b TWO'.length * 7, 'right of the text');
 +		assert.ok(position.top < editor.getTopForLineNumber(3), 'on line 2, not below it');
++	});
++
++	test('Ctrl+Y/Ctrl+N act on the change the cursor is in, even when another change\'s Keep/Undo is closer', async () => {
++		// The toolbar sits at the end of a hunk: for a hunk of many rows (a wrapped paragraph, several lines) the
++		// previous hunk's toolbar can be nearer to the cursor than its own.
++		model.setValue('ONE\ntwo\nA\nB\nC\nD\nE\nF\nnine\n');
++		const { entry, integration } = await showPending('one\ntwo\na\nb\nc\nd\ne\nf\nnine\n');
++		assert.strictEqual(entry.diffInfo.get().changes.length, 2);
++		editor.setPosition({ lineNumber: 3, column: 1 });
++		await integration.acceptNearestChange();
++		assert.deepStrictEqual(entry.diffInfo.get().changes.map(c => c.modified.toString()), ['[1,2)'], 'the second change was kept');
++		editor.setPosition({ lineNumber: 1, column: 1 });
++		await integration.rejectNearestChange();
++		assert.strictEqual(model.getLineContent(1), 'one');
 +	});
 +
 +	test('Ctrl+Y/Ctrl+N context: "cursor in a change" follows the file the editor shows, not the last integration created', async () => {

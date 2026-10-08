@@ -298,6 +298,20 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.ok(position.top < editor.getTopForLineNumber(3), 'on line 2, not below it');
 	});
 
+	test('Ctrl+Y/Ctrl+N act on the change the cursor is in, even when another change\'s Keep/Undo is closer', async () => {
+		// The toolbar sits at the end of a hunk: for a hunk of many rows (a wrapped paragraph, several lines) the
+		// previous hunk's toolbar can be nearer to the cursor than its own.
+		model.setValue('ONE\ntwo\nA\nB\nC\nD\nE\nF\nnine\n');
+		const { entry, integration } = await showPending('one\ntwo\na\nb\nc\nd\ne\nf\nnine\n');
+		assert.strictEqual(entry.diffInfo.get().changes.length, 2);
+		editor.setPosition({ lineNumber: 3, column: 1 });
+		await integration.acceptNearestChange();
+		assert.deepStrictEqual(entry.diffInfo.get().changes.map(c => c.modified.toString()), ['[1,2)'], 'the second change was kept');
+		editor.setPosition({ lineNumber: 1, column: 1 });
+		await integration.rejectNearestChange();
+		assert.strictEqual(model.getLineContent(1), 'one');
+	});
+
 	test('Ctrl+Y/Ctrl+N context: "cursor in a change" follows the file the editor shows, not the last integration created', async () => {
 		// A real (scoped) context key service: the test default (MockContextKeyService) has no scopes.
 		const contextKeys = store.add(new ContextKeyService(new TestConfigurationService()));
