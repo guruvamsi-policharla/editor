@@ -446,6 +446,8 @@ export class HarnessChat implements vscode.Disposable {
 				root: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
 				exists: existsSync,
 			});
+			const links = blocks.filter(b => b.type === 'resource_link').map(b => (b.type === 'resource_link' ? b.name : ''));
+			this.env.log.info(`[${this.profile.id}] prompt: text${links.length ? ` + resource_link ${links.join(', ')}` : ''}`);
 			const result = await session.prompt(blocks);
 			writer.write(renderer.finish());
 			// The contract guard, in the app too: the agent must never call fs/* or terminal/* (we don't serve them).
