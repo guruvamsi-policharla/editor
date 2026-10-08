@@ -2,6 +2,10 @@
 
 The ACP chat panel ([PLAN.md](../../PLAN.md) §5.4 and Phase 4, design in [docs/acp-design.md](../../docs/acp-design.md)). It drives VS Code's native chat from a built-in extension, with no core patch, on top of [`@editor/acp-client`](../../packages/acp-client). Chats open in the secondary side bar (Agent Chat: New Claude Code Chat / New Codex Chat) or as editor tabs (New Agent Chat in Editor).
 
+![Claude Code in the chat: the edit is reviewed inline with Keep/Undo](../../docs/img/acp/claude-edit-inline.png)
+
+More: [permission prompt](../../docs/img/acp/permission-prompt.png), [mode picker](../../docs/img/acp/mode-picker.png), [model picker](../../docs/img/acp/model-picker.png), [Cmd/Ctrl+L reference](../../docs/img/acp/cmdl-reference.png), [Codex not signed in](../../docs/img/acp/codex-signin-chat.png) ([picker](../../docs/img/acp/codex-signin-picker.png)), ["always" not shown as an agent edit](../../docs/img/acp/settings-local-ignored.png).
+
 **The harness edits files itself.** The client advertises no `fs` or `terminal` capability, and nothing here emits chat edit parts, so the chat's own editing session stays empty and agent-review shows every edit inline with Keep/Undo.
 
 | Piece | How |

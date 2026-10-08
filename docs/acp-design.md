@@ -1,6 +1,6 @@
 # ACP connector: research and design
 
-*Prepared Oct 8, 2026 (PT) for `guruvamsi-policharla/editor`. Status: approved; phase A0 (spike) in progress. PLAN.md §5.4 and Phase 4 summarize it.*
+*Prepared Oct 8, 2026 (PT) for `guruvamsi-policharla/editor`. Status: approved; A0 (spike) done, A and B built as an MVP (`packages/acp-client`, `extensions/agent-chat`). PLAN.md §5.4 and Phase 4 summarize it. Where the build differs from this doc: the spike report (`kind: 'permissions'` unused, mode is a normal picker; models are the native model picker; no core patch) and `extensions/agent-chat/README.md`.*
 
 **Decisions (Oct 8, 2026), answering §10:** Claude starts in Accept edits with prompts for commands; Codex starts in Workspace access (not Auto review); Claude's Bypass is hidden and Codex's Full access is behind a confirmation; the chat lives in the secondary side bar (right), with sessions also openable as editor tabs; Cmd/Ctrl+L goes to whichever of chat/terminal was used last (configurable); the user's installed `claude`/`codex` are used when found on PATH, else pinned adapters are downloaded on first use; a webview fallback is acceptable if the native chat needs invasive patches; the PLAN.md wording changes are approved.
 
