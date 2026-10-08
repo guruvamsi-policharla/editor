@@ -1,0 +1,36 @@
+{
+  "name": "@editor/acp-client",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Editor-independent ACP client (spike, phase A0): launch an ACP adapter without fs/terminal client capabilities and talk to it.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:contract": "RUN_ACP_CONTRACT=1 vitest run test/contract"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.3",
+    "@editor/engine": "*"
+  }
+}
