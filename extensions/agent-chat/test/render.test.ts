@@ -1,14 +1,15 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { SessionView, type acp } from '@editor/acp-client';
-import { fileLink, toolCard, TurnRenderer, type RenderOp } from '../src/render.js';
+import { fileLink, permissionButtons, toolCard, TurnRenderer, type RenderOp } from '../src/render.js';
 
 const turns = JSON.parse(readFileSync(new URL('../../../packages/acp-client/test/fixtures/claude-0.87.0-turns.json', import.meta.url), 'utf8')) as { updates: acp.SessionUpdate[] };
 
 function replay(updates: acp.SessionUpdate[]): RenderOp[] {
 	const view = new SessionView();
 	const renderer = new TurnRenderer('t');
-	return [...updates.flatMap(u => renderer.render(view.apply(u))), ...renderer.finish()];
+	// The recorded run's last turn was cancelled.
+	return [...updates.flatMap(u => renderer.render(view.apply(u))), ...renderer.finish('stopped')];
 }
 
 describe('turn rendering (recorded Claude run)', () => {
@@ -38,8 +39,9 @@ describe('turn rendering (recorded Claude run)', () => {
 		const bash = last(ids[2]!);
 		expect(bash.terminal).toEqual({ command: `python3 -c "open('ran.txt','w').write('x')"`, exitCode: 0 });
 		expect(bash.past).toBe('Write x into ran.txt via Python');
-		// The cancelled command never completes.
-		expect(last(ids[3]!).complete).toBe(false);
+		// The cancelled command never completed; closing the stopped turn says so.
+		expect(cards.filter(c => c.id === ids[3]).at(-2)!.complete).toBe(false);
+		expect(last(ids[3]!)).toMatchObject({ complete: true, past: 'Write x into late.txt via Python (stopped)' });
 	});
 
 	it('agent text is markdown, in order', () => {
@@ -89,5 +91,40 @@ describe('turn rendering', () => {
 	it('a fenced console block is unwrapped into terminal output', () => {
 		const card = toolCard({ id: 'c', title: 'ls', kind: 'execute', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: '```console\na.txt\nb.txt\n```' } }], locations: [], rawInput: { command: 'ls' } });
 		expect(card.terminal?.output).toBe('a.txt\nb.txt');
+	});
+});
+
+describe('closing a turn', () => {
+	it('a stopped turn closes the cards that never completed (no endless spinner)', () => {
+		const view = new SessionView();
+		const renderer = new TurnRenderer('t');
+		renderer.render(view.apply({ sessionUpdate: 'tool_call', toolCallId: 'a', title: 'x', kind: 'execute', status: 'pending', rawInput: { command: 'python3 x.py', description: 'Run x' } }));
+		renderer.render(view.apply({ sessionUpdate: 'tool_call', toolCallId: 'b', title: 'Read', kind: 'read', status: 'completed', locations: [{ path: '/w/a' }] }));
+		const ops = renderer.finish('stopped');
+		expect(ops).toEqual([{ op: 'tool', card: expect.objectContaining({ id: 'a', complete: true, past: 'Run x (stopped)' }) }]);
+		expect(renderer.finish('stopped')).toEqual([]);
+	});
+
+	it('a card without a label says Interrupted after a crash', () => {
+		const view = new SessionView();
+		const renderer = new TurnRenderer('t');
+		renderer.render(view.apply({ sessionUpdate: 'tool_call', toolCallId: 'a', title: 'ls', kind: 'execute', status: 'in_progress', rawInput: { command: 'ls' } }));
+		expect(renderer.finish('interrupted')[0]).toMatchObject({ card: { complete: true, past: 'Interrupted' } });
+	});
+});
+
+describe('permission buttons', () => {
+	it('shortens a long "always" label, keeps where it is saved, and keeps labels unique', () => {
+		const long = `Yes, and don't ask again for python3 -c "open('ran.txt','w').write('x')" commands`;
+		const buttons = permissionButtons({ choices: [
+			{ optionId: 'y', label: 'Yes', kind: 'allow_once' },
+			{ optionId: 'n', label: 'No', kind: 'reject_once' },
+			{ optionId: 'a', label: long, kind: 'allow_always', persistent: 'saved to .claude/settings.local.json' },
+			{ optionId: 'n2', label: 'No', kind: 'reject_always' },
+		] });
+		expect(buttons[0]).toBe('Yes');
+		expect(buttons[2]).toMatch(/^Yes, and don't ask again for python3 -c .{1,40}… \(saved to \.claude\/settings\.local\.json\)$/);
+		expect(buttons[2]!.length).toBeLessThan(100);
+		expect(new Set(buttons).size).toBe(4);
 	});
 });

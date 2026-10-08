@@ -4,7 +4,7 @@
 //
 // Review truth stays with the file watcher: an edit card shows the file and the size of the change as
 // information only, never an edit part (agent-review owns Keep/Undo).
-import type { acp, Change, ToolCallView } from '@editor/acp-client';
+import type { acp, Change, PermissionPrompt, ToolCallView } from '@editor/acp-client';
 
 export interface TerminalData {
 	command: string;
@@ -169,6 +169,7 @@ export class TurnRenderer {
 	private thought = 0;
 	private thinking: string | undefined;
 	private readonly shown = new Map<string, string>();
+	private readonly cards = new Map<string, ToolCard>();
 
 	constructor(private readonly turnId: string) { }
 
@@ -203,6 +204,7 @@ export class TurnRenderer {
 				if (this.shown.get(card.id) !== key) {
 					endThinking();
 					this.shown.set(card.id, key);
+					this.cards.set(card.id, card);
 					ops.push({ op: 'tool', card });
 				}
 				break;
@@ -215,8 +217,39 @@ export class TurnRenderer {
 		return ops;
 	}
 
-	/** Ops to close the turn (an open thinking block). */
-	finish(): RenderOp[] {
-		return this.thinking ? [{ op: 'thinkingDone', id: this.thinking }] : [];
+	/**
+	 * Ops to close the turn: an open thinking block, and tool cards that never completed (a stopped or interrupted
+	 * turn), so none keeps spinning.
+	 */
+	finish(how: 'ended' | 'stopped' | 'interrupted' = 'ended'): RenderOp[] {
+		const ops: RenderOp[] = this.thinking ? [{ op: 'thinkingDone', id: this.thinking }] : [];
+		this.thinking = undefined;
+		const note = how === 'stopped' ? 'Stopped' : how === 'interrupted' ? 'Interrupted' : '';
+		for (const card of this.cards.values()) {
+			if (!card.complete) {
+				const past = note ? (card.past ? `${card.past} (${note.toLowerCase()})` : note) : card.past;
+				const closed = { ...card, complete: true, past };
+				this.cards.set(card.id, closed);
+				ops.push({ op: 'tool', card: closed });
+			}
+		}
+		return ops;
 	}
+}
+
+/**
+ * Button labels for a permission prompt, short enough for the confirmation's dropdown (Claude's "always" label
+ * repeats the whole command, which the prompt already shows) and unique, since the answer is matched by label.
+ */
+export function permissionButtons(p: Pick<PermissionPrompt, 'choices'>): string[] {
+	const seen = new Set<string>();
+	return p.choices.map((c, i) => {
+		const label = c.label.length > 60 ? `${c.label.slice(0, 57).trimEnd()}…` : c.label;
+		let text = c.persistent ? `${label} (${c.persistent})` : label;
+		if (seen.has(text)) {
+			text = `${text} [${i + 1}]`;
+		}
+		seen.add(text);
+		return text;
+	});
 }

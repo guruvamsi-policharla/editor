@@ -102,6 +102,7 @@ const connection = acp.agent({ name: 'fake-agent' })
 			return { stopReason: 'end_turn' };
 		}
 		if (text === 'permission') {
+			await update({ sessionUpdate: 'tool_call', toolCallId: 'p1', title: 'rm -rf build', kind: 'execute', status: 'pending', rawInput: { command: 'rm -rf build', description: 'Clean' } });
 			const permission = await client.request(acp.methods.client.session.requestPermission, {
 				sessionId,
 				toolCall: { toolCallId: 'p1', title: 'rm -rf build', kind: 'execute', rawInput: { command: 'rm -rf build', description: 'Clean' } },

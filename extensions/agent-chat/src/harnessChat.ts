@@ -20,7 +20,7 @@ import { changedSelections, groupsFromControls, signInGroup, SIGN_IN_GROUP } fro
 import { loginCommand, resolveLaunch } from './launch.js';
 import { HarnessModels } from './models.js';
 import { promptBlocks, type PromptReference } from './prompt.js';
-import { TurnRenderer } from './render.js';
+import { permissionButtons, TurnRenderer } from './render.js';
 import { StreamWriter } from './stream.js';
 
 const CONFIRM_TOOL = 'vscode_get_confirmation_with_options';
@@ -449,13 +449,13 @@ export class HarnessChat implements vscode.Disposable {
 			const links = blocks.filter(b => b.type === 'resource_link').map(b => (b.type === 'resource_link' ? b.name : ''));
 			this.env.log.info(`[${this.profile.id}] prompt: text${links.length ? ` + resource_link ${links.join(', ')}` : ''}`);
 			const result = await session.prompt(blocks);
-			writer.write(renderer.finish());
+			writer.write(renderer.finish(result.stopReason === 'cancelled' ? 'stopped' : 'ended'));
 			// The contract guard, in the app too: the agent must never call fs/* or terminal/* (we don't serve them).
 			const forbidden = this.client?.supervisor.running?.connection.forbiddenInbound() ?? [];
 			this.env.log[forbidden.length ? 'error' : 'info'](`[${this.profile.id}] turn ended: ${result.stopReason}; fs/terminal requests from the agent: ${forbidden.length ? forbidden.join(', ') : 'none'}`);
 			return this.result(result, stream, session);
 		} catch (e) {
-			writer.write(renderer.finish());
+			writer.write(renderer.finish(token.isCancellationRequested ? 'stopped' : 'interrupted'));
 			if (token.isCancellationRequested) {
 				return {};
 			}
@@ -536,7 +536,7 @@ export class HarnessChat implements vscode.Disposable {
 	}
 
 	private async askPermission(p: PermissionPrompt, signal: AbortSignal, request: vscode.ChatRequest, token: vscode.CancellationToken): Promise<string | undefined> {
-		const buttons = p.choices.map(c => (c.persistent ? `${c.label} (${c.persistent})` : c.label));
+		const buttons = permissionButtons(p);
 		const lines: string[] = [];
 		if (p.command) {
 			lines.push('```sh', p.command, '```');
