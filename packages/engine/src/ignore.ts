@@ -2,7 +2,7 @@
  * Which workspace paths are reviewable.
  *
  * Precedence, lowest to highest (a later decisive match wins, like git):
- *   1. built-in defaults (build dirs, LaTeX artifacts, the build-output PDF next to a .tex)
+ *   1. built-in defaults (build dirs, LaTeX artifacts, the build-output PDF next to a .tex, agent harness state)
  *   2. `.git/info/exclude` of the enclosing repository
  *   3. `.gitignore` files from the workspace root down to the path's directory
  *   4. the user's configured patterns
@@ -39,7 +39,13 @@ export const BUILD_DIR_PATTERNS = [
   'coverage/',
 ];
 
-export const DEFAULT_IGNORE_PATTERNS: readonly string[] = [...BUILD_DIR_PATTERNS, ...LATEX_ARTIFACT_PATTERNS];
+/**
+ * Files agent harnesses write for their own bookkeeping, not as edits for review: Claude Code's "always allow"
+ * answers go to the project's `.claude/settings.local.json` (the ACP chat's permission buttons included).
+ */
+export const AGENT_STATE_PATTERNS = ['**/.claude/settings.local.json'];
+
+export const DEFAULT_IGNORE_PATTERNS: readonly string[] = [...BUILD_DIR_PATTERNS, ...LATEX_ARTIFACT_PATTERNS, ...AGENT_STATE_PATTERNS];
 
 export interface IgnoreOptions {
   /** Respect `.gitignore` files and `.git/info/exclude`. Default true. */

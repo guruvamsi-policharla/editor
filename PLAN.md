@@ -56,7 +56,7 @@ The core. Keep it editor-independent so it can be reused (Zed, Neovim, etc.).
   - For prose, break long lines with a formatter (e.g. one sentence per line) so hunks stay small.
 - **Operations.** Accept/reject hunk, accept/reject file, accept/reject all.
 - **File lifecycle.** Created, deleted, and renamed files are reviewable units (accept = keep the change; reject = delete the created file or restore the deleted/renamed one). A delete followed by a create with identical content is treated as a rename; otherwise they're shown as a separate delete and create. Large and binary files get file-level accept/reject only.
-- **Ignore rules.** Respect `.gitignore`, plus built-in defaults (`node_modules`, build dirs, LaTeX artifacts: `.aux`, `.log`, `.out`, `.toc`, `.bbl`, `.blg`, `.fls`, `.fdb_latexmk`, `.synctex.gz`, and the build-output PDF next to a `.tex` file, e.g. `main.pdf` for `main.tex`), plus a user config list. Other PDFs, such as figures, stay reviewable.
+- **Ignore rules.** Respect `.gitignore`, plus built-in defaults (`node_modules`, build dirs, LaTeX artifacts: `.aux`, `.log`, `.out`, `.toc`, `.bbl`, `.blg`, `.fls`, `.fdb_latexmk`, `.synctex.gz`, and the build-output PDF next to a `.tex` file, e.g. `main.pdf` for `main.tex`), plus Claude Code's `.claude/settings.local.json` (its "always allow" answers), plus a user config list. Other PDFs, such as figures, stay reviewable.
 - **Git operations auto-accept.** Detect git operations and move the baseline to the new state instead of flooding review:
   - Index-only change (e.g. `git add`): accept pending hunks only in the staged files.
   - Any HEAD move (commit, checkout, pull, merge, rebase, reset, stash affecting HEAD): accept all pending hunks workspace-wide as part of the new baseline.

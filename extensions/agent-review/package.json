@@ -37,7 +37,7 @@
             "type": "string"
           },
           "default": [],
-          "description": "Extra gitignore-style patterns to exclude from review (on top of .gitignore and the built-in defaults: node_modules, build dirs, LaTeX artifacts)."
+          "description": "Extra gitignore-style patterns to exclude from review (on top of .gitignore and the built-in defaults: node_modules, build dirs, LaTeX artifacts, Claude Code's .claude/settings.local.json)."
         },
         "agentReview.trace": {
           "type": "boolean",
