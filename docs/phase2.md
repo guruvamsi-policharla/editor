@@ -21,6 +21,16 @@ All screenshots come from the packaged `VSCode-linux-x64/editor` built by `fork/
 | [`after-restart.png`](img/phase2/after-restart.png) | The app is quit and restarted, and the same pending hunk and file list come back (the baselines persist in workspace storage). Changes made while the app was closed are picked up too (integration test) |
 | [`agent-terminal.png`](img/phase2/agent-terminal.png) | **Ctrl+L** with lines selected opens the agent terminal, docked to the right of the editor, and types `@paper/main.tex:L20-21` into it. For the screenshot the agent command is `cat`; the default is `tact` |
 
+### polish-1 (packaged build, the generated 739-line paper in `/workspace/cc/polish-1-smoke`)
+
+| Screenshot | What it shows |
+|---|---|
+| [`before-prose.png`](img/polish-1/before-prose.png) | **Before** (phase-2-finish build, word wrap on): a two-phrase edit shows the whole paragraph in red and again in green, the red rows are cut off at the edge (no wrap), and every hunk has a Keep/Undo row |
+| [`after-prose.png`](img/polish-1/after-prose.png) | **After**, same edits: the reword and the equation change are track changes in the line, the deleted paragraph wraps, Keep/Undo sit at the end of each hunk's last row |
+| [`after-rename-light.png`](img/polish-1/after-rename-light.png) | A rename `x`→`y` across the paper in the light theme: one struck red `x` and a green `y` per occurrence, no extra rows; the long equation line gets its own Keep/Undo row |
+| [`after-narrow-agent-terminal.png`](img/polish-1/after-narrow-agent-terminal.png) | Narrow editor next to the Agent Terminal after **Ctrl+L** (`@sections/prelims.tex:L20`) |
+| [`after-ctrlz-undo.png`](img/polish-1/after-ctrlz-undo.png) | **Ctrl+Z** after Undo on the equation: the agent's text is back, pending, and on disk (clean tab) |
+
 Also checked by hand in the packaged app:
 
 - The ↑/↓ overlay arrows move between hunks and files with chat disabled.
@@ -103,9 +113,9 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 
 | Patch | Lines | Upstream files touched |
 |---|---|---|
-| `90-diff-preserve-short-matching-lines.patch` | +27 −1 (diff option + 2 unit tests) | `linesDiffComputer.ts`, `documentDiffProvider.ts`, `defaultLinesDiffComputer.ts`, the diff test file |
-| `91-chat-editing-review-hooks.patch` | +113 −30 | `chatEditingTextModelChangeService.ts` (C3 predicate gets the event; public `extendToSubwords` / `preserveShortMatchingLines`), `chatEditingEditorActions.ts` (C5 precondition; agent-review titles and the "Agent Review" category; 3 classes exported for tests), `chatEditingCodeEditorIntegration.ts` (the hunk toolbar's own row, opt-in via `hunkToolbarRows`), `chatEditingCodeEditorIntegration.ts` / `chatEditingNotebookEditorIntegration.ts` (diff title; the cursor-in-change context key per editor), `chatEditingServiceImpl.ts` (explorer tooltip) |
-| `92-agent-review.patch` | +1568 (incl. blank lines): new `contrib/agentReview/` (entry, service, contribution, save-attribution participants, 3-way merge, CSS, 23 tests in 3 files) + 1 import line in `workbench.common.main.ts` | `workbench.common.main.ts` (1 line) |
+| `90-diff-preserve-short-matching-lines.patch` | +32 −1 (diff option + 2 unit tests) | `linesDiffComputer.ts`, `documentDiffProvider.ts`, `defaultLinesDiffComputer.ts`, the diff test file |
+| `91-chat-editing-review-hooks.patch` | +310 −36 | `chatEditingTextModelChangeService.ts` (C3 predicate gets the event; public `extendToSubwords` / `preserveShortMatchingLines`), `chatEditingEditorActions.ts` (C5 precondition; agent-review titles and the "Agent Review" category; 3 classes exported for tests), `chatEditingCodeEditorIntegration.ts` (hunk toolbar at the end of the last row or in its own row, opt-in via `hunkToolbarRows`; track changes, opt-in via `trackChanges`; deleted lines wrap), `chatEditingCodeEditorIntegration.ts` / `chatEditingNotebookEditorIntegration.ts` (diff title; the cursor-in-change context key per editor), `chatEditingServiceImpl.ts` (explorer tooltip) |
+| `92-agent-review.patch` | +1812 (incl. blank lines): new `contrib/agentReview/` (entry, service, contribution, save-attribution participants, 3-way merge, CSS, 28 tests in 3 files) + 1 import line in `workbench.common.main.ts` | `workbench.common.main.ts` (1 line) |
 | `93-default-layout.patch` | +2 −2 | Secondary side bar hidden by default (`workbench.contribution.ts`, `themeMainServiceImpl.ts`) |
 
 ## Engine additions
@@ -139,8 +149,8 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 | Suite | Count | Command |
 |---|---|---|
 | Engine (vitest) | 162 (14 files) | `npm test -w @editor/engine` |
-| Extension integration (vitest, real engine on temp dirs, fake core / fake terminal) | 35 | `npm test -w agent-review` |
-| Core `contrib/agentReview` (Electron) | 23 | `fork/scripts/test-core.sh` |
+| Extension integration (vitest, real engine on temp dirs, fake core / fake terminal) | 36 | `npm test -w agent-review` |
+| Core `contrib/agentReview` (Electron) | 28 | `fork/scripts/test-core.sh` |
 | Upstream chat-editing regression (Electron) | 49 | `fork/scripts/test-core.sh` |
 | Upstream diff + fixtures (node, incl. 2 new) | 125 | `fork/scripts/test-core.sh` |
 | Core typecheck of the patched tree (tsgo) | 0 errors | `npm run typecheck-client` (CI `patches` job) |
