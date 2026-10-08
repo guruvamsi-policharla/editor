@@ -138,7 +138,10 @@
     ],
     "configurationDefaults": {
       "chat.editor.localAgent.enabled": false,
-      "chat.saveBeforeSend": false
+      "chat.saveBeforeSend": false,
+      "chat.implicitContext.enabled": {
+        "panel": "never"
+      }
     },
     "commands": [
       {

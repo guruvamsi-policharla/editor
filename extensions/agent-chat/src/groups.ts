@@ -21,14 +21,18 @@ export const SIGN_IN_GROUP = '_signin';
 export function groupsFromControls(controls: readonly ConfigControl[], icon?: IconFactory, previous?: Pick<vscode.ChatSessionInputState, 'groups'>): vscode.ChatSessionProviderOptionGroup[] {
 	return controls.filter(c => c.placement === 'picker').map(c => {
 		const nextTurn = c.timing === 'next-turn';
+		const iconId = c.category ? CATEGORY_ICON[c.category] : undefined;
 		const items: vscode.ChatSessionProviderOptionItem[] = c.choices.map(ch => ({
 			id: ch.id,
 			name: ch.dangerous ? `${ch.name} ⚠` : ch.name,
 			...(ch.description || nextTurn ? { description: [ch.description, nextTurn ? NEXT_TURN : undefined].filter(Boolean).join(' · ') } : {}),
 			...(c.plan === ch.id ? { slashCommand: 'plan' } : {}),
+			// The footer shows the selected item's icon and name, not the group's: each choice carries its group's icon,
+			// so a bare "Default" or "Off" still says what it sets (effort's lightbulb, fast mode's bolt; the group's
+			// name is the tooltip). Prefixing the group's name ("Effort: Default") didn't fit the side bar's width.
+			...(icon && iconId ? { icon: icon(iconId) } : {}),
 		}));
 		const wanted = previous?.groups.find(g => g.id === c.id)?.selected?.id ?? c.current;
-		const iconId = c.category ? CATEGORY_ICON[c.category] : undefined;
 		return {
 			id: c.id,
 			name: c.name,
@@ -67,4 +71,19 @@ export function changedSelections(groups: readonly vscode.ChatSessionProviderOpt
 		}
 	}
 	return out;
+}
+
+/**
+ * The harness's model choices as the picker shows them. A "Default (recommended)" choice whose description is the
+ * model it stands for (Claude Code: "Opus 5.5") is shown as that model, "Opus 5.5 (default)": the picker's label is
+ * the selected choice's name, and "Default" didn't say which model a chat would use.
+ */
+export function modelChoices(choices: readonly { id: string; name: string; description?: string }[]): { id: string; name: string; description?: string }[] {
+	return choices.map(c => {
+		const model = c.description?.trim();
+		if (!/^default\b/i.test(c.name) || !model || model.split(/\s+/).length > 3 || /^default\b/i.test(model)) {
+			return { ...c };
+		}
+		return { id: c.id, name: `${model} (default)`, description: `${c.name}: ${model}` };
+	});
 }

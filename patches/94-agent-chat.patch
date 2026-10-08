@@ -92,10 +92,24 @@ index 550b01e7..1632a19e 100644
  
  		let resolver = this.resolvers.get(provider);
 diff --git a/src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts b/src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts
-index 6ba765d1..71ba5ea8 100644
+index 6ba765d1..051bd5b8 100644
 --- a/src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts
 +++ b/src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts
-@@ -4051,10 +4051,12 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
+@@ -1109,6 +1109,13 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
+ 			if (reconcileSelection) {
+ 				this._modelSelectionController.reconcileModelListChange(models);
+ 			}
++			// Agent chat: a harness re-publishes its models under the same ids with their real names once it has started
++			// (a placeholder "Default" becomes "Opus 5.5 (default)"). Show the selected one by its new name.
++			const current = this._currentLanguageModel.get();
++			const renamed = current && models.find(m => m.identifier === current.identifier && m.metadata.name !== current.metadata.name);
++			if (renamed) {
++				this._applyProgrammaticLanguageModel(renamed);
++			}
+ 			// The available-model set changed: re-evaluate whether sending is
+ 			// possible (a `requiresCustomModels` session may now have, or have
+ 			// lost, its models).
+@@ -4051,10 +4058,12 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
  	 * The attachments that are rendered as pills in the input. Agent-host
  	 * completion entries (skills/commands) live in the model so their `_meta`
  	 * reaches the outgoing message, but they are shown as inline decorations
@@ -201,3 +215,34 @@ index 8815d77a..84f438a8 100644
  
  // Copilot Voice
  import './contrib/agentsVoice/browser/agentsVoice.contribution.js';
+diff --git a/src/vs/workbench/contrib/chat/browser/widget/input/editor/chatInputCompletions.ts b/src/vs/workbench/contrib/chat/browser/widget/input/editor/chatInputCompletions.ts
+index b546c659..76f9581b 100644
+--- a/src/vs/workbench/contrib/chat/browser/widget/input/editor/chatInputCompletions.ts
++++ b/src/vs/workbench/contrib/chat/browser/widget/input/editor/chatInputCompletions.ts
+@@ -148,6 +148,12 @@ class SlashCommandCompletions extends Disposable {
+ 							if (!matchesSessionType(c.sessionTypes, sessionType)) {
+ 								return false;
+ 							}
++							// Agent chat: a session type that lists its own commands (an external harness's, e.g. Claude Code's
++							// /compact) offers those and the ones registered for it. The built-in chat's own commands
++							// (/vscode-pet, /models, /debug, /clear, ...) don't apply to a harness that runs outside the editor.
++							if (c.sessionTypes === undefined && sessionType && chatSessionsService.getChatSessionContribution(sessionType)?.commands?.length) {
++								return false;
++							}
+ 							if (!widget.lockedAgentId) {
+ 								return true;
+ 							}
+diff --git a/src/vs/workbench/contrib/chat/browser/widget/chatListRenderer.ts b/src/vs/workbench/contrib/chat/browser/widget/chatListRenderer.ts
+index 6502863c..ac6ebfe4 100644
+--- a/src/vs/workbench/contrib/chat/browser/widget/chatListRenderer.ts
++++ b/src/vs/workbench/contrib/chat/browser/widget/chatListRenderer.ts
+@@ -2089,7 +2089,8 @@ export class ChatListItemRenderer extends Disposable implements ITreeRenderer<Ch
+ 		let content: IChatRendererContent[] = [];
+ 		const explicitFileOrImageVariables = element.variables.filter(isExplicitFileOrImageVariableEntry);
+ 		const explicitImageVariables = explicitFileOrImageVariables.filter(variable => variable.kind === 'image');
+-		const explicitFileOrDirectoryVariables = element.variables.filter(variable => variable.kind === 'file' || variable.kind === 'directory' || isPasteVariableEntry(variable));
++		// The agent chat's Cmd/Ctrl+L references are pills in the request text already: no card above it as well.
++		const explicitFileOrDirectoryVariables = element.variables.filter(variable => (variable.kind === 'file' || variable.kind === 'directory' || isPasteVariableEntry(variable)) && !(variable.range && variable.id.startsWith('agentChat.reference:')));
+ 		const otherVariables = element.variables.filter(variable => !isExplicitFileOrImageVariableEntry(variable) && !isPasteVariableEntry(variable));
+ 		const isStickyAndEditing = !element.confirmation && isStickyScrollRow && element.id === this.viewModel?.editing?.id;
+ 		if (!element.confirmation && !isStickyAndEditing) {

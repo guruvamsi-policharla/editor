@@ -9,4 +9,8 @@ describe('setting defaults', () => {
 	it('sending a message saves nothing: the user\'s unsaved edits stay theirs (an agent write under them is a conflict to merge, #18)', () => {
 		expect(defaults['chat.saveBeforeSend']).toBe(false);
 	});
+
+	it('the editor\'s selection isn\'t attached by itself: a new chat starts clean, and Cmd/Ctrl+L is the way to reference lines', () => {
+		expect(defaults['chat.implicitContext.enabled']).toEqual({ panel: 'never' });
+	});
 });

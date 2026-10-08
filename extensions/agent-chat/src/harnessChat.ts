@@ -22,7 +22,7 @@ import {
 	isAuthRequired, isDangerous, PermissionBroker, withOverride,
 	type AcpSession, type acp, type AgentStatus, type ConfigControl, type HarnessProfile, type PermissionPrompt, type ProfileOverride,
 } from '@editor/acp-client';
-import { changedSelections, groupsFromControls, signInGroup, SIGN_IN_GROUP } from './groups.js';
+import { changedSelections, groupsFromControls, modelChoices, signInGroup, SIGN_IN_GROUP } from './groups.js';
 import type { ChatEntry, ChatHistory } from './history.js';
 import { loginCommand, resolveLaunch } from './launch.js';
 import { HarnessModels } from './models.js';
@@ -406,7 +406,7 @@ export class HarnessChat implements vscode.Disposable {
 	private publishModels(session?: AcpSession): void {
 		const model = this.controlsFor(session).find(c => c.placement === 'model');
 		if (model) {
-			this.env.models.set(this.type, model.choices.map(c => ({ id: c.id, name: c.name, ...(c.description ? { description: c.description } : {}) })), model.current);
+			this.env.models.set(this.type, modelChoices(model.choices.map(c => ({ id: c.id, name: c.name, ...(c.description ? { description: c.description } : {}) }))), model.current);
 		} else {
 			this.env.models.set(this.type, [{ ...this.profile.placeholderModel }], this.profile.placeholderModel.id);
 		}
@@ -577,14 +577,17 @@ export class HarnessChat implements vscode.Disposable {
 			item.status = vscode.ChatSessionStatus.InProgress;
 			this.controller.items.add(item);
 		}
+		/** A warning shown before the turn starts (repeated if the waiting line is cleared). */
+		let notice: string | undefined;
 		try {
 			const { recovery } = await session.ensureLive();
 			if (recovery === 'resumed' && !firstMessage) {
 				stream.progress(`Reconnected to ${this.label}.`);
 			} else if (recovery === 'new') {
-				stream.warning(saved && firstMessage
+				notice = saved && firstMessage
 					? `${this.label} couldn't reopen the earlier session, so this chat continues in a new one: earlier messages aren't in its context.`
-					: `${this.label} restarted, and this chat continues in a new session: earlier messages aren't in its context.`);
+					: `${this.label} restarted, and this chat continues in a new session: earlier messages aren't in its context.`;
+				stream.warning(notice);
 			}
 
 			// Pickers chosen before the first message (carried over from the untitled chat), then the model picker.
@@ -609,13 +612,14 @@ export class HarnessChat implements vscode.Disposable {
 			}
 
 			// One agent edits at a time: wait while another chat's turn runs (plan mode never waits).
+			let waitedFor: string | undefined;
 			lease = await this.env.scheduler.acquire({ chat: key, label: `${this.label} (“${item?.label ?? 'chat'}”)` }, {
 				readOnly: this.readOnly(session),
 				signal: stop.signal,
 				onWait: (id, blockers) => {
 					const who = blockers.map(b => b.label).join(', ');
+					waitedFor = who;
 					this.env.log.info(`[${this.profile.id}] waiting for ${who}`);
-					// The line stays in the chat; the spinner below it goes once the turn starts.
 					stream.markdown(`Another chat is working in this workspace: **${who}**. This message starts when it's done, so the two agents don't edit the same files at once.\n\n`);
 					stream.button({ command: 'agentChat.runNow', title: 'Run now', arguments: [id] });
 					stream.progress(`Waiting for ${who} to finish…`);
@@ -624,6 +628,15 @@ export class HarnessChat implements vscode.Disposable {
 			if (!lease) {
 				transcript.endTurn(true);
 				return {};
+			}
+			if (waitedFor) {
+				// The waiting line and its Run now button are done once the turn starts (Run now would only say so):
+				// they make way for one line that says what happened.
+				stream.clearToPreviousToolInvocation(vscode.ChatResponseClearToPreviousToolInvocationReason.NoReason);
+				stream.markdown(`*Waited for ${waitedFor}.*\n\n`);
+				if (notice) {
+					stream.warning(notice);
+				}
 			}
 
 			offChange = session.onChange(c => show(renderer.render(c)));
