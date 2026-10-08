@@ -11,7 +11,10 @@ import { equalIgnoringEol, NotPendingError, StaleChangeError, type ChangeEvent, 
 
 export type InlineKind = 'modified' | 'created';
 
-/** The core side of the inline review UI (internal commands `_agentReview.*` in the fork). */
+/**
+ * The core side of the inline review UI (internal commands `_agentReview.*` in the fork). Paths are as VS Code knows
+ * them (see UiPaths); everything else in the controller uses real paths.
+ */
 export interface CoreBridge {
   /** Show `absPath` inline as pending against `baseline` (creates or updates the review entry). */
   setBaseline(absPath: string, baseline: string, kind: InlineKind): Promise<void>;
@@ -87,6 +90,8 @@ export class ReviewController {
     private readonly log: Logger,
     /** Called when an external change hits a file with unsaved edits (never overwritten; the user resolves it). */
     private readonly onConflict?: (absPath: string) => void,
+    /** Paths as VS Code knows them (workspace folders opened through symlinks); used for the bridge and onConflict. */
+    readonly ui: UiPaths = new UiPaths([]),
   ) {
     for (const engine of review.engines.values()) {
       this.subscriptions.push(engine.onDidChange((e) => void this.enqueue(() => this.onEngineChange(engine, e))));
@@ -150,7 +155,7 @@ export class ReviewController {
     const dirty = this.docs.isDirty(f.absPath);
     if (dirty && reason === 'external') {
       this.conflicted.add(f.absPath);
-      this.onConflict?.(f.absPath);
+      this.onConflict?.(this.ui.toUi(f.absPath));
     }
     if (dirty && this.pushed.has(f.absPath)) {
       // The UI shows baseline vs. buffer; moving the baseline under unsaved typing would mislabel it.
@@ -165,7 +170,7 @@ export class ReviewController {
     this.pushed.set(f.absPath, baseline);
     this.deferred.delete(f.absPath);
     try {
-      await this.bridge.setBaseline(f.absPath, baseline, f.kind as InlineKind);
+      await this.bridge.setBaseline(this.ui.toUi(f.absPath), baseline, f.kind as InlineKind);
     } catch (err) {
       this.pushed.delete(f.absPath);
       this.log.error(`could not show ${f.absPath} inline`, err);
@@ -176,7 +181,7 @@ export class ReviewController {
     this.pushed.delete(abs);
     this.deferred.delete(abs);
     try {
-      await this.bridge.remove(abs);
+      await this.bridge.remove(this.ui.toUi(abs));
     } catch (err) {
       this.log.error(`could not remove ${abs} from inline review`, err);
     }
@@ -290,7 +295,7 @@ export class ReviewController {
     if (!this.bridge.rejectInEditor || !f || f.kind !== 'modified' || !f.inline || !this.pushed.has(abs) || this.conflicted.has(abs)) {
       return undefined;
     }
-    const r = await this.bridge.rejectInEditor(abs);
+    const r = await this.bridge.rejectInEditor(this.ui.toUi(abs));
     return r === 'saved' || r === 'unsaved' ? r : undefined;
   }
 
@@ -393,6 +398,29 @@ export class ReviewController {
     const result = this.queue.then(run, run);
     this.queue = result.catch((err) => this.log.error('agent review sync failed', err));
     return result;
+  }
+}
+
+/**
+ * Maps the controller's real paths (the engine tracks every file once, under its real path) to the paths VS Code
+ * uses: under each workspace folder as it was opened. A folder opened through a symlink (e.g. /tmp/paper on macOS,
+ * where /tmp is /private/tmp) keeps its link path in VS Code, so its editors, dirty state and watcher events use
+ * that path; pushing the real path to core would review a second, unopened copy of the file.
+ */
+export class UiPaths {
+  private readonly folders: { ui: string; real: string }[];
+
+  constructor(folderPaths: readonly string[]) {
+    this.folders = folderPaths.map((ui) => ({ ui: path.resolve(ui), real: normalizePath(ui) }));
+  }
+
+  /** The path VS Code uses for a real path (unchanged outside the workspace folders, or if no folder is a link). */
+  toUi(realPath: string): string {
+    for (const { ui, real } of this.folders) {
+      if (realPath === real) return ui;
+      if (realPath.startsWith(real + path.sep)) return path.join(ui, path.relative(real, realPath));
+    }
+    return realPath;
   }
 }
 

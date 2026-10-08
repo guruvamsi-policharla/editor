@@ -91,6 +91,7 @@ If the save after an Undo fails or is cancelled (disk full, permissions, a newer
 | Agent terminal | Done. **Agent: Open Agent Terminal** starts `agentReview.agent.command` (default `tact`) in a terminal docked right (editor area, beside), or in the panel (`agentReview.agent.location`) |
 | Ctrl/Cmd+L | Done. Sends `@relative/path:L42-58` (format: `agentReview.agent.referenceFormat`) to the agent terminal; optionally also the selected text as a bracketed paste (`agentReview.agent.includeSelectedText`). In a new terminal the agent command runs through shell integration, and the text waits until the shell reports the command started (timeouts: 3 s for shell integration, then the command is typed and the text follows 1 s later; 5 s for the start report) |
 | Hide built-in AI chat | Done. `chat.disableAIFeatures` is already true in VSCodium (we also set it as a configuration default), and patch 93 hides the empty secondary side bar by default |
+| Symlinked folders and files (task e) | Done. The engine tracks each file once, under its real path; watcher events, saves and Keep/Undo arrive by either path and are normalized. Everything handed to VS Code (inline review, the list, diffs, the merge) uses the path under the workspace folder as it was opened, so a folder opened through a link (e.g. `/tmp/…` on macOS, which is `/private/tmp/…`) reviews inline in the editor the user has open. Dirty checks compare real paths. Limits: a file opened by the path of a symlink *inside* the workspace isn't shown inline (it's in the list, and opening it from there shows it inline); link targets outside every workspace folder aren't tracked |
 | Dirty-buffer merge view | Done. VS Code's 3-way merge editor (see the table above); no side is ever written over without the user completing the merge |
 
 ## Core patches (`patches/`)
@@ -127,7 +128,6 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 
 ## Remaining work (not in this PR)
 
-- **Symlinked workspace roots:** the engine normalizes real paths, but editor URIs can use the link path, so an entry might not match the open editor.
 - **The macOS packaged build hasn't been run.** The workflow exists but wasn't triggered, because macOS minutes bill at 10x on private repos (see CI).
 - **Not in the MVP:** a proposed API instead of commands, icons, signing, installers, and auto-update.
 

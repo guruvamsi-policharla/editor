@@ -361,6 +361,25 @@ describe('§7 symlinked paths normalize to real paths', () => {
     }
   });
 
+  it('a write through a file symlink inside the workspace is one change, under the real file', async () => {
+    const ws = DiskWorkspace.create({ 'sections/intro.tex': 'Intro.\n' });
+    nodeFs.symlinkSync(ws.abs('sections/intro.tex'), ws.abs('intro-link.tex'));
+    try {
+      const engine = await ReviewEngine.open({ root: ws.root, storageDir: ws.storage, git: false });
+      expect([...engine.baselineEntries().keys()]).toEqual(['sections/intro.tex']); // tracked once
+      nodeFs.writeFileSync(ws.abs('intro-link.tex'), 'Intro, by the agent.\n');
+      await engine.handleFsEvents([ws.abs('intro-link.tex')]); // reported under the link path
+      await engine.handleFsEvents([ws.abs('sections/intro.tex')]); // and under the real one
+      expect(engine.listChanges().map((c) => [c.path, c.kind])).toEqual([['sections/intro.tex', 'modified']]);
+      await engine.rejectFile(ws.abs('intro-link.tex')); // Undo through the link path restores the real file
+      expect(nodeFs.readFileSync(ws.abs('sections/intro.tex'), 'utf8')).toBe('Intro.\n');
+      expect(nodeFs.lstatSync(ws.abs('intro-link.tex')).isSymbolicLink()).toBe(true); // the link itself is untouched
+      await engine.close();
+    } finally {
+      ws.dispose();
+    }
+  });
+
   it('symlinks inside the workspace are not followed or tracked', async () => {
     const ws = memWorkspace({ 'real/a.txt': 'a\n' });
     ws.fs.symlinkSync('/ws/real', '/ws/alias');

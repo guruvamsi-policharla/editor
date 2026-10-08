@@ -8,7 +8,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MultiRootReview, type TrackedEdit } from '@editor/engine';
-import { ReviewController, type CoreBridge, type InlineKind } from '../src/controller';
+import { ReviewController, UiPaths, type CoreBridge, type InlineKind } from '../src/controller';
 import { EditLogs } from '../src/editLog';
 
 class FakeCore implements CoreBridge {
@@ -377,5 +377,84 @@ describe('ReviewController', () => {
     await ctl.idle();
     expect(ctl.pendingFiles).toEqual([]);
     expect(await ctl.baselineText(a)).toBe('changed\n');
+  });
+});
+
+describe('symlinked workspace folders and files', () => {
+  /** Open the controller on a workspace folder given as `folder` (as VS Code would have it). */
+  async function openFolder(folder: string): Promise<void> {
+    review = await MultiRootReview.open({ roots: [folder], storageBase: storage, git: false });
+    core = new FakeCore();
+    ctl = new ReviewController(review, core, { isDirty: (p) => dirty.has(p) }, quiet, (p) => conflicts.push(p), new UiPaths([folder]));
+    await ctl.syncAll();
+  }
+
+  async function write(abs: string, content: string, eventPath = abs): Promise<void> {
+    fs.writeFileSync(abs, content);
+    await ctl.handleFsEvents([eventPath]);
+    await ctl.idle();
+  }
+
+  it('a folder opened through a symlink: tracked once under the real path, shown in core under the link path', async () => {
+    const link = path.join(tmp, 'link'); // e.g. /tmp/paper on macOS, where /tmp is /private/tmp
+    fs.symlinkSync(root, link);
+    await openFolder(link);
+
+    // Agent write through the link path (as VS Code's watcher reports it for this folder).
+    await write(path.join(link, 'paper.tex'), 'Intro.\nNew methods.\nResults.\n');
+    expect(ctl.pendingFiles.map((f) => f.absPath)).toEqual([path.join(root, 'paper.tex')]);
+    expect([...core.shown.keys()]).toEqual([path.join(link, 'paper.tex')]); // the editor's URI, not the real path
+
+    // Agent write through the real path, reported either way: the same single file.
+    await write(path.join(root, 'paper.tex'), 'Intro.\nNew methods.\nResults.\nMore.\n');
+    await write(path.join(root, 'paper.tex'), 'Intro.\nNew methods.\nResults.\nMore!\n', path.join(link, 'paper.tex'));
+    expect(ctl.pendingFiles.map((f) => f.rel)).toEqual(['paper.tex']);
+    expect([...core.shown.keys()]).toEqual([path.join(link, 'paper.tex')]);
+    expect(core.shown.get(path.join(link, 'paper.tex'))?.baseline).toBe('Intro.\nMethods.\nResults.\n');
+
+    // A new file written through the real path shows under the link path too.
+    await write(path.join(root, 'notes.tex'), 'Notes.\n');
+    expect(core.shown.get(path.join(link, 'notes.tex'))).toEqual({ baseline: '', kind: 'created' });
+
+    // Keep from core (link path) and a user save through the link path reach the same engine file.
+    await ctl.onReviewAction({ kind: 'accepted', path: path.join(link, 'paper.tex'), baseline: 'Intro.\nNew methods.\nResults.\nMore!\n' });
+    await ctl.idle();
+    expect(core.shown.has(path.join(link, 'paper.tex'))).toBe(false);
+    expect(await ctl.baselineText(path.join(link, 'paper.tex'))).toBe('Intro.\nNew methods.\nResults.\nMore!\n');
+    await write(path.join(link, 'paper.tex'), 'Intro.\nNew methods.\nResults.\nMore!\nAgent line.\n');
+    // The user rewrites line 1 in the editor (link path) and saves: folded in; the agent's line stays pending.
+    await userSave(path.join(link, 'paper.tex'), 'Introduction.\nNew methods.\nResults.\nMore!\nAgent line.\n', [{ offset: 0, length: 6, text: 'Introduction.', origin: 'user' }]);
+    expect(await ctl.baselineText(path.join(root, 'paper.tex'))).toBe('Introduction.\nNew methods.\nResults.\nMore!\n');
+    expect(core.shown.get(path.join(link, 'paper.tex'))?.baseline).toBe('Introduction.\nNew methods.\nResults.\nMore!\n');
+    expect([...core.shown.keys()].every((p) => p.startsWith(link + path.sep))).toBe(true); // never a copy under the real path
+  });
+
+  it('unsaved edits opened through the link are seen; the conflict is reported with the link path', async () => {
+    const link = path.join(tmp, 'link');
+    fs.symlinkSync(root, link);
+    await openFolder(link);
+    await write(path.join(link, 'paper.tex'), 'Intro.\nNew methods.\nResults.\n');
+    dirty.add(path.join(root, 'paper.tex')); // DocumentState is asked with real paths (the extension compares real paths)
+    await write(path.join(link, 'paper.tex'), 'Intro.\nNewer methods.\nResults.\n');
+    expect(conflicts).toEqual([path.join(link, 'paper.tex')]);
+  });
+
+  it('a file symlink inside the workspace: agent writes through it show up once, under the real file', async () => {
+    fs.symlinkSync(path.join(root, 'paper.tex'), path.join(root, 'alias.tex'));
+    await openFolder(root);
+    await write(path.join(root, 'alias.tex'), 'Intro.\nNew methods.\nResults.\n');
+    expect(ctl.pendingFiles.map((f) => [f.rel, f.kind])).toEqual([['paper.tex', 'modified']]);
+    expect([...core.shown.keys()]).toEqual([path.join(root, 'paper.tex')]);
+  });
+
+  it('UiPaths maps real paths under a linked folder back to the folder path, and leaves others alone', async () => {
+    const link = path.join(tmp, 'link');
+    fs.symlinkSync(root, link);
+    await openFolder(link);
+    const ui = new UiPaths([link, path.join(tmp, 'storage')]);
+    expect(ui.toUi(root)).toBe(link);
+    expect(ui.toUi(path.join(root, 'a', 'b.tex'))).toBe(path.join(link, 'a', 'b.tex'));
+    expect(ui.toUi(path.join(tmp, 'elsewhere.tex'))).toBe(path.join(tmp, 'elsewhere.tex'));
+    expect(ui.toUi(root + '-sibling')).toBe(root + '-sibling');
   });
 });

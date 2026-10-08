@@ -12,7 +12,7 @@ import * as vscode from 'vscode';
 import { MultiRootReview } from '@editor/engine';
 import { AgentTerminal } from './agentTerminal';
 import { ConflictMerger } from './conflicts';
-import { ReviewController, type CoreBridge, type ReviewAction } from './controller';
+import { normalizePath, ReviewController, UiPaths, type CoreBridge, type ReviewAction } from './controller';
 import { EditLogs } from './editLog';
 import { BASELINE_SCHEME, BaselineContentProvider, baselineUri, ReviewTree, type FileItem } from './reviewTree';
 
@@ -62,21 +62,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     log.warn('Core review UI not found (not running in the fork): review list only.');
   }
 
+  // The controller and the engine use real paths; VS Code uses the paths under the folders as opened (symlinks).
+  const ui = new UiPaths(folders.map((f) => f.uri.fsPath));
+  const uiUri = (abs: string) => vscode.Uri.file(ui.toUi(abs));
   const bridge: CoreBridge = {
-    setBaseline: async (abs, baseline, kind) => {
-      if (hasCore) await vscode.commands.executeCommand(CORE_SET_BASELINE, vscode.Uri.file(abs), baseline, kind);
+    setBaseline: async (uiPath, baseline, kind) => {
+      if (hasCore) await vscode.commands.executeCommand(CORE_SET_BASELINE, vscode.Uri.file(uiPath), baseline, kind);
     },
-    remove: async (abs) => {
-      if (hasCore) await vscode.commands.executeCommand(CORE_REMOVE, vscode.Uri.file(abs));
+    remove: async (uiPath) => {
+      if (hasCore) await vscode.commands.executeCommand(CORE_REMOVE, vscode.Uri.file(uiPath));
     },
-    rejectInEditor: async (abs) => {
+    rejectInEditor: async (uiPath) => {
       if (!hasCore) return undefined;
-      return vscode.commands.executeCommand<'saved' | 'unsaved' | 'deleted' | undefined>(CORE_REJECT, vscode.Uri.file(abs));
+      return vscode.commands.executeCommand<'saved' | 'unsaved' | 'deleted' | undefined>(CORE_REJECT, vscode.Uri.file(uiPath));
     },
   };
 
   const docs = {
-    isDirty: (abs: string) => vscode.workspace.textDocuments.some((d) => d.uri.scheme === 'file' && samePath(d.uri.fsPath, abs) && d.isDirty),
+    // Any open document of the same file counts, whichever path (symlink or real) it was opened by.
+    isDirty: (abs: string) => vscode.workspace.textDocuments.some((d) => d.uri.scheme === 'file' && d.isDirty && samePath(normalizePath(d.uri.fsPath), abs)),
   };
 
   let conflicts: ConflictMerger | undefined;
@@ -84,7 +88,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     info: (m) => log.info(m),
     warn: (m) => log.warn(m),
     error: (m, e) => log.error(m, e instanceof Error ? e : String(e ?? '')),
-  }, (abs) => void conflicts?.onConflict(abs));
+  }, (uiPath) => void conflicts?.onConflict(uiPath), ui);
   const ctl = controller;
   context.subscriptions.push({ dispose: () => ctl.dispose() });
 
@@ -192,7 +196,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // Review list, baseline documents, multi-file diff.
   const baselines = new BaselineContentProvider(ctl);
-  const tree = new ReviewTree(ctl);
+  const tree = new ReviewTree(ctl, (p) => ui.toUi(p));
   const view = vscode.window.createTreeView('agentReview.changes', { treeDataProvider: tree, showCollapseAll: false });
   const status = vscode.window.createStatusBarItem('agentReview.status', vscode.StatusBarAlignment.Left, 50);
   status.name = 'Agent Review';
@@ -253,20 +257,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     })),
     vscode.commands.registerCommand('agentReview.openChanges', () => run('Open All Changes', async () => {
       const resources: [vscode.Uri, vscode.Uri | undefined, vscode.Uri | undefined][] = ctl.pendingFiles.map((f) => {
-        const file = vscode.Uri.file(f.absPath);
+        const file = uiUri(f.absPath);
         if (f.kind === 'created') return [file, undefined, file];
-        if (f.kind === 'deleted') return [file, baselineUri(f.absPath), undefined];
-        if (f.kind === 'renamed') return [file, baselineUri(f.oldAbsPath ?? f.absPath), file];
-        return [file, baselineUri(f.absPath), file];
+        if (f.kind === 'deleted') return [file, baselineUri(ui.toUi(f.absPath)), undefined];
+        if (f.kind === 'renamed') return [file, baselineUri(ui.toUi(f.oldAbsPath ?? f.absPath)), file];
+        return [file, baselineUri(ui.toUi(f.absPath)), file];
       });
       await vscode.commands.executeCommand('vscode.changes', 'Agent Changes', resources);
     })),
     vscode.commands.registerCommand('agentReview.openFileDiff', (arg?: FileItem | vscode.Uri) => run('Open Diff', async () => {
       const p = itemPath(arg);
       if (!p) return;
-      const f = ctl.pendingFiles.find((x) => samePath(x.absPath, p));
-      const left = baselineUri(f?.oldAbsPath ?? p);
-      const right = f?.kind === 'deleted' ? undefined : vscode.Uri.file(p);
+      const real = normalizePath(p);
+      const f = ctl.pendingFiles.find((x) => x.absPath === real);
+      const left = baselineUri(ui.toUi(f?.oldAbsPath ?? real));
+      const right = f?.kind === 'deleted' ? undefined : uiUri(real);
       if (!right) await vscode.window.showTextDocument(left, { preview: true });
       else await vscode.commands.executeCommand('vscode.diff', left, right, `${path.basename(p)} (accepted ↔ current)`);
     })),
