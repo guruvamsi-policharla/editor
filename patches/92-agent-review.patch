@@ -902,10 +902,10 @@ index 00000000..68180ed8
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
 new file mode 100644
-index 00000000..5944ac46
+index 00000000..51dad5fc
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
-@@ -0,0 +1,436 @@
+@@ -0,0 +1,474 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -952,6 +952,9 @@ index 00000000..5944ac46
 +import { IResourceDiffEditorInput } from '../../../../common/editor.js';
 +import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
 +import { IAction2Options } from '../../../../../platform/actions/common/actions.js';
++import { IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
++import { ContextKeyService } from '../../../../../platform/contextkey/browser/contextKeyService.js';
++import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 +import { AcceptAction, AcceptAllEditsAction, AcceptHunkAction, NavigateAction, RejectAction, RejectHunkAction, ToggleAccessibleDiffViewAction, ToggleDiffAction } from '../../../chat/browser/chatEditing/chatEditingEditorActions.js';
 +import { AgentReviewKind, IAgentReviewHunkEvent } from '../../browser/agentReviewEntry.js';
 +import { AgentReviewService } from '../../browser/agentReviewService.js';
@@ -998,7 +1001,7 @@ index 00000000..5944ac46
 +		collection.set(IEditorWorkerService, new SyncDescriptor(TestWorkerService));
 +		collection.set(ITextModelService, new class extends mock<ITextModelService>() {
 +			override async createModelReference(resource: URI): Promise<IReference<IResolvedTextEditorModel>> {
-+				return { dispose: () => { }, object: { textEditorModel: model, getLanguageId: () => 'latex' } as IResolvedTextEditorModel };
++				return { dispose: () => { }, object: { textEditorModel: modelService.getModel(resource) ?? model, getLanguageId: () => 'latex' } as IResolvedTextEditorModel };
 +			}
 +			override registerTextModelContentProvider(_scheme: string, _provider: ITextModelContentProvider): IDisposable {
 +				return Disposable.None;
@@ -1048,25 +1051,30 @@ index 00000000..5944ac46
 +		model = store.add(modelService.createModel(DISK, null, uri, false));
 +		service = store.add(insta.createInstance(AgentReviewService));
 +
-+		// A code editor without a DOM view: record view zones and overlay widgets instead.
-+		editor = store.add(instantiateTestCodeEditor(insta, model));
++		editor = createEditor(insta);
++
++		store.add(service.onDidHunkAction(e => hunkEvents.push(e)));
++	});
++
++	teardown(() => store.clear());
++
++	/** A code editor without a DOM view: records view zones and overlay widgets instead. */
++	function createEditor(instantiationService: TestInstantiationService): ITestCodeEditor {
++		const e = store.add(instantiateTestCodeEditor(instantiationService, model));
 +		let zoneIds = 0;
 +		const accessor: IViewZoneChangeAccessor = {
 +			addZone: zone => { const id = String(++zoneIds); zones.set(id, zone); return id; },
 +			removeZone: id => { zones.delete(id); },
 +			layoutZone: () => { },
 +		};
-+		editor.changeViewZones = callback => { callback(accessor); };
-+		editor.addOverlayWidget = w => { overlays.add(w); };
-+		editor.removeOverlayWidget = w => { overlays.delete(w); };
-+		editor.layoutOverlayWidget = () => { };
-+		editor.getTopForLineNumber = line => (line - 1) * 20;
-+		editor.getScrollTop = () => 0;
-+
-+		store.add(service.onDidHunkAction(e => hunkEvents.push(e)));
-+	});
-+
-+	teardown(() => store.clear());
++		e.changeViewZones = callback => { callback(accessor); };
++		e.addOverlayWidget = w => { overlays.add(w); };
++		e.removeOverlayWidget = w => { overlays.delete(w); };
++		e.layoutOverlayWidget = () => { };
++		e.getTopForLineNumber = line => (line - 1) * 20;
++		e.getScrollTop = () => 0;
++		return e;
++	}
 +
 +	ensureNoDisposablesAreLeakedInTestSuite();
 +
@@ -1131,6 +1139,36 @@ index 00000000..5944ac46
 +		assert.ok(position && typeof position === 'object', 'widget moved to its row');
 +		assert.ok(position.top < 137 + row.heightInPx!, 'inside the row');
 +		assert.strictEqual(position.left, editor.getLayoutInfo().contentLeft);
++	});
++
++	test('Ctrl+Y/Ctrl+N context: "cursor in a change" follows the file the editor shows, not the last integration created', async () => {
++		// A real (scoped) context key service: the test default (MockContextKeyService) has no scopes.
++		const contextKeys = store.add(new ContextKeyService(new TestConfigurationService()));
++		editor = createEditor(store.add(insta.createChild(new ServiceCollection([IContextKeyService, contextKeys]))));
++		const editorContext = editor.invokeWithinContext(accessor => accessor.get(IContextKeyService));
++		const cursorInChange = () => editorContext.getContextKeyValue<boolean>('chatEdits.cursorInChangeRange');
++		const { entry } = await showPending(); // paper.tex: the deleted line sits before line 2
++		editor.setPosition({ lineNumber: 2, column: 1 });
++		assert.strictEqual(cursorInChange(), true);
++
++		// A second reviewed file is shown in the same editor (another tab in the group), then the first again.
++		const uri2 = URI.parse('test:/notes.tex');
++		const model2 = store.add(modelService.createModel('Kept.\nAgent line.\n', null, uri2, false));
++		const entry2 = (await service.setBaseline(uri2, 'Kept.\n'))!;
++		await waitForState(entry2.diffInfo.map(d => d.changes.length > 0 ? d : undefined));
++		editor.setModel(model2);
++		store.add(entry2.createEditorIntegration(editor));
++		editor.setPosition({ lineNumber: 1, column: 1 });
++		assert.strictEqual(cursorInChange(), false, 'line 1 of notes.tex is unchanged');
++		editor.setPosition({ lineNumber: 2, column: 1 });
++		assert.strictEqual(cursorInChange(), true);
++
++		editor.setModel(model);
++		editor.setPosition({ lineNumber: 2, column: 1 });
++		assert.strictEqual(cursorInChange(), true, 'the integration of the hidden notes.tex must not reset it');
++		editor.setPosition({ lineNumber: 1, column: 1 });
++		assert.strictEqual(cursorInChange(), false);
++		assert.ok(entry);
 +	});
 +
 +	test('Keep folds the hunk into the baseline, reports the full baseline, and leaves the buffer alone', async () => {

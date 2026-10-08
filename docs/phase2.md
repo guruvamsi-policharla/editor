@@ -23,7 +23,7 @@ All screenshots come from the packaged `VSCode-linux-x64/editor` built by `fork/
 Also checked by hand in the packaged app:
 
 - The ↑/↓ overlay arrows move between hunks and files with chat disabled.
-- Ctrl+Y on a hunk keeps it.
+- Ctrl+Y on a hunk keeps it. (Fixed in phase-2-finish: this only worked reliably with a single reviewed file per editor group; see the context-key commit.)
 - Typing a sentence on an unchanged line and saving does not create a pending change. The edit folds into the baseline, and the agent's hunks stay as they were.
 - No chat view, chat title-bar button or Copilot UI appears. The secondary side bar is hidden.
 
@@ -101,8 +101,8 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 | Patch | Lines | Upstream files touched |
 |---|---|---|
 | `90-diff-preserve-short-matching-lines.patch` | +27 −1 (diff option + 2 unit tests) | `linesDiffComputer.ts`, `documentDiffProvider.ts`, `defaultLinesDiffComputer.ts`, the diff test file |
-| `91-chat-editing-review-hooks.patch` | +31 −21 | `chatEditingTextModelChangeService.ts` (C3 predicate gets the event; public `extendToSubwords` / `preserveShortMatchingLines`), `chatEditingEditorActions.ts` (C5 precondition; agent-review titles; 3 classes exported for tests), `chatEditingCodeEditorIntegration.ts` / `chatEditingNotebookEditorIntegration.ts` (diff title), `chatEditingServiceImpl.ts` (explorer tooltip) |
-| `92-agent-review.patch` | +1301 (incl. blank lines): new `contrib/agentReview/` (entry, service, contribution, save-attribution participants, 3-way merge, CSS, 18 tests in 3 files) + 1 import line in `workbench.common.main.ts` | `workbench.common.main.ts` (1 line) |
+| `91-chat-editing-review-hooks.patch` | +89 −28 | `chatEditingTextModelChangeService.ts` (C3 predicate gets the event; public `extendToSubwords` / `preserveShortMatchingLines`), `chatEditingEditorActions.ts` (C5 precondition; agent-review titles and the "Agent Review" category; 3 classes exported for tests), `chatEditingCodeEditorIntegration.ts` (the hunk toolbar's own row, opt-in via `hunkToolbarRows`), `chatEditingCodeEditorIntegration.ts` / `chatEditingNotebookEditorIntegration.ts` (diff title), `chatEditingServiceImpl.ts` (explorer tooltip) |
+| `92-agent-review.patch` | +1345 (incl. blank lines): new `contrib/agentReview/` (entry, service, contribution, save-attribution participants, 3-way merge, CSS, 22 tests in 3 files) + 1 import line in `workbench.common.main.ts` | `workbench.common.main.ts` (1 line) |
 | `93-default-layout.patch` | +2 −2 | Secondary side bar hidden by default (`workbench.contribution.ts`, `themeMainServiceImpl.ts`) |
 
 ## Engine additions
@@ -128,20 +128,22 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 
 ## Remaining work (not in this PR)
 
-- **The macOS packaged build hasn't been run.** The workflow exists but wasn't triggered, because macOS minutes bill at 10x on private repos (see CI).
+- **The macOS build hasn't run on a Mac yet.** `fork/scripts/build-macos.sh` ([build-macos.md](build-macos.md)) was checked under bash 3.2 with stubbed macOS tools only. The release-only workflow, which now runs that script with the heap fix, hasn't been triggered (macOS minutes bill at 10x on private repos).
 - **Not in the MVP:** a proposed API instead of commands, icons, signing, installers, and auto-update.
 
 ## Tests
 
 | Suite | Count | Command |
 |---|---|---|
-| Engine (vitest) | 160 (13 files) | `npm test -w @editor/engine` |
-| Extension integration (vitest, real engine on temp dirs, fake core / fake terminal) | 27 | `npm test -w agent-review` |
-| Core `contrib/agentReview` (Electron) | 18 | `fork/scripts/test-core.sh` |
+| Engine (vitest) | 162 (14 files) | `npm test -w @editor/engine` |
+| Extension integration (vitest, real engine on temp dirs, fake core / fake terminal) | 35 | `npm test -w agent-review` |
+| Core `contrib/agentReview` (Electron) | 22 | `fork/scripts/test-core.sh` |
 | Upstream chat-editing regression (Electron) | 49 | `fork/scripts/test-core.sh` |
 | Upstream diff + fixtures (node, incl. 2 new) | 125 | `fork/scripts/test-core.sh` |
 | Core typecheck of the patched tree (tsgo) | 0 errors | `npm run typecheck-client` (CI `patches` job) |
 | Packaged build + smoke (`editor --version`) | ok | `fork/scripts/build.sh` |
+| Lint: repo TypeScript (VS Code's generic rules) / core files (VS Code's own config) | 0 problems / 0 warnings | `npm run lint` / `fork/scripts/lint-core.sh` |
+| Shell scripts (shellcheck; bash 3.2 syntax on macOS) | clean | CI `shellcheck` job, macOS `test` job |
 
 ## CI
 
@@ -183,6 +185,8 @@ Locally (8 vCPU / 16 GB, no swap): prepare 258 s, build 468 s. A single `gulp vs
 macOS is release-only. The first macOS run (triggered by marking PR #3 ready, before this change) failed after about 10 min in the build job; it is unfixed, and the next tag or manual run will show whether it builds. To run it on demand, use `workflow_dispatch`.
 
 ## Try it
+
+On macOS: `fork/scripts/build-macos.sh --install` ([build-macos.md](build-macos.md)). For a two-minute demo without an agent, see the README ("Try it": `scripts/demo-agent.sh`). On Linux:
 
 ```bash
 fork/scripts/prepare-vscodium.sh            # VSCodium@pin + our patches + npm ci + built-in extension (~4–5 min on 8 cores)
