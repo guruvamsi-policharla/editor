@@ -35,6 +35,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.commands.registerCommand('agentReview.openAgentTerminal', () => agentTerminal.show()),
     vscode.commands.registerCommand('agentReview.sendSelectionToAgent', () => sendSelectionToChat()),
+    vscode.commands.registerCommand('agentReview.addToChat', () => sendSelectionToChat()),
   );
 
   const config = vscode.workspace.getConfiguration('agentReview');

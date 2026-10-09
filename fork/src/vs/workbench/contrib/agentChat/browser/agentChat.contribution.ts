@@ -17,6 +17,7 @@ import { CommandsRegistry } from '../../../../platform/commands/common/commands.
 import { ChatDynamicVariableModel } from '../../chat/browser/attachments/chatDynamicVariables.js';
 import { ChatViewPaneTarget, IChatWidgetService } from '../../chat/browser/chat.js';
 import { ACTIVE_GROUP } from '../../../services/editor/common/editorService.js';
+import { referenceInsertionOffset, referencePrefix } from './insertPlan.js';
 
 CommandsRegistry.registerCommand('_agentChat.openChat', async (accessor, uri: UriComponents | undefined, where: unknown) => {
 	if (!uri) {
@@ -30,7 +31,8 @@ CommandsRegistry.registerCommand('_agentChat.openChat', async (accessor, uri: Ur
 /**
  * `_agentChat.insertReference(text, uri, range?)`: inserts `text` (e.g. `@main.tex:L16-18`) at the cursor of the
  * last focused chat input (revealing it), as a reference pill for `uri` (and `range`, 1-based lines), followed by
- * a space. Returns whether it was inserted.
+ * a space. A caret inside an existing pill inserts after that pill, so several references can sit in one sentence.
+ * Returns whether it was inserted.
  */
 CommandsRegistry.registerCommand('_agentChat.insertReference', async (accessor, text: unknown, uri: UriComponents | undefined, range: IRange | undefined) => {
 	if (typeof text !== 'string' || !text || !uri) {
@@ -49,13 +51,29 @@ CommandsRegistry.registerCommand('_agentChat.insertReference', async (accessor, 
 		return false;
 	}
 	const at = editor.getPosition() ?? model.getFullModelRange().getEndPosition();
-	const before = at.column > 1 ? model.getValueInRange(new Range(at.lineNumber, at.column - 1, at.lineNumber, at.column)) : '';
-	const prefix = before && !/\s/.test(before) ? ' ' : '';
-	if (!editor.executeEdits('agentChat.insertReference', [{ range: Range.fromPositions(at), text: `${prefix}${text} ` }])) {
+	const value = model.getValue();
+	const pills = variables.variables.filter(v => Range.isIRange(v.range)).map(v => ({
+		start: model.getOffsetAt({ lineNumber: v.range.startLineNumber, column: v.range.startColumn }),
+		end: model.getOffsetAt({ lineNumber: v.range.endLineNumber, column: v.range.endColumn }),
+	}));
+	const insertAt = referenceInsertionOffset(value, model.getOffsetAt(at), pills);
+	const prefix = referencePrefix(value, insertAt);
+	const position = model.getPositionAt(insertAt);
+	if (!editor.executeEdits('agentChat.insertReference', [{ range: Range.fromPositions(position), text: `${prefix}${text} ` }])) {
 		return false;
 	}
-	const start = at.column + prefix.length;
-	const pill = new Range(at.lineNumber, start, at.lineNumber, start + text.length);
+	// The pill covers exactly the inserted reference, read back from the model so a listener that
+	// shifted the text cannot leave the range one character short or overlapping the previous pill.
+	const inserted = model.getValue();
+	let pillOffset = insertAt + prefix.length;
+	if (inserted.substring(pillOffset, pillOffset + text.length) !== text) {
+		const found = inserted.indexOf(text, insertAt);
+		if (found < 0) {
+			return false;
+		}
+		pillOffset = found;
+	}
+	const pill = Range.fromPositions(model.getPositionAt(pillOffset), model.getPositionAt(pillOffset + text.length));
 	const resource = URI.revive(uri);
 	variables.addReference({
 		// Unique per pill: the request's references are keyed by id.
@@ -65,7 +83,7 @@ CommandsRegistry.registerCommand('_agentChat.insertReference', async (accessor, 
 		range: pill,
 		data: range ? { uri: resource, range: Range.lift(range) } : resource,
 	});
-	editor.setPosition({ lineNumber: pill.endLineNumber, column: pill.endColumn + 1 });
+	editor.setPosition(model.getPositionAt(Math.min(pillOffset + text.length + 1, model.getValueLength())));
 	widget.focusInput();
 	widget.refreshParsedInput();
 	return true;

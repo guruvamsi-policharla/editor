@@ -1,9 +1,9 @@
 diff --git a/src/vs/workbench/contrib/agentChat/browser/agentChat.contribution.ts b/src/vs/workbench/contrib/agentChat/browser/agentChat.contribution.ts
 new file mode 100644
-index 00000000..d3eb4492
+index 00000000..1f71226c
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentChat/browser/agentChat.contribution.ts
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,90 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -23,6 +23,7 @@ index 00000000..d3eb4492
 +import { ChatDynamicVariableModel } from '../../chat/browser/attachments/chatDynamicVariables.js';
 +import { ChatViewPaneTarget, IChatWidgetService } from '../../chat/browser/chat.js';
 +import { ACTIVE_GROUP } from '../../../services/editor/common/editorService.js';
++import { referenceInsertionOffset, referencePrefix } from './insertPlan.js';
 +
 +CommandsRegistry.registerCommand('_agentChat.openChat', async (accessor, uri: UriComponents | undefined, where: unknown) => {
 +	if (!uri) {
@@ -36,7 +37,8 @@ index 00000000..d3eb4492
 +/**
 + * `_agentChat.insertReference(text, uri, range?)`: inserts `text` (e.g. `@main.tex:L16-18`) at the cursor of the
 + * last focused chat input (revealing it), as a reference pill for `uri` (and `range`, 1-based lines), followed by
-+ * a space. Returns whether it was inserted.
++ * a space. A caret inside an existing pill inserts after that pill, so several references can sit in one sentence.
++ * Returns whether it was inserted.
 + */
 +CommandsRegistry.registerCommand('_agentChat.insertReference', async (accessor, text: unknown, uri: UriComponents | undefined, range: IRange | undefined) => {
 +	if (typeof text !== 'string' || !text || !uri) {
@@ -55,13 +57,29 @@ index 00000000..d3eb4492
 +		return false;
 +	}
 +	const at = editor.getPosition() ?? model.getFullModelRange().getEndPosition();
-+	const before = at.column > 1 ? model.getValueInRange(new Range(at.lineNumber, at.column - 1, at.lineNumber, at.column)) : '';
-+	const prefix = before && !/\s/.test(before) ? ' ' : '';
-+	if (!editor.executeEdits('agentChat.insertReference', [{ range: Range.fromPositions(at), text: `${prefix}${text} ` }])) {
++	const value = model.getValue();
++	const pills = variables.variables.filter(v => Range.isIRange(v.range)).map(v => ({
++		start: model.getOffsetAt({ lineNumber: v.range.startLineNumber, column: v.range.startColumn }),
++		end: model.getOffsetAt({ lineNumber: v.range.endLineNumber, column: v.range.endColumn }),
++	}));
++	const insertAt = referenceInsertionOffset(value, model.getOffsetAt(at), pills);
++	const prefix = referencePrefix(value, insertAt);
++	const position = model.getPositionAt(insertAt);
++	if (!editor.executeEdits('agentChat.insertReference', [{ range: Range.fromPositions(position), text: `${prefix}${text} ` }])) {
 +		return false;
 +	}
-+	const start = at.column + prefix.length;
-+	const pill = new Range(at.lineNumber, start, at.lineNumber, start + text.length);
++	// The pill covers exactly the inserted reference, read back from the model so a listener that
++	// shifted the text cannot leave the range one character short or overlapping the previous pill.
++	const inserted = model.getValue();
++	let pillOffset = insertAt + prefix.length;
++	if (inserted.substring(pillOffset, pillOffset + text.length) !== text) {
++		const found = inserted.indexOf(text, insertAt);
++		if (found < 0) {
++			return false;
++		}
++		pillOffset = found;
++	}
++	const pill = Range.fromPositions(model.getPositionAt(pillOffset), model.getPositionAt(pillOffset + text.length));
 +	const resource = URI.revive(uri);
 +	variables.addReference({
 +		// Unique per pill: the request's references are keyed by id.
@@ -71,11 +89,115 @@ index 00000000..d3eb4492
 +		range: pill,
 +		data: range ? { uri: resource, range: Range.lift(range) } : resource,
 +	});
-+	editor.setPosition({ lineNumber: pill.endLineNumber, column: pill.endColumn + 1 });
++	editor.setPosition(model.getPositionAt(Math.min(pillOffset + text.length + 1, model.getValueLength())));
 +	widget.focusInput();
 +	widget.refreshParsedInput();
 +	return true;
 +});
+diff --git a/src/vs/workbench/contrib/agentChat/browser/insertPlan.ts b/src/vs/workbench/contrib/agentChat/browser/insertPlan.ts
+new file mode 100644
+index 00000000..cc411273
+--- /dev/null
++++ b/src/vs/workbench/contrib/agentChat/browser/insertPlan.ts
+@@ -0,0 +1,43 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++/** A span of the chat input, as 0-based offsets with an exclusive end. */
++export interface TextSpan {
++	readonly start: number;
++	readonly end: number;
++}
++
++/**
++ * Where a new inline reference is inserted.
++ * A caret inside an existing pill moves to just after that pill and one trailing space,
++ * so a second reference is never spliced into the first.
++ */
++export function referenceInsertionOffset(text: string, cursor: number, pills: readonly TextSpan[]): number {
++	const max = text.length;
++	let offset = Math.max(0, Math.min(cursor, max));
++	for (const pill of pills) {
++		if (offset > pill.start && offset < pill.end) {
++			offset = Math.min(Math.max(pill.end, 0), max);
++			if (text.charAt(offset) === ' ') {
++				offset++;
++			}
++			break;
++		}
++	}
++	return Math.min(offset, max);
++}
++
++/** A separating space, unless the insertion point is already next to whitespace. */
++export function referencePrefix(text: string, offset: number): string {
++	const before = offset > 0 ? text.charAt(offset - 1) : '';
++	if (!before || /\s/.test(before)) {
++		return '';
++	}
++	const at = offset < text.length ? text.charAt(offset) : '';
++	if (at && /\s/.test(at)) {
++		return '';
++	}
++	return ' ';
++}
+diff --git a/src/vs/workbench/contrib/chat/browser/attachments/chatDynamicVariables.ts b/src/vs/workbench/contrib/chat/browser/attachments/chatDynamicVariables.ts
+index 78675ef8..1d7a8cd5 100644
+--- a/src/vs/workbench/contrib/chat/browser/attachments/chatDynamicVariables.ts
++++ b/src/vs/workbench/contrib/chat/browser/attachments/chatDynamicVariables.ts
+@@ -108,7 +108,18 @@ export class ChatDynamicVariableModel extends Disposable implements IChatWidgetC
+ 						return { ...ref, range: preservedRange };
+ 					}
+ 
+-					if (!replacement) {
++					// A second inline reference is one insertion, longer than a typed character. The decoration
++					// range then covers the previous pill and the start of the new text, and deleting it mangles
++					// both (`@sections/intro.tex:L2` becomes `ections/intro.tex:L6-7 :L2`). Keep the previous pill
++					// when its text is still in the input. A one-character edit still removes the whole reference.
++					const longInsertion = e.changes.some(change => change.rangeLength === 0 && change.text.length > 1);
++					const kept = longInsertion ? this.findUntouchedReferenceRange(model, data.text, data.rangeOffset) : undefined;
++					if (kept) {
++						didChange = true;
++						return { ...ref, range: kept };
++					}
++
++					if (!replacement && !longInsertion) {
+ 						this.widget.inputEditor.executeEdits(this.id, [{
+ 							range: newRange,
+ 							text: '',
+@@ -176,6 +187,30 @@ export class ChatDynamicVariableModel extends Disposable implements IChatWidgetC
+ 		return model.getValueInRange(range) === data.text ? range : undefined;
+ 	}
+ 
++	/**
++	 * The reference text still present after an insertion that overlapped its decoration.
++	 * The match closest to where the reference was wins.
++	 */
++	private findUntouchedReferenceRange(model: ITextModel, text: string, previousOffset: number): Range | undefined {
++		if (!text) {
++			return undefined;
++		}
++		const value = model.getValue();
++		let match = value.indexOf(text);
++		let closest = match;
++		while (match !== -1) {
++			if (Math.abs(match - previousOffset) < Math.abs(closest - previousOffset)) {
++				closest = match;
++			}
++			match = value.indexOf(text, match + text.length);
++		}
++		if (closest === -1) {
++			return undefined;
++		}
++		const range = Range.fromPositions(model.getPositionAt(closest), model.getPositionAt(closest + text.length));
++		return model.getValueInRange(range) === text ? range : undefined;
++	}
++
+ 	getInputState(contrib: Record<string, unknown>): void {
+ 		contrib[ChatDynamicVariableModel.ID] = [...this._variables];
+ 	}
 diff --git a/src/vs/workbench/contrib/chat/browser/agentSessions/agentSessionsModel.ts b/src/vs/workbench/contrib/chat/browser/agentSessions/agentSessionsModel.ts
 index 550b01e7..1632a19e 100644
 --- a/src/vs/workbench/contrib/chat/browser/agentSessions/agentSessionsModel.ts
