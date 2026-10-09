@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { referenceInsertionOffset, referencePrefix } from '../../../fork/src/vs/workbench/contrib/agentChat/browser/insertPlan.ts';
+import { referenceInsertionOffset, referencePrefix } from '../../../fork/src/vs/workbench/contrib/agentChat/browser/insertPlan.js';
 
 const first = '@sections/intro.tex:L2 ';
 const pill = [{ start: 0, end: first.indexOf(' ') }]; // the reference, not the trailing space
