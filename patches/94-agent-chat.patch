@@ -144,10 +144,29 @@ index 00000000..cc411273
 +	return ' ';
 +}
 diff --git a/src/vs/workbench/contrib/chat/browser/attachments/chatDynamicVariables.ts b/src/vs/workbench/contrib/chat/browser/attachments/chatDynamicVariables.ts
-index 78675ef8..1d7a8cd5 100644
+index 78675ef8..0209250d 100644
 --- a/src/vs/workbench/contrib/chat/browser/attachments/chatDynamicVariables.ts
 +++ b/src/vs/workbench/contrib/chat/browser/attachments/chatDynamicVariables.ts
-@@ -108,7 +108,18 @@ export class ChatDynamicVariableModel extends Disposable implements IChatWidgetC
+@@ -88,6 +88,18 @@ export class ChatDynamicVariableModel extends Disposable implements IChatWidgetC
+ 					removed.push(ref);
+ 					return null;
+ 				}
++
++				// Text typed or pasted inside a reference turns it back into plain text: the reference goes, every
++				// character stays. Decided from the change's offsets, not from the decoration: in the chat input the
++				// decoration doesn't always grow with an insertion inside it, and deleting its stale range removed
++				// the typed text and all but the last character of the reference (`@sections/intro.tex:L4` became
++				// `4`, #23). Deleting inside a reference (Backspace) still removes all of it, below.
++				const end = data.rangeOffset + data.text.length;
++				if (e.changes.some(change => change.rangeLength === 0 && change.text.length > 0 && data.rangeOffset < change.rangeOffset && change.rangeOffset < end)) {
++					removed.push(ref);
++					return null;
++				}
++
+ 				const newRange = model.getDecorationRange(data.id);
+ 
+ 				if (!newRange) {
+@@ -108,7 +120,18 @@ export class ChatDynamicVariableModel extends Disposable implements IChatWidgetC
  						return { ...ref, range: preservedRange };
  					}
  
@@ -167,7 +186,7 @@ index 78675ef8..1d7a8cd5 100644
  						this.widget.inputEditor.executeEdits(this.id, [{
  							range: newRange,
  							text: '',
-@@ -176,6 +187,30 @@ export class ChatDynamicVariableModel extends Disposable implements IChatWidgetC
+@@ -176,6 +199,30 @@ export class ChatDynamicVariableModel extends Disposable implements IChatWidgetC
  		return model.getValueInRange(range) === data.text ? range : undefined;
  	}
  
@@ -247,10 +266,38 @@ index 6ba765d1..051bd5b8 100644
  
  	private handleAttachmentOpen(index: number, attachment: IChatRequestVariableEntry): void {
 diff --git a/src/vs/workbench/contrib/chat/common/model/chatModel.ts b/src/vs/workbench/contrib/chat/common/model/chatModel.ts
-index f3863489..e305b4e3 100644
+index f3863489..fdd4e999 100644
 --- a/src/vs/workbench/contrib/chat/common/model/chatModel.ts
 +++ b/src/vs/workbench/contrib/chat/common/model/chatModel.ts
-@@ -1667,7 +1667,11 @@ export class ChatResponseModel extends Disposable implements IChatResponseModel
+@@ -43,7 +43,8 @@ import { ILanguageModelChatMetadata, ILanguageModelChatMetadataAndIdentifier } f
+ import { IIntendedModelSelection, ModelSelectionReason } from '../modelSelection.js';
+ import { IChatAgentCommand, IChatAgentData, IChatAgentResult, IChatAgentService, UserSelectedTools, reviveSerializedAgent } from '../participants/chatAgents.js';
+ import { ChatRequestTextPart, IParsedChatRequest, reviveParsedChatRequest } from '../requestParser/chatParserTypes.js';
+-import { chatSessionResourceToId, LocalChatSessionUri } from './chatUri.js';
++import { chatSessionResourceToId, getChatSessionType, LocalChatSessionUri } from './chatUri.js';
++import { localChatSessionType } from '../chatSessionsService.js';
+ import { ObjectMutationLog } from './objectMutationLog.js';
+ 
+ 
+@@ -1072,6 +1073,9 @@ export class Response extends AbstractResponse implements IDisposable {
+ 		);
+ 
+ 		if (existingInvocation) {
++			if (progress.isConfirmed !== undefined) {
++				existingInvocation.externalConfirmed = progress.isConfirmed;
++			}
+ 			if (progress.toolSpecificData !== undefined) {
+ 				existingInvocation.toolSpecificData = progress.toolSpecificData;
+ 			}
+@@ -1107,6 +1111,7 @@ export class Response extends AbstractResponse implements IDisposable {
+ 			{},
+ 			undefined // chatRequestId
+ 		);
++		invocation.externalConfirmed = progress.isConfirmed;
+ 
+ 		if (progress.isComplete) {
+ 			// Already completed on first push
+@@ -1667,13 +1672,26 @@ export class ChatResponseModel extends Disposable implements IChatResponseModel
  		// spinner/"Editing files" label. See https://github.com/microsoft/vscode/issues/288701.
  		for (const part of this._response.value) {
  			if (part.kind === 'toolInvocation' && part instanceof ChatToolInvocation) {
@@ -258,16 +305,40 @@ index f3863489..e305b4e3 100644
 +				// External invocations (an extension's tool cards) aren't tied to the request's tool calls, and the
 +				// extension's own completion arrives after the cancel, when progress is dropped: cancel them here.
 +				if (!part.cancelFromStreaming(ToolConfirmKind.Skipped) && part.source.type === 'external') {
-+					part.cancelIfIncomplete(ToolConfirmKind.Skipped);
++					// A tool the user approved (or that needed no approval) was running: it ran and was stopped, it
++					// wasn't skipped. Only a card still waiting for approval is Skipped.
++					if (!part.completeIfStarted()) {
++						part.cancelIfIncomplete(ToolConfirmKind.Skipped);
++					}
 +				}
  			} else if (part instanceof ChatPlanReviewData) {
  				part.dismiss();
  			} else if (part instanceof ChatQuestionCarouselData) {
+ 				part.dismiss(undefined);
+ 			}
+ 		}
++		// An extension's chat session (agent chat): core drops the extension's updates after Stop, so the marker its
++		// reopened transcript ends with is added here, and the live view shows the reply was stopped too.
++		if (!this.isComplete && getChatSessionType(this.session.sessionResource) !== localChatSessionType) {
++			this._response.updateContent({ kind: 'markdownContent', content: new MarkdownString('\n\n*Stopped.*') });
++		}
+ 
+ 		const completedAt = Date.now();
+ 		this._elapsedMs ??= Math.max(0, completedAt - this.confirmationAdjustedTimestamp.get());
 diff --git a/src/vs/workbench/contrib/chat/common/model/chatProgressTypes/chatToolInvocation.ts b/src/vs/workbench/contrib/chat/common/model/chatProgressTypes/chatToolInvocation.ts
-index 13aa48ff..20b6d72c 100644
+index 13aa48ff..7d00a226 100644
 --- a/src/vs/workbench/contrib/chat/common/model/chatProgressTypes/chatToolInvocation.ts
 +++ b/src/vs/workbench/contrib/chat/common/model/chatProgressTypes/chatToolInvocation.ts
-@@ -226,6 +226,27 @@ export class ChatToolInvocation implements IChatToolInvocation {
+@@ -36,6 +36,8 @@ export class ChatToolInvocation implements IChatToolInvocation {
+ 	public readonly chatRequestId?: string;
+ 	public isAttachedToThinking: boolean = false;
+ 	public otherClientToolCall?: IChatToolInvocationOtherClientData;
++	/** An extension's card (external invocation): false while its tool waits for the user's approval. */
++	public externalConfirmed: boolean | undefined;
+ 
+ 	private _toolSpecificData?: IChatTerminalToolInvocationData | IChatToolInputInvocationData | IChatExtensionsContent | IChatTodoListContent | IChatSubagentToolInvocationData | IChatSimpleToolInvocationData | IChatSearchToolInvocationData | IChatModifiedFilesConfirmationData | IChatAgentFeedbackReviewConfirmationData | IChatSessionCreatedData | IChatGeneratedImageData | IChatAutomationConfigurationData | IChatAutomationConfiguredData;
+ 	private readonly _toolSpecificDataKind = observableValue<string | undefined>(this, undefined);
+@@ -226,6 +228,40 @@ export class ChatToolInvocation implements IChatToolInvocation {
  		return true;
  	}
  
@@ -292,14 +363,36 @@ index 13aa48ff..20b6d72c 100644
 +		return true;
 +	}
 +
++	/**
++	 * Stop on an extension's card whose tool had started (the user approved it, or it needed no approval): it ran
++	 * and was stopped, so it completes ("Ran …", with the extension's past-tense message) instead of "Skipped".
++	 * @returns true if applied
++	 */
++	public completeIfStarted(): boolean {
++		if (this.externalConfirmed !== true || this._state.get().type !== IChatToolInvocation.StateKind.Executing) {
++			return false;
++		}
++		this._setCompleted(undefined);
++		return true;
++	}
++
  	/**
  	 * Transition from streaming state to prepared/executing state.
  	 * Called when the full tool call is ready.
 diff --git a/src/vs/workbench/contrib/chat/test/common/model/chatModel.test.ts b/src/vs/workbench/contrib/chat/test/common/model/chatModel.test.ts
-index e6e923ef..f42551e9 100644
+index e6e923ef..5d2ce134 100644
 --- a/src/vs/workbench/contrib/chat/test/common/model/chatModel.test.ts
 +++ b/src/vs/workbench/contrib/chat/test/common/model/chatModel.test.ts
-@@ -1728,6 +1728,25 @@ suite('ChatResponseModel', () => {
+@@ -32,7 +32,7 @@ import { ChatAgentService, IChatAgentService } from '../../../common/participant
+ import { ChatModel, ChatRequestModel, ChatResponseResource, extractExportableSessionData, IChatRequestModeInfo, IExportableChatData, ISerializableChatData1, ISerializableChatData2, ISerializableChatData3, ISerializableChatModelInputState, isExportableSessionData, isSerializableSessionData, normalizeSerializableChatData, Response, serializeSendOptions, toChatHistoryContent } from '../../../common/model/chatModel.js';
+ import { ChatToolInvocation } from '../../../common/model/chatProgressTypes/chatToolInvocation.js';
+ import { ChatRequestTextPart } from '../../../common/requestParser/chatParserTypes.js';
+-import { ChatRequestQueueKind, IChatService, IChatTask, IChatTerminalToolInvocationData, IChatToolInvocation, ResponseModelState } from '../../../common/chatService/chatService.js';
++import { ChatRequestQueueKind, IChatService, IChatTask, IChatTerminalToolInvocationData, IChatToolInvocation, ResponseModelState, ToolConfirmKind } from '../../../common/chatService/chatService.js';
+ import { IToolResult, ToolDataSource } from '../../../common/tools/languageModelToolsService.js';
+ import { ChatAgentLocation, ChatModeKind } from '../../../common/constants.js';
+ import { MockChatService } from '../chatService/mockChatService.js';
+@@ -1728,6 +1728,61 @@ suite('ChatResponseModel', () => {
  		assert.strictEqual(response.state, ResponseModelState.Cancelled);
  	});
  
@@ -320,6 +413,42 @@ index e6e923ef..f42551e9 100644
 +		assert.strictEqual(open.state.get().type, IChatToolInvocation.StateKind.Cancelled);
 +		assert.strictEqual(IChatToolInvocation.isComplete(open), true);
 +		assert.strictEqual(done.state.get().type, IChatToolInvocation.StateKind.Completed);
++	});
++
++	test('cancellation completes an approved, running external tool card and skips one still waiting for approval', async () => {
++		const model = testDisposables.add(instantiationService.createInstance(ChatModel, undefined, { initialLocation: ChatAgentLocation.Chat, canUseTools: true }));
++		const text = 'run two commands';
++		const request = model.addRequest({ text, parts: [new ChatRequestTextPart(new OffsetRange(0, text.length), new Range(1, text.length, 1, text.length), text)] }, { variables: [] }, 0);
++		const response = request.response!;
++
++		// The approved card first arrives waiting for approval, then the extension reports it approved (running).
++		model.acceptResponseProgress(request, { kind: 'externalToolInvocationUpdate', toolCallId: 'approved', toolName: 'Bash', isComplete: false, isConfirmed: false, invocationMessage: 'Running make' });
++		model.acceptResponseProgress(request, { kind: 'externalToolInvocationUpdate', toolCallId: 'approved', toolName: 'Bash', isComplete: false, isConfirmed: true, invocationMessage: 'Running make' });
++		model.acceptResponseProgress(request, { kind: 'externalToolInvocationUpdate', toolCallId: 'waiting', toolName: 'Bash', isComplete: false, isConfirmed: false, invocationMessage: 'Running rm a.txt' });
++		const [approved, waiting] = response.response.value.filter(p => p.kind === 'toolInvocation') as IChatToolInvocation[];
++
++		model.cancelRequest(request);
++
++		assert.strictEqual(approved.state.get().type, IChatToolInvocation.StateKind.Completed);
++		const waitingState = waiting.state.get();
++		assert.strictEqual(waitingState.type, IChatToolInvocation.StateKind.Cancelled);
++		assert.strictEqual(waitingState.type === IChatToolInvocation.StateKind.Cancelled && waitingState.reason, ToolConfirmKind.Skipped);
++	});
++
++	test('cancellation marks an extension\'s chat session reply "Stopped."; a local chat\'s reply is left as is', async () => {
++		const send = (model: ChatModel) => {
++			const text = 'explain';
++			const request = model.addRequest({ text, parts: [new ChatRequestTextPart(new OffsetRange(0, text.length), new Range(1, text.length, 1, text.length), text)] }, { variables: [] }, 0);
++			model.acceptResponseProgress(request, { kind: 'markdownContent', content: new MarkdownString('A batch window trades latency for thr') });
++			model.cancelRequest(request);
++			return request.response!.response.toString();
++		};
++
++		const contributed = testDisposables.add(instantiationService.createInstance(ChatModel, undefined, { initialLocation: ChatAgentLocation.Chat, canUseTools: true, resource: URI.parse('agent-claude:/session-1') }));
++		assert.strictEqual(send(contributed), 'A batch window trades latency for thr\n\n*Stopped.*');
++
++		const local = testDisposables.add(instantiationService.createInstance(ChatModel, undefined, { initialLocation: ChatAgentLocation.Chat, canUseTools: true }));
++		assert.strictEqual(send(local), 'A batch window trades latency for thr');
 +	});
 +
  	test('completed tool invocation ignores duplicate completion', async () => {
@@ -368,3 +497,97 @@ index 6502863c..ac6ebfe4 100644
  		const otherVariables = element.variables.filter(variable => !isExplicitFileOrImageVariableEntry(variable) && !isPasteVariableEntry(variable));
  		const isStickyAndEditing = !element.confirmation && isStickyScrollRow && element.id === this.viewModel?.editing?.id;
  		if (!element.confirmation && !isStickyAndEditing) {
+diff --git a/src/vs/workbench/contrib/chat/test/browser/attachments/chatVariables.test.ts b/src/vs/workbench/contrib/chat/test/browser/attachments/chatVariables.test.ts
+index 04e89f2a..34c0d69b 100644
+--- a/src/vs/workbench/contrib/chat/test/browser/attachments/chatVariables.test.ts
++++ b/src/vs/workbench/contrib/chat/test/browser/attachments/chatVariables.test.ts
+@@ -319,6 +319,39 @@ suite('ChatDynamicVariableModel', () => {
+ 		});
+ 	});
+ 
++	test('typing inside a reference turns it into plain text and keeps every character (#23)', () => {
++		const { editor, model } = createDynamicVariableModel('@sections/intro.tex:L2 @sections/intro.tex:L4  then');
++		model.addReference(createMockVariable({ id: 'a', range: new Range(1, 1, 1, 23) }));
++		model.addReference(createMockVariable({ id: 'b', range: new Range(1, 24, 1, 46) }));
++
++		editor.executeEdits('test', [{ range: new Range(1, 34, 1, 34), text: 'Z' }]);
++
++		assert.deepStrictEqual({
++			text: editor.getValue(),
++			variables: model.variables.map(variable => [variable.id, variable.range]),
++		}, {
++			text: '@sections/intro.tex:L2 @sections/Zintro.tex:L4  then',
++			variables: [['a', new Range(1, 1, 1, 23)]],
++		});
++	});
++
++	test('pasting inside a reference turns it into plain text too; Backspace inside one still removes it whole', () => {
++		const { editor, model } = createDynamicVariableModel('@main.tex:L7 @main.tex:L9 ');
++		model.addReference(createMockVariable({ id: 'a', range: new Range(1, 1, 1, 13) }));
++		model.addReference(createMockVariable({ id: 'b', range: new Range(1, 14, 1, 26) }));
++
++		editor.executeEdits('test', [{ range: new Range(1, 6, 1, 6), text: 'pasted' }]);
++		editor.executeEdits('test', [{ range: new Range(1, 30, 1, 31), text: '' }]);
++
++		assert.deepStrictEqual({
++			text: editor.getValue(),
++			variables: model.variables,
++		}, {
++			text: '@mainpasted.tex:L7  ',
++			variables: [],
++		});
++	});
++
+ 	test('does not retain attachment payload after the backing attachment is removed', () => {
+ 		const attachment = createMockAttachment({
+ 			kind: 'image',
+diff --git a/src/vs/workbench/contrib/chat/browser/widget/media/chat.css b/src/vs/workbench/contrib/chat/browser/widget/media/chat.css
+index 14644bdb..8c58e7ab 100644
+--- a/src/vs/workbench/contrib/chat/browser/widget/media/chat.css
++++ b/src/vs/workbench/contrib/chat/browser/widget/media/chat.css
+@@ -2168,6 +2168,20 @@ have to be updated for changes to the rules above, or to support more deeply nes
+ 	max-width: 100%;
+ }
+ 
++/* Agent chat: in a narrow chat (the sessions list beside it) the pickers under the input wrap onto a second row
++   instead of cutting every label down to a few letters ("Accept …", "O."). A label longer than the row still
++   ends in an ellipsis (#37). */
++.interactive-session .chat-secondary-toolbar .chat-secondary-input-toolbar .monaco-action-bar .actions-container,
++.interactive-session .chat-secondary-toolbar .chat-sessionPicker-container {
++	flex-wrap: wrap;
++	row-gap: 2px;
++}
++
++.interactive-session .chat-secondary-toolbar .chat-sessionPicker-item {
++	flex-shrink: 0;
++	max-width: 100%;
++}
++
+ .monaco-workbench .interactive-session .chat-input-toolbars .monaco-action-bar .action-item .codicon,
+ .monaco-workbench .interactive-session .chat-input-toolbars .action-label .codicon {
+ 	color: var(--vscode-icon-foreground) !important;
+diff --git a/src/vs/workbench/contrib/chat/common/chatService/chatService.ts b/src/vs/workbench/contrib/chat/common/chatService/chatService.ts
+index 04cfa851..e2df1242 100644
+--- a/src/vs/workbench/contrib/chat/common/chatService/chatService.ts
++++ b/src/vs/workbench/contrib/chat/common/chatService/chatService.ts
+@@ -1169,6 +1169,8 @@ export interface IChatExternalToolInvocationUpdate {
+ 	toolCallId: string;
+ 	toolName: string;
+ 	isComplete: boolean;
++	/** False while the extension still waits for the user's approval (the tool hasn't started). */
++	isConfirmed?: boolean;
+ 	errorMessage?: string;
+ 	invocationMessage?: string | IMarkdownString;
+ 	pastTenseMessage?: string | IMarkdownString;
+diff --git a/src/vs/workbench/api/common/extHostTypeConverters.ts b/src/vs/workbench/api/common/extHostTypeConverters.ts
+index 0ed06f43..dc0604d8 100644
+--- a/src/vs/workbench/api/common/extHostTypeConverters.ts
++++ b/src/vs/workbench/api/common/extHostTypeConverters.ts
+@@ -2989,6 +2989,7 @@ export namespace ChatToolInvocationPart {
+ 				toolCallId: part.toolCallId,
+ 				toolName: part.toolName,
+ 				isComplete: !!part.isComplete,
++				isConfirmed: part.isConfirmed,
+ 				invocationMessage: part.invocationMessage ? MarkdownString.from(part.invocationMessage) : undefined,
+ 				pastTenseMessage: part.pastTenseMessage ? MarkdownString.from(part.pastTenseMessage) : undefined,
+ 				toolSpecificData,

@@ -94,7 +94,7 @@ export class ReviewController {
     private readonly bridge: CoreBridge,
     private readonly docs: DocumentState,
     private readonly log: Logger,
-    /** Called when an external change hits a file with unsaved edits (never overwritten; the user resolves it). */
+    /** Called when any unreported disk change hits a file with unsaved edits (never overwritten; the user resolves it). */
     private readonly onConflict?: (absPath: string) => void,
     /** Paths as VS Code knows them (workspace folders opened through symlinks); used for the bridge and onConflict. */
     readonly ui: UiPaths = new UiPaths([]),
@@ -148,9 +148,25 @@ export class ReviewController {
     for (const rel of e.paths) {
       const abs = toAbs(engine.root, rel);
       const f = this.files.find((x) => x.absPath === abs);
+      this.checkConflict(abs, f, e.reason);
       if (f) { await this.syncFile(f, e.reason); }
       else if (this.pushed.has(abs)) { await this.unpush(abs); }
     }
+  }
+
+  /**
+   * A disk change nobody reported (an agent through the chat or a terminal, a shell command, any other tool: seen by the
+   * watcher or a rescan) under unsaved edits is a conflict, whether or not the file is still pending afterwards. The
+   * buffer and the disk are left alone; the user merges (#34).
+   */
+  private checkConflict(abs: string, f: PendingFile | undefined, reason: ChangeEvent['reason']): void {
+    if (reason !== 'external' && reason !== 'rescan') { return; }
+    // Deleted, binary or large files have nothing to merge.
+    if (f ? !f.inline : !fs.existsSync(abs)) { return; }
+    if (!this.docs.isDirty(abs)) { return; }
+    this.log.trace?.(`${abs}: changed on disk under unsaved edits (conflict, ${reason})`);
+    this.conflicted.add(abs);
+    this.onConflict?.(this.ui.toUi(abs));
   }
 
   private async syncFile(f: PendingFile, reason: ChangeEvent['reason'] | undefined): Promise<void> {
@@ -158,13 +174,7 @@ export class ReviewController {
       if (this.pushed.has(f.absPath)) { await this.unpush(f.absPath); }
       return;
     }
-    const dirty = this.docs.isDirty(f.absPath);
-    if (dirty && reason === 'external') {
-      this.log.trace?.(`${f.absPath}: external change under unsaved edits (conflict)`);
-      this.conflicted.add(f.absPath);
-      this.onConflict?.(this.ui.toUi(f.absPath));
-    }
-    if (dirty && this.pushed.has(f.absPath)) {
+    if (this.docs.isDirty(f.absPath) && this.pushed.has(f.absPath)) {
       // The UI shows baseline vs. buffer; moving the baseline under unsaved typing would mislabel it.
       this.log.trace?.(`${f.absPath}: baseline push deferred (unsaved edits)`);
       this.deferred.add(f.absPath);

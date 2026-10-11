@@ -14,6 +14,12 @@ describe('prompt blocks', () => {
 		]);
 	});
 
+	it('a note from the editor goes after the text and the links, so a slash command still leads (#32)', () => {
+		const blocks = promptBlocks({ prompt: 'go on @notes.txt', references: [], root: '/w', exists, note: '(Note from the editor)' });
+		expect(blocks.map(b => b.type)).toEqual(['text', 'resource_link', 'text']);
+		expect(blocks.at(-1)).toEqual({ type: 'text', text: '(Note from the editor)' });
+	});
+
 	it('a slash command goes first; duplicates and unknown files are dropped', () => {
 		const blocks = promptBlocks({ prompt: 'focus @notes.txt and @notes.txt and @missing.txt', command: 'compact', references: [], root: '/w', exists });
 		expect(blocks[0]).toEqual({ type: 'text', text: '/compact focus @notes.txt and @notes.txt and @missing.txt' });

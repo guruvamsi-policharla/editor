@@ -23,6 +23,8 @@ export interface ToolCard {
 	terminal?: TerminalData;
 	/** Input/output shown in collapsible sections. */
 	simple?: { input: string; output: string };
+	/** Its permission prompt is open: it hasn't started (core can tell Skipped from stopped; see stream.ts). */
+	awaitingApproval?: boolean;
 }
 
 export type TodoStatus = 'not-started' | 'in-progress' | 'completed';
@@ -199,7 +201,8 @@ export class TurnRenderer {
 				if (isPlaceholder(change.call)) {
 					break;
 				}
-				const card = toolCard(change.call);
+				const fresh = toolCard(change.call);
+				const card = this.cards.get(fresh.id)?.awaitingApproval && !fresh.complete ? { ...fresh, awaitingApproval: true } : fresh;
 				const key = JSON.stringify(card);
 				if (this.shown.get(card.id) !== key) {
 					endThinking();
@@ -217,20 +220,41 @@ export class TurnRenderer {
 		return ops;
 	}
 
+	/** A card's permission prompt opened (true) or was answered (false): the card again, if it's shown. */
+	awaitApproval(id: string, awaiting: boolean): RenderOp[] {
+		const card = this.cards.get(id);
+		if (!card || card.complete || !!card.awaitingApproval === awaiting) {
+			return [];
+		}
+		const { awaitingApproval: _a, ...rest } = card;
+		const next: ToolCard = awaiting ? { ...rest, awaitingApproval: true } : rest;
+		this.cards.set(id, next);
+		this.shown.set(id, JSON.stringify(next));
+		return [{ op: 'tool', card: next }];
+	}
+
 	/**
 	 * Ops to close the turn: an open thinking block, and tool cards that never completed, so none keeps spinning.
 	 * This works when the turn ends with calls still open or the adapter crashes. After Stop, core has already
-	 * cancelled the response and drops these updates: an open command card keeps its spinner (core only cancels
-	 * invocations still streaming; see the agent-chat README, Known issues).
+	 * cancelled the response and drops these updates (patch 94 closes the live cards), so these are what a reopened
+	 * chat shows. A card in `notApproved` (its permission prompt was open, refused or dismissed) never ran: it says
+	 * so. Any other open card had started (a command the user approved was running): it was stopped, not skipped.
 	 */
-	finish(how: 'ended' | 'stopped' | 'interrupted' = 'ended'): RenderOp[] {
+	finish(how: 'ended' | 'stopped' | 'interrupted' = 'ended', notApproved: ReadonlySet<string> = new Set()): RenderOp[] {
 		const ops: RenderOp[] = this.thinking ? [{ op: 'thinkingDone', id: this.thinking }] : [];
 		this.thinking = undefined;
 		const note = how === 'stopped' ? 'Stopped' : how === 'interrupted' ? 'Interrupted' : '';
 		for (const card of this.cards.values()) {
 			if (!card.complete) {
-				const past = note ? (card.past ? `${card.past} (${note.toLowerCase()})` : note) : card.past;
-				const closed = { ...card, complete: true, past };
+				let closed: ToolCard;
+				if (note && notApproved.has(card.id)) {
+					const what = card.terminal ? code(card.terminal.command) : card.invocation || card.toolName;
+					const { terminal: _terminal, awaitingApproval: _awaiting, ...rest } = card;
+					closed = { ...rest, complete: true, invocation: `Didn't run ${what}`, past: `Didn't run ${what}: ${note.toLowerCase()} before it was approved` };
+				} else {
+					const { awaitingApproval: _awaiting, ...rest } = card;
+					closed = { ...rest, complete: true, past: note ? (card.past ? `${card.past} (${note.toLowerCase()})` : note) : card.past };
+				}
 				this.cards.set(card.id, closed);
 				ops.push({ op: 'tool', card: closed });
 			}
@@ -254,4 +278,34 @@ export function permissionButtons(p: Pick<PermissionPrompt, 'choices'>): string[
 		seen.add(text);
 		return text;
 	});
+}
+
+/** The marker a stopped turn ends with: in the live footer (`footer`), and in a reopened chat's transcript. */
+export const STOPPED = 'Stopped';
+
+/**
+ * A response's footer details: "Stopped" for a turn ended by Stop (core drops a response's updates after Stop,
+ * but takes its result's details, so that's where the live transcript can say so), then the model and context use.
+ */
+export function footer(info: { stopped?: boolean; model?: string; usage?: { used: number; size: number } }): string {
+	return [
+		info.stopped ? STOPPED : undefined,
+		info.model,
+		info.usage?.size ? `${Math.round(100 * info.usage.used / info.usage.size)}% of context` : undefined,
+	].filter(Boolean).join(' · ');
+}
+
+/**
+ * What the agent is told with the next message after Stop ended a turn while commands the user had approved were
+ * running. Claude Code reports an interrupted tool call to the model as rejected ("The user doesn't want to
+ * proceed with this tool use"), so it would claim a command didn't run although it had (an `rm` already done).
+ */
+export function stoppedCommandsNote(commands: readonly string[]): string {
+	const list = commands.map(c => `- ${code(c)}`).join('\n');
+	return `(Note from the editor: the user pressed Stop while ${commands.length === 1 ? 'this command was' : 'these commands were'} running. The user had approved ${commands.length === 1 ? 'it' : 'them'}, and ${commands.length === 1 ? 'it' : 'they'} had started, so ${commands.length === 1 ? 'it' : 'they'} may have run partly or completely; it was not rejected. Check ${commands.length === 1 ? 'its' : 'their'} effects before saying ${commands.length === 1 ? 'it' : 'they'} didn't run.\n${list})`;
+}
+
+/** The commands a stopped turn left running (approved: not in `notApproved`), from its closing ops. */
+export function runningCommands(closing: readonly RenderOp[], notApproved: ReadonlySet<string>): string[] {
+	return closing.flatMap(o => (o.op === 'tool' && o.card.terminal && !notApproved.has(o.card.id) ? [o.card.terminal.command] : []));
 }

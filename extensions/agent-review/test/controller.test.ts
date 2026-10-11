@@ -225,6 +225,37 @@ describe('ReviewController', () => {
     expect(core.shown.get(abs)?.baseline).toBe('Intro.\nMethods.\nResults.\n');
   });
 
+  it('any unreported disk change under unsaved edits is a conflict, not only a pending one from the chat (#34)', async () => {
+    await open();
+    const abs = path.join(root, 'paper.tex');
+    dirty.add(abs); // the user types in the clean, accepted file
+    // A shell `sed -i`: a temp file renamed over the original; the watcher reports both paths.
+    const temp = path.join(root, 'sedX1a2b3');
+    fs.writeFileSync(temp, 'Intro.\nMethods.\nShell results.\n');
+    fs.renameSync(temp, abs);
+    await ctl.handleFsEvents([temp, abs]);
+    await ctl.idle();
+    expect(conflicts).toEqual([abs]);
+    expect(read(abs)).toBe('Intro.\nMethods.\nShell results.\n'); // nothing overwritten
+
+    // A tool puts the accepted text back: nothing pending any more, but the buffer is still stale.
+    await agentWrite('paper.tex', 'Intro.\nMethods.\nResults.\n');
+    expect(ctl.pendingFiles).toEqual([]);
+    expect(conflicts).toEqual([abs, abs]);
+
+    // A change the watcher missed, found by a rescan.
+    fs.writeFileSync(abs, 'Intro.\nMethods.\nRescanned results.\n');
+    for (const e of review.engines.values()) { await e.rescan(); }
+    await ctl.idle();
+    expect(conflicts).toEqual([abs, abs, abs]);
+    expect(ctl.hasConflict(abs)).toBe(true);
+
+    // Not a conflict: the user's own save, or a change while the buffer is clean.
+    await userSave(abs, 'Intro.\nMethods.\nRescanned results, edited.\n');
+    await agentWrite('paper.tex', 'Intro.\nMethods.\nAgent results.\n');
+    expect(conflicts).toHaveLength(3);
+  });
+
   it('agent write under unsaved edits: the stale save is not attributed; the merged result keeps agent lines pending', async () => {
     await open();
     const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\n');

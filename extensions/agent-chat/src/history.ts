@@ -17,6 +17,11 @@ export interface ChatEntry {
 	created: number;
 	updated: number;
 	turns: number;
+	/**
+	 * The chat's own option values (mode, model, effort, …; ACP config option id → value), as its session last
+	 * had them: a reopened chat shows them and gets them back (settings.ts). Missing in chats saved before.
+	 */
+	settings?: Record<string, string>;
 }
 
 export interface SearchHit {
@@ -26,6 +31,9 @@ export interface SearchHit {
 }
 
 const INDEX = 'index.json';
+/** Agent sessions removed from history (`<harness>:<session id>`): not listed again from `session/list`. */
+const REMOVED = 'removed.json';
+const MAX_REMOVED = 2000;
 /** Chats kept; the oldest beyond this are dropped. */
 const MAX_CHATS = 500;
 
@@ -35,6 +43,7 @@ function safeName(resource: string): string {
 
 export class ChatHistory {
 	private entries: ChatEntry[] | undefined;
+	private removedIds: string[] | undefined;
 	private readonly texts = new Map<string, string>();
 
 	constructor(private readonly dir: string) { }
@@ -94,13 +103,55 @@ export class ChatHistory {
 		this.write(INDEX, entries);
 	}
 
+	/** Updates a saved chat's settings (no-op for a chat that isn't saved yet). */
+	saveSettings(resource: string, settings: Record<string, string>): void {
+		const entry = this.get(resource);
+		if (entry && JSON.stringify(entry.settings) !== JSON.stringify(settings)) {
+			this.entries = this.index().map(e => (e === entry ? { ...e, settings } : e));
+			this.write(INDEX, this.entries);
+		}
+	}
+
+	/**
+	 * Removes a chat: its entry and transcript. Its agent session (when it has one) is remembered as removed, so the
+	 * agent's own list (`session/list`, which still has it) doesn't bring it back.
+	 */
 	remove(resource: string, writeIndex = true): void {
 		rmSync(join(this.dir, safeName(resource)), { force: true });
 		this.texts.delete(resource);
 		if (writeIndex) {
+			const entry = this.get(resource);
 			this.entries = this.index().filter(e => e.resource !== resource);
 			this.write(INDEX, this.entries);
+			if (entry?.sessionId) {
+				this.forgetSession(entry.harness, entry.sessionId);
+			}
 		}
+	}
+
+	/** Remembers an agent session as removed from history (one the agent lists, or a removed chat's). */
+	forgetSession(harness: string, sessionId: string): void {
+		const id = `${harness}:${sessionId}`;
+		const removed = this.removed();
+		if (!removed.includes(id)) {
+			this.removedIds = [...removed, id].slice(-MAX_REMOVED);
+			this.write(REMOVED, this.removedIds);
+		}
+	}
+
+	isRemoved(harness: string, sessionId: string): boolean {
+		return this.removed().includes(`${harness}:${sessionId}`);
+	}
+
+	private removed(): string[] {
+		if (!this.removedIds) {
+			try {
+				this.removedIds = (JSON.parse(readFileSync(join(this.dir, REMOVED), 'utf8')) as unknown[]).filter((x): x is string => typeof x === 'string');
+			} catch {
+				this.removedIds = [];
+			}
+		}
+		return this.removedIds;
 	}
 
 	private text(resource: string): string {
@@ -127,4 +178,24 @@ export class ChatHistory {
 		}
 		return out;
 	}
+}
+
+/** A resource as a Uri or its components (what the sessions list's context menu passes). */
+export interface ResourceLike {
+	scheme: string;
+	path: string;
+	authority?: string;
+	query?: string;
+	fragment?: string;
+}
+
+/**
+ * The chat the sessions list's context menu means. Core marshals `{ session: { resource }, $mid }`; the extension
+ * host turns that into our ChatSessionItem (`resource`) when it finds the item, else passes it on as is (the
+ * resource as URI components). A resource itself works too.
+ */
+export function menuTarget(arg: unknown): ResourceLike | undefined {
+	const resource = (v: unknown): ResourceLike | undefined => (v && typeof v === 'object' && typeof (v as ResourceLike).scheme === 'string' && typeof (v as ResourceLike).path === 'string' ? v as ResourceLike : undefined);
+	const a = (arg && typeof arg === 'object' ? arg : {}) as { resource?: unknown; session?: { resource?: unknown } };
+	return resource(arg) ?? resource(a.resource) ?? resource(a.session?.resource);
 }

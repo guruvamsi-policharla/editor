@@ -19,20 +19,23 @@ import { join } from 'node:path';
 import * as vscode from 'vscode';
 import {
 	AdapterInstaller, AgentSupervisor, claudePersistence, codexPersistence, configControls, errorMessage, HarnessClient,
-	isAuthRequired, isDangerous, PermissionBroker, withOverride,
-	type AcpSession, type acp, type AgentStatus, type ConfigControl, type HarnessProfile, type PermissionPrompt, type ProfileOverride,
+	isAuthRequired, isDangerous, optionValues, PermissionBroker, withOverride, withValues,
+	type AcpSession, type acp, type AgentStatus, type ConfigControl, type HarnessProfile, type PermissionPrompt, type ProfileOverride, type SettingsResult,
 } from '@editor/acp-client';
 import { changedSelections, groupsFromControls, modelChoices, signInGroup, SIGN_IN_GROUP } from './groups.js';
 import type { ChatEntry, ChatHistory } from './history.js';
 import { loginCommand, resolveLaunch } from './launch.js';
 import { HarnessModels } from './models.js';
 import { promptBlocks, type PromptReference } from './prompt.js';
-import { permissionButtons, TurnRenderer } from './render.js';
+import { footer, permissionButtons, runningCommands, stoppedCommandsNote, TurnRenderer } from './render.js';
 import type { Lease, TurnScheduler } from './scheduler.js';
+import { attributeChanges, ECHO_MS, modelIdentifier, shownSettings, startValues, type PickerEvent, type PickerPush } from './settings.js';
 import { historyTurns, StreamWriter } from './stream.js';
 import { ReplayBuilder, TranscriptBuilder } from './transcript.js';
 
 const CONFIRM_TOOL = 'vscode_get_confirmation_with_options';
+/** How long after Stop a turn's result may take before a "Stopped" one goes ahead (core waits a second). */
+const STOP_RESULT_MS = 600;
 /** Opening a chat this long after activation counts as the user's doing (not a window restore): warm up. */
 const WARM_AFTER_MS = 5000;
 
@@ -54,6 +57,11 @@ const LISTED = '/session/';
 
 const icon = (id: string) => new vscode.ThemeIcon(id);
 
+/** The selected values of option groups, by group id. */
+function selections(groups: readonly vscode.ChatSessionProviderOptionGroup[]): Record<string, string> {
+	return Object.fromEntries(groups.flatMap(g => (g.selected ? [[g.id, g.selected.id] as const] : [])));
+}
+
 export class HarnessChat implements vscode.Disposable {
 	readonly type: string;
 	private client: HarnessClient | undefined;
@@ -63,12 +71,27 @@ export class HarnessChat implements vscode.Disposable {
 	private warmSession: AcpSession | undefined;
 	private auth: 'unknown' | 'required' = 'unknown';
 	private readonly inputStates = new Set<vscode.ChatSessionInputState>();
+	/** What we last set in each input state's pickers (set again only when it changes). */
+	private readonly lastSet = new WeakMap<vscode.ChatSessionInputState, string>();
 	/**
-	 * What we last put in each input state's pickers. Core reports our own `groups` assignments back through
-	 * onDidChange, asynchronously; only selections that differ from these are the user's.
+	 * Each input state's own values: what we set, and the user's changes attributed to it. Core also reports other
+	 * chats' changes to it (settings.ts), so its `groups` can hold another chat's values.
 	 */
-	private readonly lastSet = new WeakMap<vscode.ChatSessionInputState, Map<string, string>>();
-	private readonly pickerTimers = new WeakMap<vscode.ChatSessionInputState, ReturnType<typeof setTimeout>>();
+	private readonly own = new WeakMap<vscode.ChatSessionInputState, Map<string, string>>();
+	/** Each input state's values when we last looked: core's reports are changes against these. */
+	private readonly seen = new WeakMap<vscode.ChatSessionInputState, Map<string, string>>();
+	/** Values set in some chat's pickers lately (core echoes them to the other chats). */
+	private pushes: PickerPush<vscode.ChatSessionInputState>[] = [];
+	private readonly changedStates = new Set<vscode.ChatSessionInputState>();
+	private pickerTimer: ReturnType<typeof setTimeout> | undefined;
+	/** Chats whose turn is running. */
+	private readonly running = new Set<string>();
+	/** Chats whose last turn was stopped with approved commands running → what to tell the agent next time. */
+	private readonly stopNotes = new Map<string, string>();
+	/** Chats whose message is waiting for another chat's turn → the editor tab it was sent from. */
+	private readonly waitingTabs = new Map<string, vscode.Tab>();
+	/** Chats whose session is getting its settings back (resumed with the agent's defaults): not shown or saved. */
+	private readonly reconciling = new Set<string>();
 	private readonly items = new Map<string, vscode.ChatSessionItem>();
 	/** chat session resource → the model picker's selection at its last message */
 	private readonly pickedModels = new Map<string, string>();
@@ -110,6 +133,8 @@ export class HarnessChat implements vscode.Disposable {
 			item.timing = { created: Date.now(), lastRequestStarted: Date.now() };
 			controller.items.add(item);
 			this.items.set(resource.toString(), item);
+			// Core copies the new chat's picker values to it next, and reports them to every chat (settings.ts).
+			this.pushed(undefined, resource.toString(), selections(ctx.inputState.groups));
 			return item;
 		};
 		controller.getChatSessionInputState = (resource, ctx) => this.inputState(resource, ctx);
@@ -121,6 +146,7 @@ export class HarnessChat implements vscode.Disposable {
 			provideChatSessionContent: resource => this.content(resource),
 		};
 		this.publishModels();
+		this.disposables.push(vscode.window.tabGroups.onDidChangeTabs(e => this.onTabsClosed(e.closed)));
 		return vscode.Disposable.from(controller, participant, vscode.chat.registerChatSessionContentProvider(this.type, provider, participant), this);
 	}
 
@@ -258,7 +284,7 @@ export class HarnessChat implements vscode.Disposable {
 		const ours = new Set(this.env.history.list(this.profile.id).map(e => e.sessionId));
 		for (const info of this.listed) {
 			// Untitled ones never had a message (a chat opened and left empty).
-			if (ours.has(info.sessionId) || !info.title?.trim()) {
+			if (ours.has(info.sessionId) || !info.title?.trim() || this.env.history.isRemoved(this.profile.id, info.sessionId)) {
 				continue;
 			}
 			const resource = vscode.Uri.from({ scheme: this.type, path: `${LISTED}${encodeURIComponent(info.sessionId)}` });
@@ -300,9 +326,13 @@ export class HarnessChat implements vscode.Disposable {
 			turns = await this.loadListed(key, decodeURIComponent(resource.path.slice(LISTED.length)));
 		}
 		const entry = this.env.history.get(key);
+		// The chat's own picker values (its session's, or the ones saved with it): core shows these for this chat.
+		const options = selections(this.groupsFor(resource));
+		this.pushed(undefined, key, options);
 		return {
-			history: historyTurns(turns ?? [], this.type, key),
+			history: historyTurns(turns ?? [], this.type, key, value => modelIdentifier(this.type, value)),
 			requestHandler: undefined,
+			options,
 			...(entry ? { title: entry.title } : {}),
 		};
 	}
@@ -352,6 +382,7 @@ export class HarnessChat implements vscode.Disposable {
 			created: prev?.created ?? item?.timing?.created ?? Date.now(),
 			updated: Date.now(),
 			turns: transcript?.turns.length ?? prev?.turns ?? 0,
+			...(session && !this.reconciling.has(key) ? { settings: optionValues(session.view.state.configOptions) } : prev?.settings ? { settings: prev.settings } : {}),
 		};
 		try {
 			this.env.history.save(entry, transcript?.turns, transcript?.text());
@@ -368,8 +399,12 @@ export class HarnessChat implements vscode.Disposable {
 		this.transcripts.delete(key);
 		this.items.delete(key);
 		this.env.history.remove(key);
-		await session?.close();
+		if (resource.path.startsWith(LISTED)) {
+			// Listed by the agent and never opened here: only the agent's list has it.
+			this.env.history.forgetSession(this.profile.id, decodeURIComponent(resource.path.slice(LISTED.length)));
+		}
 		this.refreshItems();
+		await session?.close();
 	}
 
 	owns(resource: vscode.Uri): boolean {
@@ -383,24 +418,48 @@ export class HarnessChat implements vscode.Disposable {
 		return `agentChat.config.${this.profile.id}`;
 	}
 
+	/** The options last seen, for the pickers' choices before a session runs (their values are per chat). */
 	private remember(session: AcpSession): void {
 		void this.env.context.globalState.update(this.cacheKey(), session.view.state.configOptions);
 	}
 
+	private cached(): acp.SessionConfigOption[] | undefined {
+		return this.warmSession?.view.state.configOptions ?? this.env.context.globalState.get<acp.SessionConfigOption[]>(this.cacheKey());
+	}
+
 	private controlsFor(session: AcpSession | undefined): ConfigControl[] {
-		const options = session?.view.state.configOptions ?? this.warmSession?.view.state.configOptions ?? this.env.context.globalState.get<acp.SessionConfigOption[]>(this.cacheKey());
-		return configControls(options, this.profile);
+		return configControls(session?.view.state.configOptions ?? this.cached(), this.profile);
+	}
+
+	/**
+	 * A chat's options: its session's; else (not running yet) the choices last seen with the values saved with the
+	 * chat; a new chat's start from the profile's defaults (Claude: Accept edits), never from another chat's.
+	 */
+	private optionsFor(resource: vscode.Uri | undefined): acp.SessionConfigOption[] {
+		const session = this.sessionFor(resource);
+		if (session) {
+			return session.view.state.configOptions;
+		}
+		const entry = resource ? this.env.history.get(resource.toString()) : undefined;
+		return withValues(this.cached(), startValues(entry, withOverride(this.profile, this.override()).defaults, this.cached(), this.profile));
+	}
+
+	private savedSettings(entry: ChatEntry): Record<string, string> {
+		return startValues(entry, undefined, this.cached(), this.profile);
 	}
 
 	private sessionFor(resource: vscode.Uri | undefined): AcpSession | undefined {
 		return resource ? this.sessions.get(resource.toString()) : undefined;
 	}
 
-	private groupsFor(session: AcpSession | undefined, previous?: Pick<vscode.ChatSessionInputState, 'groups'>): vscode.ChatSessionProviderOptionGroup[] {
+	/** What a chat's pickers show. A new chat (no resource) keeps the user's own picks (`own`). */
+	private groupsFor(resource: vscode.Uri | undefined, state?: vscode.ChatSessionInputState): vscode.ChatSessionProviderOptionGroup[] {
+		const session = this.sessionFor(resource);
 		if (this.auth === 'required' && !session) {
 			return [signInGroup(this.profile, icon)];
 		}
-		return groupsFromControls(this.controlsFor(session), icon, previous);
+		const own = !resource && state ? this.own.get(state) : undefined;
+		return groupsFromControls(configControls(this.optionsFor(resource), this.profile), icon, own ? { groups: [...own].map(([id, value]) => ({ id, name: id, items: [], selected: { id: value, name: value } })) } : undefined);
 	}
 
 	private publishModels(session?: AcpSession): void {
@@ -412,72 +471,115 @@ export class HarnessChat implements vscode.Disposable {
 		}
 	}
 
-	/** Re-render pickers (and models) from the sessions' current options. */
+	/** Re-render pickers (and models) from the chats' current options. */
 	private refresh(only?: AcpSession): void {
 		for (const state of this.inputStates) {
 			const session = this.sessionFor(state.sessionResource);
 			if (only && session !== only) {
 				continue;
 			}
-			this.setGroups(state, this.groupsFor(session));
+			if (state.sessionResource && this.reconciling.has(state.sessionResource.toString())) {
+				continue;
+			}
+			this.setGroups(state, this.groupsFor(state.sessionResource, state));
 		}
 		this.publishModels(only);
 	}
 
-	private setGroups(state: vscode.ChatSessionInputState, groups: vscode.ChatSessionProviderOptionGroup[]): void {
+	/**
+	 * Sets an input state's pickers when they differ from what we set last (`force`: always). Core shows them, and
+	 * also reports them to every other chat's input state: recorded, so those aren't taken for the user's changes.
+	 */
+	private setGroups(state: vscode.ChatSessionInputState, groups: vscode.ChatSessionProviderOptionGroup[], force = false): void {
+		const key = JSON.stringify(groups.map(g => [g.id, g.selected?.id, g.items.map(i => `${i.id}:${i.name}`)]));
+		if (!force && this.lastSet.get(state) === key) {
+			return;
+		}
+		this.lastSet.set(state, key);
 		this.record(state, groups);
+		this.pushed(state, state.sessionResource?.toString(), selections(groups));
 		state.groups = groups;
 	}
 
+	/** The pickers' values as this chat's own (`own`) and as last seen in its input state (`seen`). */
 	private record(state: vscode.ChatSessionInputState, groups: readonly vscode.ChatSessionProviderOptionGroup[]): void {
-		this.lastSet.set(state, new Map(groups.flatMap(g => (g.selected ? [[g.id, g.selected.id] as const] : []))));
+		const values = new Map(Object.entries(selections(groups)));
+		this.own.set(state, values);
+		this.seen.set(state, new Map(values));
+	}
+
+	private pushed(target: vscode.ChatSessionInputState | undefined, chat: string | undefined, values: Record<string, string>): void {
+		const now = Date.now();
+		this.pushes = [...this.pushes.filter(p => now - p.at < ECHO_MS), { target, chat, values, at: now }];
 	}
 
 	private inputState(resource: vscode.Uri | undefined, ctx: { previousInputState: vscode.ChatSessionInputState | undefined }): vscode.ChatSessionInputState {
-		const session = this.sessionFor(resource);
-		// Selections carry over from the untitled chat only before there's a session; after that the session's win.
-		const groups = this.groupsFor(session, session ? undefined : ctx.previousInputState);
+		// Not ctx.previousInputState: core builds it from the last pickers set in any chat. A message runs with what
+		// its chat's pickers show (handle()), which core keeps per chat.
+		const groups = this.groupsFor(resource);
 		const state = this.controller.createChatSessionInputState(groups);
-		// Carried-over selections that differ from the session aren't recorded, so they count as the user's.
-		this.record(state, this.groupsFor(session));
+		this.lastSet.set(state, JSON.stringify(groups.map(g => [g.id, g.selected?.id, g.items.map(i => `${i.id}:${i.name}`)])));
+		this.record(state, groups);
+		// Core may set these in the chat (a new chat's), and the previous ones in the chat that gets a first message.
+		this.pushed(state, resource?.toString(), selections(groups));
+		if (ctx.previousInputState) {
+			this.pushed(undefined, undefined, selections(ctx.previousInputState.groups));
+		}
 		this.inputStates.add(state);
 		state.onDidDispose(() => this.inputStates.delete(state));
 		state.onDidChange(() => {
-			// Debounced, and read when it fires: core can report several (and stale) changes in a row.
-			clearTimeout(this.pickerTimers.get(state));
-			this.pickerTimers.set(state, setTimeout(() => { void this.onPickerChange(state); }, 50));
+			// Collected for a moment, and read when it fires: core reports a change to every chat's input state, and
+			// several (and stale) changes in a row.
+			this.changedStates.add(state);
+			clearTimeout(this.pickerTimer);
+			this.pickerTimer = setTimeout(() => { void this.onPickerChanges(); }, 100);
 		});
-		if (!session && Date.now() - this.env.activatedAt > WARM_AFTER_MS) {
+		if (!resource && Date.now() - this.env.activatedAt > WARM_AFTER_MS) {
 			this.env.markUsed();
 			this.warmUp();
 		}
 		return state;
 	}
 
-	/** The pickers the user changed since we last set them. */
-	private userChanges(state: vscode.ChatSessionInputState): vscode.ChatSessionProviderOptionGroup[] {
-		const last = this.lastSet.get(state);
-		return state.groups.filter(g => g.selected && last?.get(g.id) !== g.selected.id);
+	/** Picker changes core reported: applied to the chat they belong to, when that's clear (settings.ts). */
+	private async onPickerChanges(): Promise<void> {
+		const states = [...this.changedStates].filter(s => this.inputStates.has(s) && !s.groups.some(g => g.id === SIGN_IN_GROUP));
+		this.changedStates.clear();
+		const events: PickerEvent<vscode.ChatSessionInputState>[] = [];
+		for (const state of states) {
+			const seen = this.seen.get(state);
+			const changes = state.groups.filter(g => g.selected && seen?.get(g.id) !== g.selected.id).map(g => ({ id: g.id, value: g.selected!.id }));
+			this.seen.set(state, new Map(Object.entries(selections(state.groups))));
+			const chat = state.sessionResource?.toString();
+			if (changes.length) {
+				events.push({ target: state, chat, running: !!chat && this.running.has(chat), changes, current: optionValues(this.optionsFor(state.sessionResource)) });
+			}
+		}
+		for (const { target: state, changes } of attributeChanges(events, this.pushes, Date.now(), this.profile)) {
+			const own = this.own.get(state) ?? new Map<string, string>();
+			changes.forEach(c => own.set(c.id, c.value));
+			this.own.set(state, own);
+			const groups = state.groups.filter(g => changes.some(c => c.id === g.id));
+			this.env.log.info(`[${this.profile.id}] picker: ${changes.map(c => `${c.id}=${c.value}`).join(', ')}${state.sessionResource ? ` (${state.sessionResource.path})` : ' (new chat)'}`);
+			await this.applyPickerChange(state, groups);
+		}
 	}
 
-	private async onPickerChange(state: vscode.ChatSessionInputState): Promise<void> {
-		if (state.groups.some(g => g.id === SIGN_IN_GROUP)) {
-			return;
-		}
-		const changed = this.userChanges(state);
-		if (!changed.length) {
-			return;
-		}
-		this.record(state, state.groups);
-		const session = this.sessionFor(state.sessionResource) ?? this.warmSession;
+	private async applyPickerChange(state: vscode.ChatSessionInputState, groups: vscode.ChatSessionProviderOptionGroup[]): Promise<void> {
+		const session = this.sessionFor(state.sessionResource);
 		if (session) {
-			await this.applySelections(session, { groups: changed }, state);
-		} else {
-			// No session yet: confirm a dangerous choice now; it's applied with the first message.
-			for (const change of changedSelections(changed, this.controlsFor(undefined))) {
-				if (isDangerous(this.profile, change.id, change.value) && !await this.confirmDangerous(change.id, change.value)) {
-					this.revert(state, change.id, change.previous);
-				}
+			await this.applySelections(session, { groups }, state);
+			return;
+		}
+		// No session yet (a new chat, or one reopened from history): confirm a dangerous choice now; it's applied with
+		// the chat's next message. A saved chat keeps it (for a restart before that message).
+		const key = state.sessionResource?.toString();
+		const entry = key ? this.env.history.get(key) : undefined;
+		for (const change of changedSelections(groups, configControls(this.optionsFor(state.sessionResource), this.profile))) {
+			if (isDangerous(this.profile, change.id, change.value) && !await this.confirmDangerous(change.id, change.value)) {
+				this.revert(state, change.id, change.previous);
+			} else if (entry && key) {
+				this.env.history.saveSettings(key, { ...this.savedSettings(entry), [change.id]: change.value });
 			}
 		}
 	}
@@ -495,7 +597,9 @@ export class HarnessChat implements vscode.Disposable {
 	}
 
 	private revert(state: vscode.ChatSessionInputState, configId: string, value: string): void {
-		this.setGroups(state, state.groups.map(g => (g.id === configId ? { ...g, selected: g.items.find(i => i.id === value) ?? g.selected } : g)));
+		const own = this.own.get(state);
+		own?.set(configId, value);
+		this.setGroups(state, state.groups.map(g => (g.id === configId ? { ...g, selected: g.items.find(i => i.id === value) ?? g.selected } : g)), true);
 	}
 
 	/** Picker selections → `set_config_option` (dangerous values confirmed first). */
@@ -517,12 +621,87 @@ export class HarnessChat implements vscode.Disposable {
 		}
 		this.remember(session);
 		this.refresh(session);
+		if (live) {
+			// The picker shows what the session has (also when the change was refused).
+			this.setGroups(live, this.groupsFor(live.sessionResource, live), true);
+		}
+	}
+
+	/**
+	 * Before a message: the chat's session gets what its pickers show (core keeps them per chat). A dangerous value
+	 * is confirmed first. A permission value that can't be set falls back to the strictest one (AcpSession), and
+	 * when even that fails the message isn't sent (returns false). The pickers then show what the session has.
+	 */
+	private async reconcile(key: string, session: AcpSession, shown: Record<string, string>, stream: vscode.ChatResponseStream, settings: SettingsResult | undefined): Promise<boolean> {
+		const controls = this.controlsFor(session);
+		const wanted = { ...shown };
+		for (const [id, value] of Object.entries(wanted)) {
+			const control = controls.find(c => c.id === id);
+			if (!control || control.placement === 'model' || control.current === value || (isDangerous(this.profile, id, value) && !await this.confirmDangerous(id, value))) {
+				delete wanted[id];
+			}
+		}
+		const applied = Object.keys(wanted).length ? await session.applySettings(wanted) : undefined;
+		for (const f of [...settings?.failed ?? [], ...applied?.failed ?? []]) {
+			this.env.log.warn(`[${this.profile.id}] set ${f.id}=${f.value} failed: ${f.error}`);
+		}
+		this.remember(session);
+		this.reconciling.delete(key);
+		this.refresh(session);
+		// Core's pickers for this chat may show a value the session didn't take: show what it has.
+		for (const state of this.inputStates) {
+			if (state.sessionResource?.toString() === key) {
+				this.setGroups(state, this.groupsFor(state.sessionResource, state), true);
+			}
+		}
+		const permission = controls.find(c => c.id === this.profile.permissionOption?.configId);
+		const name = (value: string | undefined) => permission?.choices.find(c => c.id === value)?.name ?? value ?? 'its mode';
+		const was = permission ? shown[permission.id] ?? this.env.history.get(key)?.settings?.[permission.id] : undefined;
+		this.saveSettings(key, session);
+		const held = (settings?.permissionHeld ?? true) && (applied?.permissionHeld ?? true);
+		const fellBack = applied?.fellBackTo ?? settings?.fellBackTo;
+		if (!held) {
+			stream.warning(`${this.label} couldn't put this chat back in ${name(was)}: it's in ${name(fellBack)}, which asks less often. Nothing was sent. Pick a mode and send again, or restart ${this.label}.`);
+			return false;
+		}
+		if (fellBack) {
+			stream.warning(`${this.label} couldn't put this chat in ${name(was)}, so it's in ${name(fellBack)}, the strictest mode it offers.`);
+		}
+		return true;
+	}
+
+	/** Keep a saved chat's settings in step with its session. */
+	private saveSettings(key: string, session: AcpSession): void {
+		if (this.reconciling.has(key) || session.replaying) {
+			return;
+		}
+		try {
+			this.env.history.saveSettings(key, optionValues(session.view.state.configOptions));
+		} catch (e) {
+			this.env.log.warn(`[${this.profile.id}] couldn't save the chat's settings: ${errorMessage(e)}`);
+		}
 	}
 
 	// ---------------------------------------------------------------------------------------------------------
 	// A turn
 
-	private async handle(request: vscode.ChatRequest, context: vscode.ChatContext, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<vscode.ChatResult> {
+	/**
+	 * A message. After Stop, core takes the result (its footer says "Stopped") only if it comes within a second, and
+	 * the agent can take longer to end the turn: then the result goes ahead and the turn finishes behind it.
+	 */
+	private handle(request: vscode.ChatRequest, context: vscode.ChatContext, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<vscode.ChatResult> {
+		const turn = this.turn(request, context, stream, token);
+		let sub: vscode.Disposable | undefined;
+		const stopped = new Promise<vscode.ChatResult>(resolve => {
+			sub = token.onCancellationRequested(() => setTimeout(() => {
+				const key = context.chatSessionContext?.chatSessionItem.resource.toString();
+				resolve({ metadata: { stopReason: 'cancelled' }, ...this.details(key ? this.sessions.get(key) : undefined, true) });
+			}, STOP_RESULT_MS));
+		});
+		return Promise.race([turn, stopped]).finally(() => sub?.dispose());
+	}
+
+	private async turn(request: vscode.ChatRequest, context: vscode.ChatContext, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<vscode.ChatResult> {
 		this.env.markUsed();
 		if (!vscode.workspace.isTrusted) {
 			stream.warning(`${this.label} doesn't run in Restricted Mode. Trust this workspace to use it.`);
@@ -537,11 +716,16 @@ export class HarnessChat implements vscode.Disposable {
 		}
 
 		// The ACP session behind this chat: a live one, one reopened from history (resumed by ensureLive), or new.
+		// What this chat's pickers show (core keeps them per chat; it reports them to the other chats too).
+		const shown = shownSettings(context.chatSessionContext?.initialSessionOptions);
+		this.pushed(undefined, key, shown);
 		let session = this.sessions.get(key);
 		const firstMessage = !session;
-		const saved = session ? undefined : this.env.history.get(key)?.sessionId;
-		if (!session && saved) {
-			session = this.harness().restore(saved, this.env.context.globalState.get<acp.SessionConfigOption[]>(this.cacheKey()));
+		const entry = session ? undefined : this.env.history.get(key);
+		const saved = entry?.sessionId;
+		if (!session && entry && saved) {
+			// With the chat's own settings: the resume starts from the agent's defaults, and ensureLive sets them again.
+			session = this.harness().restore(saved, withValues(this.cached(), this.savedSettings(entry)));
 			this.attach(key, session, item);
 		} else if (!session) {
 			try {
@@ -565,6 +749,18 @@ export class HarnessChat implements vscode.Disposable {
 			writer.write(ops);
 			transcript.add(ops);
 		};
+		/** Tool calls whose permission prompt wasn't answered with an allow (open, refused, dismissed): they didn't run. */
+		const notApproved = new Set<string>();
+		// A slash command goes as is; the note waits for the next message.
+		const note = request.command ? undefined : this.stopNotes.get(key);
+		const close = (how: 'ended' | 'stopped' | 'interrupted') => {
+			const ops = renderer.finish(how, notApproved);
+			show(ops);
+			const ran = how === 'ended' ? [] : runningCommands(ops, notApproved);
+			if (ran.length) {
+				this.stopNotes.set(key, stoppedCommandsNote(ran));
+			}
+		};
 		let offChange: (() => void) | undefined;
 		let offAsker: (() => void) | undefined;
 		let lease: Lease | undefined;
@@ -579,8 +775,10 @@ export class HarnessChat implements vscode.Disposable {
 		}
 		/** A warning shown before the turn starts (repeated if the waiting line is cleared). */
 		let notice: string | undefined;
+		this.running.add(key);
 		try {
-			const { recovery } = await session.ensureLive();
+			this.reconciling.add(key);
+			const { recovery, settings } = await session.ensureLive();
 			if (recovery === 'resumed' && !firstMessage) {
 				stream.progress(`Reconnected to ${this.label}.`);
 			} else if (recovery === 'new') {
@@ -590,11 +788,11 @@ export class HarnessChat implements vscode.Disposable {
 				stream.warning(notice);
 			}
 
-			// Pickers chosen before the first message (carried over from the untitled chat), then the model picker.
-			// Later picker changes go through onPickerChange; re-applying the input state here could undo a change
-			// the agent made itself (leaving plan mode).
-			if (firstMessage && context.chatSessionContext) {
-				await this.applySelections(session, context.chatSessionContext.inputState, context.chatSessionContext.inputState);
+			// The chat's pickers (a new chat's picks before its first message too; the agent's own switches, leaving
+			// plan mode, are shown in them), then the model picker.
+			if (!await this.reconcile(key, session, shown, stream, settings)) {
+				transcript.endTurn(true);
+				return { metadata: { error: 'permission' } };
 			}
 			// The model picker keeps its selection when the agent switches models itself, so only a selection the user
 			// changed since the last message (or made before the first) is applied.
@@ -610,6 +808,9 @@ export class HarnessChat implements vscode.Disposable {
 				this.remember(session);
 				this.refresh(session);
 			}
+			// Saved with the turn: a reopened chat's model picker shows the model its last message ran on (core takes
+			// it from the history's last request).
+			transcript.setModel(this.controlsFor(session).find(c => c.placement === 'model')?.current);
 
 			// One agent edits at a time: wait while another chat's turn runs (plan mode never waits).
 			let waitedFor: string | undefined;
@@ -623,11 +824,26 @@ export class HarnessChat implements vscode.Disposable {
 					stream.markdown(`Another chat is working in this workspace: **${who}**. This message starts when it's done, so the two agents don't edit the same files at once.\n\n`);
 					stream.button({ command: 'agentChat.runNow', title: 'Run now', arguments: [id] });
 					stream.progress(`Waiting for ${who} to finish…`);
+					const tab = this.chatTab(key);
+					if (tab) {
+						this.waitingTabs.set(key, tab);
+					}
 				},
 			});
+			this.waitingTabs.delete(key);
 			if (!lease) {
 				transcript.endTurn(true);
-				return {};
+				if (!stop.signal.aborted) {
+					// The chat was closed while waiting (the response itself goes on: core keeps a chat with a running
+					// request): the message is dropped, and the reopened chat says so.
+					stream.clearToPreviousToolInvocation(vscode.ChatResponseClearToPreviousToolInvocationReason.NoReason);
+					stream.markdown('*Not sent: the chat was closed while this message was waiting.*');
+					transcript.add([{ op: 'markdown', text: '*Not sent: the chat was closed while this message was waiting.*' }]);
+					return { metadata: { stopReason: 'closed' } };
+				}
+				// Stop while waiting. Core drops the response's updates after Stop, so the waiting line can't be cleared:
+				// the footer says it wasn't sent.
+				return { details: 'Stopped while waiting: not sent', metadata: { stopReason: 'cancelled' } };
 			}
 			if (waitedFor) {
 				// The waiting line and its Run now button are done once the turn starts (Run now would only say so):
@@ -640,7 +856,16 @@ export class HarnessChat implements vscode.Disposable {
 			}
 
 			offChange = session.onChange(c => show(renderer.render(c)));
-			offAsker = this.harness().broker.setAsker(session.id, (p, signal) => this.askPermission(p, signal, request, token));
+			offAsker = this.harness().broker.setAsker(session.id, async (p, signal) => {
+				show(renderer.awaitApproval(p.toolCallId, true));
+				try {
+					return await this.askPermission(p, signal, request, token, notApproved);
+				} finally {
+					if (!token.isCancellationRequested) {
+						show(renderer.awaitApproval(p.toolCallId, false));
+					}
+				}
+			});
 
 			const blocks = promptBlocks({
 				prompt: request.prompt,
@@ -648,24 +873,31 @@ export class HarnessChat implements vscode.Disposable {
 				references: references(request),
 				root: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
 				exists: existsSync,
+				...(note ? { note } : {}),
 			});
+			if (note) {
+				this.stopNotes.delete(key);
+				this.env.log.info(`[${this.profile.id}] told the agent which approved commands were running at Stop`);
+			}
 			const links = blocks.filter(b => b.type === 'resource_link').map(b => (b.type === 'resource_link' ? b.name : ''));
 			this.env.log.info(`[${this.profile.id}] prompt: text${links.length ? ` + resource_link ${links.join(', ')}` : ''}`);
 			const result = await session.prompt(blocks);
-			show(renderer.finish(result.stopReason === 'cancelled' ? 'stopped' : 'ended'));
+			close(result.stopReason === 'cancelled' ? 'stopped' : 'ended');
 			transcript.endTurn(result.stopReason === 'cancelled');
 			// The contract guard, in the app too: the agent must never call fs/* or terminal/* (we don't serve them).
 			const forbidden = this.client?.supervisor.running?.connection.forbiddenInbound() ?? [];
 			this.env.log[forbidden.length ? 'error' : 'info'](`[${this.profile.id}] turn ended: ${result.stopReason}; fs/terminal requests from the agent: ${forbidden.length ? forbidden.join(', ') : 'none'}`);
 			return this.result(result, stream, session);
 		} catch (e) {
-			show(renderer.finish(token.isCancellationRequested ? 'stopped' : 'interrupted'));
+			close(token.isCancellationRequested ? 'stopped' : 'interrupted');
 			transcript.endTurn(token.isCancellationRequested);
 			if (token.isCancellationRequested) {
-				return {};
+				return { metadata: { stopReason: 'cancelled' }, ...this.details(session, true) };
 			}
 			return await this.turnError(e, stream);
 		} finally {
+			this.reconciling.delete(key);
+			this.running.delete(key);
 			lease?.release();
 			offChange?.();
 			offAsker?.();
@@ -689,12 +921,38 @@ export class HarnessChat implements vscode.Disposable {
 				item.label = c.title;
 				this.controller.items.add(item);
 			}
-			if ((c.kind === 'config' || c.kind === 'mode') && !session.replaying) {
+			if ((c.kind === 'config' || c.kind === 'mode') && !session.replaying && !this.reconciling.has(key)) {
 				this.remember(session);
 				this.refresh(session);
+				this.saveSettings(key, session);
 			}
 		});
 		this.refresh(session);
+	}
+
+	/**
+	 * The editor tab a chat's message was sent from: the active tab when it's a chat editor and the side bar's chat
+	 * isn't this one. Closing it gives up the chat's waiting message (#21).
+	 */
+	private chatTab(key: string): vscode.Tab | undefined {
+		if (vscode.window.activeChatPanelSessionResource?.toString() === key) {
+			return undefined;
+		}
+		const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+		const chatInput = (vscode as unknown as { TabInputChat?: abstract new (...args: never[]) => unknown }).TabInputChat;
+		return tab && chatInput && tab.input instanceof chatInput ? tab : undefined;
+	}
+
+	/** Closed chat tabs: their chats' waiting messages are given up (they would run with nobody looking). */
+	private onTabsClosed(closed: readonly vscode.Tab[]): void {
+		for (const [key, tab] of this.waitingTabs) {
+			// The same Tab object, or (should the API hand out a new one) the same chat tab in the same group.
+			if (closed.some(t => t === tab || (t.label === tab.label && t.group.viewColumn === tab.group.viewColumn && t.input?.constructor === tab.input?.constructor))) {
+				this.waitingTabs.delete(key);
+				const n = this.env.scheduler.cancelChat(key);
+				this.env.log.info(`[${this.profile.id}] chat tab closed: ${n} waiting message(s) dropped`);
+			}
+		}
 	}
 
 	/** The session is in a mode that can't edit (plan, read-only): its turns don't wait for other chats. */
@@ -714,14 +972,14 @@ export class HarnessChat implements vscode.Disposable {
 				stream.warning(`${this.label} declined to continue.`);
 				break;
 		}
-		const usage = session.view.state.usage;
-		const model = this.controlsFor(session).find(c => c.placement === 'model');
-		const modelName = model?.choices.find(c => c.id === model.current)?.name;
-		const details = [
-			modelName,
-			usage?.size ? `${Math.round(100 * usage.used / usage.size)}% of context` : undefined,
-		].filter(Boolean).join(' · ');
-		return { metadata: { stopReason: result.stopReason }, ...(details ? { details } : {}) };
+		return { metadata: { stopReason: result.stopReason }, ...this.details(session, result.stopReason === 'cancelled') };
+	}
+
+	/** The footer: "Stopped" for a stopped turn, the model, the context use. */
+	private details(session: AcpSession | undefined, stopped: boolean): { details?: string } {
+		const model = session && this.controlsFor(session).find(c => c.placement === 'model');
+		const details = footer({ stopped, model: model?.choices.find(c => c.id === model.current)?.name, ...(session?.view.state.usage ? { usage: session.view.state.usage } : {}) });
+		return details ? { details } : {};
 	}
 
 	private startError(e: unknown, stream: vscode.ChatResponseStream): vscode.ChatResult {
@@ -766,7 +1024,8 @@ export class HarnessChat implements vscode.Disposable {
 		return { metadata: { error: crashed ? 'crashed' : 'failed' } };
 	}
 
-	private async askPermission(p: PermissionPrompt, signal: AbortSignal, request: vscode.ChatRequest, token: vscode.CancellationToken): Promise<string | undefined> {
+	private async askPermission(p: PermissionPrompt, signal: AbortSignal, request: vscode.ChatRequest, token: vscode.CancellationToken, notApproved: Set<string>): Promise<string | undefined> {
+		notApproved.add(p.toolCallId);
 		const buttons = permissionButtons(p);
 		const lines: string[] = [];
 		if (p.command) {
@@ -787,7 +1046,11 @@ export class HarnessChat implements vscode.Disposable {
 			const part = result.content[0];
 			const label = part instanceof vscode.LanguageModelTextPart ? part.value : undefined;
 			const index = label === undefined ? -1 : buttons.indexOf(label);
-			return index >= 0 ? p.choices[index]!.optionId : undefined;
+			const choice = index >= 0 ? p.choices[index]! : undefined;
+			if (choice?.kind.startsWith('allow')) {
+				notApproved.delete(p.toolCallId);
+			}
+			return choice?.optionId;
 		} catch (e) {
 			this.env.log.info(`[${this.profile.id}] permission prompt closed: ${String(e)}`);
 			return undefined;

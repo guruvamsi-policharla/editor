@@ -1359,10 +1359,10 @@ index 00000000..6728ebe8
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
 new file mode 100644
-index 00000000..86b84181
+index 00000000..d1a60c7b
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
-@@ -0,0 +1,862 @@
+@@ -0,0 +1,876 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -2163,6 +2163,20 @@ index 00000000..86b84181
 +		await integration.rejectNearestChange(hunkWidgets()[0]);
 +		assert.strictEqual(model.getValue(), 'The router is a softmax. ABC\nThis paper asks how the routing works.\n');
 +		assert.deepStrictEqual(confirms, [], 'nothing of the user\'s is undone, so no question');
++	});
++
++	test('#15: typing at the end of a line the agent rewrote stays in the buffer after that change\'s Undo (no question)', async () => {
++		// The tester's case (session 5): the agent shortened a long line, the user typed at its end, then Undo. The
++		// line comes back long, so the typing ends up off screen at its end; it must still be there.
++		model.setValue('\\section{Method}\nA batch closes when full or at its deadline.\nRequests are padded.\n');
++		const { entry, integration } = await showPending('\\section{Method}\nA batch closes when it is full or when the oldest request reaches its deadline.\nRequests are padded.\n');
++		typeAtEndOf(2, 'ZZZ');
++		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && entry.originalModel.getValue().includes('ZZZ') ? d : undefined));
++		await timeout(0);
++
++		await integration.rejectNearestChange(hunkWidgets()[0]);
++		assert.strictEqual(model.getLineContent(2), 'A batch closes when it is full or when the oldest request reaches its deadline.ZZZ');
++		assert.deepStrictEqual(confirms, []);
 +	});
 +
 +	test('#15: text typed inside an agent change goes with it, so its Undo asks first; cancelling changes nothing', async () => {

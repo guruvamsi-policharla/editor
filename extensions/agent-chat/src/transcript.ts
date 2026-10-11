@@ -11,6 +11,8 @@ export interface TranscriptTurn {
 	ops: RenderOp[];
 	/** The turn ended by Stop. */
 	stopped?: boolean;
+	/** The harness's model value the turn ran on. */
+	model?: string;
 }
 
 /** Tool output kept per card. */
@@ -87,6 +89,14 @@ export class TranscriptBuilder {
 					break;
 				}
 			}
+		}
+	}
+
+	/** The model the current turn runs on. */
+	setModel(model: string | undefined): void {
+		const turn = this.turns.at(-1);
+		if (turn && model) {
+			turn.model = model;
 		}
 	}
 

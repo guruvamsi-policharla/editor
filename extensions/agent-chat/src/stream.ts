@@ -1,7 +1,7 @@
 // Render ops → VS Code chat stream parts. Never pushes edit parts (textEdit/workspaceEdit/externalEdit): the
 // harness writes files itself and agent-review shows Keep/Undo, so the chat's own editing session stays empty.
 import * as vscode from 'vscode';
-import type { RenderOp, ToolCard } from './render.js';
+import { STOPPED, type RenderOp, type ToolCard } from './render.js';
 import type { TranscriptTurn } from './transcript.js';
 
 const TODO_TOOL = 'manage_todo_list';
@@ -42,7 +42,9 @@ export class StreamWriter {
 export function toolPart(card: ToolCard): vscode.ChatToolInvocationPart {
 	const part = new vscode.ChatToolInvocationPart(card.toolName, card.id);
 	part.enablePartialUpdate = true;
-	part.isConfirmed = true;
+	// Not confirmed while its permission prompt is open. Core doesn't pass this on for live updates yet; with the
+	// core change asked for in #32, Stop shows an approved, running command as stopped instead of Skipped.
+	part.isConfirmed = !card.awaitingApproval;
 	part.isComplete = card.complete;
 	part.isError = card.error;
 	part.invocationMessage = new vscode.MarkdownString(card.invocation);
@@ -60,12 +62,16 @@ export function toolPart(card: ToolCard): vscode.ChatToolInvocationPart {
 	return part;
 }
 
-/** A saved transcript as core's chat history: one request and one response per turn. */
-export function historyTurns(turns: readonly TranscriptTurn[], participant: string, chatId: string): (vscode.ChatRequestTurn2 | vscode.ChatResponseTurn2)[] {
+/**
+ * A saved transcript as core's chat history: one request and one response per turn. A request carries the model
+ * it ran on (`modelId`, the language model identifier): core selects the last one in a reopened chat's model
+ * picker, instead of the session type's default.
+ */
+export function historyTurns(turns: readonly TranscriptTurn[], participant: string, chatId: string, modelId: (value: string) => string = v => v): (vscode.ChatRequestTurn2 | vscode.ChatResponseTurn2)[] {
 	const out: (vscode.ChatRequestTurn2 | vscode.ChatResponseTurn2)[] = [];
 	turns.forEach((turn, i) => {
 		// Request ids must be unique across chats.
-		out.push(new vscode.ChatRequestTurn2(turn.prompt, undefined, [], participant, [], undefined, `${chatId}#${i}`, undefined, undefined));
+		out.push(new vscode.ChatRequestTurn2(turn.prompt, undefined, [], participant, [], undefined, `${chatId}#${i}`, turn.model ? modelId(turn.model) : undefined, undefined));
 		const parts: (vscode.ChatResponseMarkdownPart | vscode.ChatResponseThinkingProgressPart | vscode.ChatToolInvocationPart)[] = [];
 		for (const op of turn.ops) {
 			switch (op.op) {
@@ -84,7 +90,7 @@ export function historyTurns(turns: readonly TranscriptTurn[], participant: stri
 			}
 		}
 		if (turn.stopped) {
-			parts.push(new vscode.ChatResponseMarkdownPart(new vscode.MarkdownString('\n\n*Stopped.*')));
+			parts.push(new vscode.ChatResponseMarkdownPart(new vscode.MarkdownString(`\n\n*${STOPPED}.*`)));
 		}
 		out.push(new vscode.ChatResponseTurn2(parts, {}, participant));
 	});

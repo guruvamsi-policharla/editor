@@ -19,6 +19,8 @@ interface Waiter {
 	id: string;
 	holder: TurnHolder;
 	start: () => void;
+	/** Gives up the wait (the turn resolves without a lease). */
+	cancel: () => void;
 }
 
 let nextWaiter = 0;
@@ -74,8 +76,10 @@ export class TurnScheduler {
 					options.signal?.removeEventListener('abort', abort);
 					resolve(this.grant(holder));
 				},
+				cancel: () => abort(),
 			};
 			const abort = () => {
+				options.signal?.removeEventListener('abort', abort);
 				this.dequeue(waiter);
 				resolve(undefined);
 				this.pump();
@@ -96,6 +100,18 @@ export class TurnScheduler {
 		this.dequeue(waiter);
 		waiter.start();
 		return true;
+	}
+
+	/** Gives up every waiting turn of a chat (the chat was closed): they resolve without a lease and never run. */
+	cancelChat(chat: string): number {
+		const waiters = this.queue.filter(w => w.holder.chat === chat);
+		waiters.forEach(w => w.cancel());
+		return waiters.length;
+	}
+
+	/** Whether a turn of this chat is waiting. */
+	isWaiting(chat: string): boolean {
+		return this.queue.some(w => w.holder.chat === chat);
 	}
 
 	private dequeue(waiter: Waiter): void {

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { SessionView, type acp } from '@editor/acp-client';
-import { fileLink, permissionButtons, toolCard, TurnRenderer, type RenderOp } from '../src/render.js';
+import { fileLink, footer, permissionButtons, runningCommands, STOPPED, stoppedCommandsNote, toolCard, TurnRenderer, type RenderOp } from '../src/render.js';
 
 const turns = JSON.parse(readFileSync(new URL('../../../packages/acp-client/test/fixtures/claude-0.87.0-turns.json', import.meta.url), 'utf8')) as { updates: acp.SessionUpdate[] };
 
@@ -105,11 +105,54 @@ describe('closing a turn', () => {
 		expect(renderer.finish('stopped')).toEqual([]);
 	});
 
+	it('Stop during an approved command: its card says it ran and was stopped, and the agent is told so; one never approved didn\'t run (#32)', () => {
+		const view = new SessionView();
+		const renderer = new TurnRenderer('t');
+		renderer.render(view.apply({ sessionUpdate: 'tool_call', toolCallId: 'rm', title: 'x', kind: 'execute', status: 'pending', rawInput: { command: 'rm notes.tex; sleep 30' } }));
+		renderer.render(view.apply({ sessionUpdate: 'tool_call', toolCallId: 'ask', title: 'x', kind: 'execute', status: 'pending', rawInput: { command: 'git push' } }));
+		const notApproved = new Set(['ask']);
+		const ops = renderer.finish('stopped', notApproved);
+		expect(ops).toEqual([
+			{ op: 'tool', card: expect.objectContaining({ id: 'rm', complete: true, past: 'Stopped', terminal: { command: 'rm notes.tex; sleep 30' } }) },
+			{ op: 'tool', card: expect.objectContaining({ id: 'ask', complete: true, past: 'Didn\'t run `git push`: stopped before it was approved' }) },
+		]);
+		expect(ops[1]!.op === 'tool' && ops[1]!.card.terminal).toBeUndefined();
+		expect(runningCommands(ops, notApproved)).toEqual(['rm notes.tex; sleep 30']);
+		const note = stoppedCommandsNote(['rm notes.tex; sleep 30']);
+		expect(note).toContain('`rm notes.tex; sleep 30`');
+		expect(note).toMatch(/had approved it, and it had started/);
+		expect(note).toMatch(/was not rejected/);
+	});
+
+	it('a card waits for approval while its prompt is open, through the agent\'s updates; closing it drops the flag (#32)', () => {
+		const view = new SessionView();
+		const renderer = new TurnRenderer('t');
+		renderer.render(view.apply({ sessionUpdate: 'tool_call', toolCallId: 'a', title: 'x', kind: 'execute', status: 'pending', rawInput: { command: 'ls' } }));
+		expect(renderer.awaitApproval('a', true)).toEqual([{ op: 'tool', card: expect.objectContaining({ id: 'a', awaitingApproval: true }) }]);
+		expect(renderer.awaitApproval('a', true)).toEqual([]);
+		expect(renderer.awaitApproval('nope', true)).toEqual([]);
+		const update = renderer.render(view.apply({ sessionUpdate: 'tool_call_update', toolCallId: 'a', rawInput: { command: 'ls -l' } }));
+		expect(update).toEqual([{ op: 'tool', card: expect.objectContaining({ awaitingApproval: true }) }]);
+		expect(renderer.awaitApproval('a', false)[0]).toEqual({ op: 'tool', card: expect.not.objectContaining({ awaitingApproval: true }) });
+		renderer.awaitApproval('a', true);
+		const closed = renderer.finish('stopped', new Set(['a']));
+		expect(closed[0]!.op === 'tool' && closed[0]!.card.awaitingApproval).toBeUndefined();
+	});
+
 	it('a card without a label says Interrupted after a crash', () => {
 		const view = new SessionView();
 		const renderer = new TurnRenderer('t');
 		renderer.render(view.apply({ sessionUpdate: 'tool_call', toolCallId: 'a', title: 'ls', kind: 'execute', status: 'in_progress', rawInput: { command: 'ls' } }));
 		expect(renderer.finish('interrupted')[0]).toMatchObject({ card: { complete: true, past: 'Interrupted' } });
+	});
+});
+
+describe('the footer', () => {
+	it('a stopped turn says so live, before the model and context, the same word the reopened transcript shows (#26)', () => {
+		expect(footer({ stopped: true, model: 'Haiku 5.5', usage: { used: 12, size: 100 } })).toBe('Stopped · Haiku 5.5 · 12% of context');
+		expect(footer({ stopped: true })).toBe(STOPPED);
+		expect(footer({ model: 'Haiku 5.5' })).toBe('Haiku 5.5');
+		expect(footer({})).toBe('');
 	});
 });
 

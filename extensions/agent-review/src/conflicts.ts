@@ -1,9 +1,14 @@
 /**
- * Agent writes that hit a buffer with unsaved edits. Nothing is ever overwritten: the user resolves the
+ * Disk changes that hit a buffer with unsaved edits: any write the engine didn't expect (the agent through the
+ * chat, a terminal agent, a shell command, another tool). Nothing is ever overwritten: the user resolves the
  * conflict in VS Code's 3-way merge editor (base = the text both sides started from, the agent's version on
  * disk, the user's buffer; the result is the file). Core (`_agentReview.openMerge`) snapshots both sides,
  * reloads the buffer from disk and opens the merge editor on the auto-merge; nothing is written until the
  * user completes the merge.
+ *
+ * Until then the change isn't drawn inline: the inline review diffs the baseline against the buffer, and the
+ * buffer holds the user's version, not the one on disk (VS Code never reloads a dirty buffer). Agent Changes
+ * lists the file and the notice offers Merge…; once merged, the agent's lines show inline as pending.
  *
  * Belt and braces: both versions are also copied to the extension's storage (`conflicts/`), and closing the
  * merge editor without saving says where the user's version went.
@@ -15,6 +20,7 @@ import type { ReviewController } from './controller';
 import type { EditLogs } from './editLog';
 
 const BACKUP_DAYS = 7;
+const MERGE = 'Merge…';
 
 interface ActiveMerge {
   backup: string;
@@ -22,7 +28,10 @@ interface ActiveMerge {
 }
 
 export class ConflictMerger implements vscode.Disposable {
-  private readonly notified = new Set<string>();
+  /** absPath -> the latest notice shown for it (see `onConflict`). */
+  private readonly notices = new Map<string, number>();
+  private noticeSeq = 0;
+  private backups = 0;
   /** uri string -> merge in progress. */
   private readonly merges = new Map<string, ActiveMerge>();
   private readonly subs: vscode.Disposable[] = [];
@@ -49,22 +58,37 @@ export class ConflictMerger implements vscode.Disposable {
     void this.pruneBackups();
   }
 
-  /** An external change hit `absPath` while it has unsaved edits. */
+  /**
+   * A disk change (the agent's, through the chat or not) hit `absPath` while it has unsaved edits.
+   *
+   * Every change shows the notice again. A warning with a button hides itself into the notification center after a
+   * few seconds, and its promise stays pending until the user acts on it there: waiting for it before showing the
+   * next one meant every later change to the file went unannounced (#34). VS Code replaces an identical notice that
+   * is still open, so repeated writes don't stack.
+   */
   async onConflict(absPath: string): Promise<void> {
-    if (this.notified.has(absPath)) { return; }
-    this.notified.add(absPath);
+    const seq = ++this.noticeSeq;
+    this.notices.set(absPath, seq);
     const name = path.basename(absPath);
     try {
       await this.backup(absPath, 'agent', await fs.readFile(absPath, 'utf8'));
     } catch (err) {
       this.log.warn(`could not back up the agent's version of ${absPath}: ${String(err)}`);
     }
+    if (this.notices.get(absPath) !== seq) { return; } // a newer change shows its own notice
     const choice = await vscode.window.showWarningMessage(
       `${name} changed on disk while you have unsaved edits. Nothing was overwritten. Merge the agent's version with yours?`,
-      'Merge…',
+      MERGE,
     );
-    this.notified.delete(absPath);
-    if (choice === 'Merge…') { await this.merge(absPath); }
+    if (this.notices.get(absPath) === seq) { this.notices.delete(absPath); }
+    if (choice !== MERGE) { return; }
+    // Same path as the palette command. Called from a notification, so nothing else would report a failure (#35).
+    try {
+      await this.merge(absPath);
+    } catch (err) {
+      this.log.error(`could not open the merge for ${absPath}`, err instanceof Error ? err : String(err));
+      void vscode.window.showErrorMessage(`Agent Review: could not open the merge editor for ${name}: ${err instanceof Error ? err.message : String(err)}. Nothing was overwritten.`);
+    }
   }
 
   /** Open the 3-way merge for `absPath` (also a command, for the editor title and palette). */
@@ -85,14 +109,21 @@ export class ConflictMerger implements vscode.Disposable {
     const base = this.logs.cleanText(key) ?? (await this.ctl.baselineText(absPath)) ?? '';
     // The merge rewrites the buffer: from here until the next save, attribute by diffing against the disk.
     this.logs.hold(key);
-    let opened = false;
+    let opened: boolean;
     try {
       opened = (await vscode.commands.executeCommand<boolean>('_agentReview.openMerge', uri, base)) === true;
     } catch (err) {
       this.log.error(`could not open the merge editor for ${absPath}`, err instanceof Error ? err : String(err));
       void vscode.window.showErrorMessage(`Agent Review: could not open the merge editor. Your unsaved edits are still in the editor (and in ${backup}).`);
+      return;
     }
-    if (opened) { this.merges.set(key, { backup, saved: false }); }
+    if (opened) {
+      this.merges.set(key, { backup, saved: false });
+    } else {
+      // Core found no unsaved edits to merge (the buffer was saved or reverted meanwhile).
+      this.log.warn(`merge of ${absPath} not opened: core found no unsaved edits`);
+      void vscode.window.showInformationMessage(`${path.basename(absPath)} has no unsaved edits: nothing to merge.`);
+    }
   }
 
   private async onMergeClosed(result: vscode.Uri): Promise<void> {
@@ -114,7 +145,8 @@ export class ConflictMerger implements vscode.Disposable {
   private async backup(absPath: string, side: 'agent' | 'yours', text: string): Promise<string> {
     await fs.mkdir(this.backupDir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const file = path.join(this.backupDir, `${stamp}-${side}-${path.basename(absPath)}`);
+    // Numbered: two writes within the same millisecond keep both versions.
+    const file = path.join(this.backupDir, `${stamp}-${++this.backups}-${side}-${path.basename(absPath)}`);
     await fs.writeFile(file, text, 'utf8');
     this.log.info(`conflict on ${absPath}: ${side === 'agent' ? "agent's" : 'your'} version kept at ${file}`);
     return file;

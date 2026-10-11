@@ -5,6 +5,7 @@
 // `requiresCustomModels` and we register its harness's models, targeted at that type. They are labels only:
 // the choice is forwarded to the harness (the ACP `model` option); the editor never calls a model.
 import * as vscode from 'vscode';
+export { MODEL_VENDOR } from './settings.js';
 
 export interface ModelChoice {
 	id: string;

@@ -21,6 +21,8 @@ export interface PromptInput {
 	root?: string;
 	/** Whether a path exists (mentions of files that don't are left as text only). */
 	exists: (path: string) => boolean;
+	/** A note from the editor, sent after the text (the text stays first: a slash command must lead). */
+	note?: string;
 }
 
 const MENTION = /(?:^|\s)@((?:[\w.\-/]|\\ )+?)(?::L(\d+)(?:-(\d+))?)?(?=[\s,;:)]|$)/g;
@@ -63,6 +65,9 @@ export function promptBlocks(input: PromptInput): acp.ContentBlock[] {
 		}
 		seen.add(name);
 		blocks.push({ type: 'resource_link', uri: fileUri(ref.path), name, ...(ref.startLine ? { description: `Lines ${ref.startLine}–${ref.endLine ?? ref.startLine}` } : {}) });
+	}
+	if (input.note) {
+		blocks.push({ type: 'text', text: input.note });
 	}
 	return blocks;
 }

@@ -13,8 +13,8 @@ import { join } from 'node:path';
 import * as vscode from 'vscode';
 import { AdapterInstaller, BUILTIN_PROFILES } from '@editor/acp-client';
 import { HarnessChat } from './harnessChat.js';
-import { ChatHistory } from './history.js';
-import { HarnessModels } from './models.js';
+import { ChatHistory, menuTarget } from './history.js';
+import { HarnessModels, MODEL_VENDOR } from './models.js';
 import { TurnScheduler } from './scheduler.js';
 
 let lastUsed: number | undefined;
@@ -25,7 +25,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(log);
 
 	const models = new HarnessModels();
-	context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider('agent-chat', models));
+	context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider(MODEL_VENDOR, models));
 	const installer = new AdapterInstaller(join(context.globalStorageUri.fsPath, 'adapters'), join(context.extensionPath, 'dist', 'adapters'));
 	const markUsed = () => { lastUsed = Date.now(); };
 	// Chats belong to the workspace folder they ran in. Kept in global storage under a hash of the folder's path:
@@ -99,9 +99,9 @@ export function activate(context: vscode.ExtensionContext): void {
 				void vscode.window.showInformationMessage('That message isn\'t waiting anymore.');
 			}
 		}),
-		// The sessions list's context menu passes `{ session: { resource } }`.
-		vscode.commands.registerCommand('agentChat.removeChat', async (arg?: { session?: { resource?: vscode.Uri } } | vscode.Uri) => {
-			const resource = arg instanceof vscode.Uri ? arg : arg?.session?.resource && vscode.Uri.from(arg.session.resource);
+		vscode.commands.registerCommand('agentChat.removeChat', async (arg?: unknown) => {
+			const target = menuTarget(arg);
+			const resource = target instanceof vscode.Uri ? target : target && vscode.Uri.from(target);
 			const chat = resource && [...chats.values()].find(c => c.owns(resource));
 			if (resource && chat) {
 				await chat.removeChat(resource);
