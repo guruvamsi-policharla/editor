@@ -800,6 +800,20 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.deepStrictEqual(confirms, [], 'nothing of the user\'s is undone, so no question');
 	});
 
+	test('#15: typing at the end of a line the agent rewrote stays in the buffer after that change\'s Undo (no question)', async () => {
+		// The tester's case (session 5): the agent shortened a long line, the user typed at its end, then Undo. The
+		// line comes back long, so the typing ends up off screen at its end; it must still be there.
+		model.setValue('\\section{Method}\nA batch closes when full or at its deadline.\nRequests are padded.\n');
+		const { entry, integration } = await showPending('\\section{Method}\nA batch closes when it is full or when the oldest request reaches its deadline.\nRequests are padded.\n');
+		typeAtEndOf(2, 'ZZZ');
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && entry.originalModel.getValue().includes('ZZZ') ? d : undefined));
+		await timeout(0);
+
+		await integration.rejectNearestChange(hunkWidgets()[0]);
+		assert.strictEqual(model.getLineContent(2), 'A batch closes when it is full or when the oldest request reaches its deadline.ZZZ');
+		assert.deepStrictEqual(confirms, []);
+	});
+
 	test('#15: text typed inside an agent change goes with it, so its Undo asks first; cancelling changes nothing', async () => {
 		model.setValue('Results.\nThe random seed was fixed to 7.\n');
 		const { entry, integration } = await showPending('Results.\n');
