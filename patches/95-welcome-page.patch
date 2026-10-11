@@ -1,0 +1,52 @@
+diff --git a/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStarted.ts b/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStarted.ts
+index 83b5bd91..4c98c8ed 100644
+--- a/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStarted.ts
++++ b/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStarted.ts
+@@ -119,3 +119,3 @@ type GettingStartedActionEvent = {
+ type RecentEntry = (IRecentFolder | IRecentWorkspace) & { id: string };
+-type AnnouncementEntry = { id: string, title: string, url: string };
++type AnnouncementEntry = { id: string; title: string; url: string };
+ 
+@@ -964,2 +964,4 @@ export class GettingStartedPage extends EditorPane {
+ 
++		// Editor: an empty announcements list ("There are no current announcements.") isn't shown (#38).
++		const announcementElements = () => announcementList.itemCount ? [announcementList.getDomElement()] : [];
+ 		const layoutLists = () => {
+@@ -967,3 +969,3 @@ export class GettingStartedPage extends EditorPane {
+ 				this.container.classList.remove('noWalkthroughs');
+-				reset(rightColumn, gettingStartedList.getDomElement(), announcementList.getDomElement());
++				reset(rightColumn, gettingStartedList.getDomElement(), ...announcementElements());
+ 			}
+@@ -971,3 +973,3 @@ export class GettingStartedPage extends EditorPane {
+ 				this.container.classList.add('noWalkthroughs');
+-				reset(rightColumn, announcementList.getDomElement());
++				reset(rightColumn, ...announcementElements());
+ 			}
+@@ -1184,3 +1186,4 @@ export class GettingStartedPage extends EditorPane {
+ 		if (!this.announcementData) {
+-			const showExtras = this.configurationService.getValue<boolean>('workbench.welcomePage.extraAnnouncements');
++			// Editor: no announcements feed of its own, and VSCodium's news isn't about this editor (#38).
++			const showExtras = false;
+ 
+@@ -1191,3 +1194,3 @@ export class GettingStartedPage extends EditorPane {
+ 						if (res.ok) {
+-							var extraAnnouncements = await res.json() as AnnouncementEntry[];
++							const extraAnnouncements = await res.json() as AnnouncementEntry[];
+ 
+diff --git a/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStartedService.ts b/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStartedService.ts
+index ac89ae8e..f4a11174 100644
+--- a/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStartedService.ts
++++ b/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStartedService.ts
+@@ -183,3 +183,6 @@ export class WalkthroughsService extends Disposable implements IWalkthroughsServ
+ 
+-		walkthroughs.forEach(async (category, index) => {
++		// Editor: VS Code's built-in walkthroughs (Copilot, its themes and extensions, its fundamentals) don't describe
++		// this editor, so the welcome page doesn't list them (#38). Walkthroughs that extensions contribute still show.
++		const builtIn: typeof walkthroughs = [];
++		builtIn.forEach(async (category, index) => {
+ 
+@@ -188,3 +191,3 @@ export class WalkthroughsService extends Disposable implements IWalkthroughsServ
+ 				icon: { type: 'icon', icon: category.icon },
+-				order: walkthroughs.length - index,
++				order: builtIn.length - index,
+ 				source: BUILT_IN_SOURCE,
