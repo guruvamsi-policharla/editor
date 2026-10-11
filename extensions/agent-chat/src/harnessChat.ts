@@ -280,7 +280,7 @@ export class HarnessChat implements vscode.Disposable {
 		const ours = new Set(this.env.history.list(this.profile.id).map(e => e.sessionId));
 		for (const info of this.listed) {
 			// Untitled ones never had a message (a chat opened and left empty).
-			if (ours.has(info.sessionId) || !info.title?.trim()) {
+			if (ours.has(info.sessionId) || !info.title?.trim() || this.env.history.isRemoved(this.profile.id, info.sessionId)) {
 				continue;
 			}
 			const resource = vscode.Uri.from({ scheme: this.type, path: `${LISTED}${encodeURIComponent(info.sessionId)}` });
@@ -395,8 +395,12 @@ export class HarnessChat implements vscode.Disposable {
 		this.transcripts.delete(key);
 		this.items.delete(key);
 		this.env.history.remove(key);
-		await session?.close();
+		if (resource.path.startsWith(LISTED)) {
+			// Listed by the agent and never opened here: only the agent's list has it.
+			this.env.history.forgetSession(this.profile.id, decodeURIComponent(resource.path.slice(LISTED.length)));
+		}
 		this.refreshItems();
+		await session?.close();
 	}
 
 	owns(resource: vscode.Uri): boolean {

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SessionView, type acp } from '@editor/acp-client';
-import { ChatHistory, type ChatEntry } from '../src/history.js';
+import { ChatHistory, menuTarget, type ChatEntry } from '../src/history.js';
 import { TurnRenderer } from '../src/render.js';
 import { matchChat, ReplayBuilder, TranscriptBuilder } from '../src/transcript.js';
 
@@ -125,5 +125,29 @@ describe('chat history store', () => {
 		expect(b.get('agent-claude:/c2')!.settings).toEqual({ mode: 'default', model: 'haiku' });
 		expect(b.get('agent-claude:/c1')!.settings).toEqual({ mode: 'acceptEdits', model: 'haiku' });
 		expect(b.get('agent-claude:/nope')).toBeUndefined();
+	});
+
+	it('Remove from Chat History sticks: the agent\'s own list doesn\'t bring the chat back, also after a restart (#22)', () => {
+		const a = new ChatHistory(dir);
+		a.save(entry(1), [{ prompt: 'say alpha', ops: [] }], 'say alpha');
+		a.save(entry(2));
+		a.remove('agent-claude:/c1');
+		a.forgetSession('claude', 'listed-only');
+		const b = new ChatHistory(dir);
+		expect(b.list().map(e => e.resource)).toEqual(['agent-claude:/c2']);
+		expect(b.search('alpha')).toEqual([]);
+		expect(b.isRemoved('claude', 's1')).toBe(true);
+		expect(b.isRemoved('claude', 'listed-only')).toBe(true);
+		expect(b.isRemoved('codex', 's1')).toBe(false);
+		expect(b.isRemoved('claude', 's2')).toBe(false);
+	});
+
+	it('the sessions list\'s context menu argument, in each shape it arrives in (#22)', () => {
+		const resource = { scheme: 'agent-claude', path: '/c1' };
+		expect(menuTarget({ resource, label: 'Chat 1' })).toBe(resource); // our item, found by the extension host
+		expect(menuTarget({ session: { resource }, $mid: 1 })).toBe(resource); // passed on as is
+		expect(menuTarget(resource)).toBe(resource);
+		expect(menuTarget(undefined)).toBeUndefined();
+		expect(menuTarget({ session: {} })).toBeUndefined();
 	});
 });

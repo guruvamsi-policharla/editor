@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import * as vscode from 'vscode';
 import { AdapterInstaller, BUILTIN_PROFILES } from '@editor/acp-client';
 import { HarnessChat } from './harnessChat.js';
-import { ChatHistory } from './history.js';
+import { ChatHistory, menuTarget } from './history.js';
 import { HarnessModels, MODEL_VENDOR } from './models.js';
 import { TurnScheduler } from './scheduler.js';
 
@@ -99,9 +99,9 @@ export function activate(context: vscode.ExtensionContext): void {
 				void vscode.window.showInformationMessage('That message isn\'t waiting anymore.');
 			}
 		}),
-		// The sessions list's context menu passes `{ session: { resource } }`.
-		vscode.commands.registerCommand('agentChat.removeChat', async (arg?: { session?: { resource?: vscode.Uri } } | vscode.Uri) => {
-			const resource = arg instanceof vscode.Uri ? arg : arg?.session?.resource && vscode.Uri.from(arg.session.resource);
+		vscode.commands.registerCommand('agentChat.removeChat', async (arg?: unknown) => {
+			const target = menuTarget(arg);
+			const resource = target instanceof vscode.Uri ? target : target && vscode.Uri.from(target);
 			const chat = resource && [...chats.values()].find(c => c.owns(resource));
 			if (resource && chat) {
 				await chat.removeChat(resource);
