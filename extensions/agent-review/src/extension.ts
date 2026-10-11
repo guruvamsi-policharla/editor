@@ -12,6 +12,7 @@ import * as vscode from 'vscode';
 import { MultiRootReview } from '@editor/engine';
 import { AgentTerminal } from './agentTerminal';
 import { sendSelectionToChat } from './sendSelection';
+import { registerChatTrustHint } from './chatTrust';
 import { ConflictMerger } from './conflicts';
 import { normalizePath, ReviewController, UiPaths, type CoreBridge, type ReviewAction } from './controller';
 import { EditLogs } from './editLog';
@@ -36,6 +37,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('agentReview.openAgentTerminal', () => agentTerminal.show()),
     vscode.commands.registerCommand('agentReview.sendSelectionToAgent', () => sendSelectionToChat()),
     vscode.commands.registerCommand('agentReview.addToChat', () => sendSelectionToChat()),
+    ...registerChatTrustHint(),
   );
 
   const config = vscode.workspace.getConfiguration('agentReview');

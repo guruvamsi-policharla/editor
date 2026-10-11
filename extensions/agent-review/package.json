@@ -149,8 +149,37 @@
         "command": "agentReview.addToChat",
         "title": "Add Selection to Chat",
         "category": "Chat"
+      },
+      {
+        "command": "agentReview.chatNeedsTrust.newChat",
+        "title": "New Agent Chat",
+        "category": "Agent Chat"
+      },
+      {
+        "command": "agentReview.chatNeedsTrust.newClaude",
+        "title": "New Claude Code Chat",
+        "category": "Agent Chat"
+      },
+      {
+        "command": "agentReview.chatNeedsTrust.newCodex",
+        "title": "New Codex Chat",
+        "category": "Agent Chat"
+      },
+      {
+        "command": "agentReview.chatNeedsTrust.newTact",
+        "title": "New tact Chat",
+        "category": "Agent Chat"
       }
     ],
+    "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "agentChatTrust",
+          "title": "Chat",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
     "views": {
       "explorer": [
         {
@@ -158,12 +187,23 @@
           "name": "Agent Changes",
           "icon": "$(diff-multiple)"
         }
+      ],
+      "agentChatTrust": [
+        {
+          "id": "agentReview.chatNeedsTrust",
+          "name": "Agent Chat",
+          "when": "!isWorkspaceTrusted"
+        }
       ]
     },
     "viewsWelcome": [
       {
         "view": "agentReview.changes",
         "contents": "No pending changes. Edits made outside the editor (by an agent, a script, anything) show up here and inline for review.\n[Open Agent Terminal](command:agentReview.openAgentTerminal)"
+      },
+      {
+        "view": "agentReview.chatNeedsTrust",
+        "contents": "The agent chat (Claude Code, Codex, tact) is off in Restricted Mode: the agents run commands and edit files in this folder. Trust the folder to start a chat.\n[Manage Workspace Trust](command:workbench.trust.manage)"
       }
     ],
     "menus": {
@@ -246,6 +286,22 @@
         {
           "command": "agentReview.restoreFile",
           "when": "resourceScheme == agent-review-deleted"
+        },
+        {
+          "command": "agentReview.chatNeedsTrust.newChat",
+          "when": "!isWorkspaceTrusted"
+        },
+        {
+          "command": "agentReview.chatNeedsTrust.newClaude",
+          "when": "!isWorkspaceTrusted"
+        },
+        {
+          "command": "agentReview.chatNeedsTrust.newCodex",
+          "when": "!isWorkspaceTrusted"
+        },
+        {
+          "command": "agentReview.chatNeedsTrust.newTact",
+          "when": "!isWorkspaceTrusted"
         }
       ],
       "editor/context": [
