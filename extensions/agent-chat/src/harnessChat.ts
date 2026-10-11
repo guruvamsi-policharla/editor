@@ -27,7 +27,7 @@ import type { ChatEntry, ChatHistory } from './history.js';
 import { loginCommand, resolveLaunch } from './launch.js';
 import { HarnessModels } from './models.js';
 import { promptBlocks, type PromptReference } from './prompt.js';
-import { footer, permissionButtons, TurnRenderer } from './render.js';
+import { footer, permissionButtons, runningCommands, stoppedCommandsNote, TurnRenderer } from './render.js';
 import type { Lease, TurnScheduler } from './scheduler.js';
 import { attributeChanges, ECHO_MS, modelIdentifier, shownSettings, startValues, type PickerEvent, type PickerPush } from './settings.js';
 import { historyTurns, StreamWriter } from './stream.js';
@@ -86,6 +86,8 @@ export class HarnessChat implements vscode.Disposable {
 	private pickerTimer: ReturnType<typeof setTimeout> | undefined;
 	/** Chats whose turn is running. */
 	private readonly running = new Set<string>();
+	/** Chats whose last turn was stopped with approved commands running → what to tell the agent next time. */
+	private readonly stopNotes = new Map<string, string>();
 	/** Chats whose message is waiting for another chat's turn → the editor tab it was sent from. */
 	private readonly waitingTabs = new Map<string, vscode.Tab>();
 	/** Chats whose session is getting its settings back (resumed with the agent's defaults): not shown or saved. */
@@ -747,6 +749,18 @@ export class HarnessChat implements vscode.Disposable {
 			writer.write(ops);
 			transcript.add(ops);
 		};
+		/** Tool calls whose permission prompt wasn't answered with an allow (open, refused, dismissed): they didn't run. */
+		const notApproved = new Set<string>();
+		// A slash command goes as is; the note waits for the next message.
+		const note = request.command ? undefined : this.stopNotes.get(key);
+		const close = (how: 'ended' | 'stopped' | 'interrupted') => {
+			const ops = renderer.finish(how, notApproved);
+			show(ops);
+			const ran = how === 'ended' ? [] : runningCommands(ops, notApproved);
+			if (ran.length) {
+				this.stopNotes.set(key, stoppedCommandsNote(ran));
+			}
+		};
 		let offChange: (() => void) | undefined;
 		let offAsker: (() => void) | undefined;
 		let lease: Lease | undefined;
@@ -842,7 +856,16 @@ export class HarnessChat implements vscode.Disposable {
 			}
 
 			offChange = session.onChange(c => show(renderer.render(c)));
-			offAsker = this.harness().broker.setAsker(session.id, (p, signal) => this.askPermission(p, signal, request, token));
+			offAsker = this.harness().broker.setAsker(session.id, async (p, signal) => {
+				show(renderer.awaitApproval(p.toolCallId, true));
+				try {
+					return await this.askPermission(p, signal, request, token, notApproved);
+				} finally {
+					if (!token.isCancellationRequested) {
+						show(renderer.awaitApproval(p.toolCallId, false));
+					}
+				}
+			});
 
 			const blocks = promptBlocks({
 				prompt: request.prompt,
@@ -850,18 +873,23 @@ export class HarnessChat implements vscode.Disposable {
 				references: references(request),
 				root: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
 				exists: existsSync,
+				...(note ? { note } : {}),
 			});
+			if (note) {
+				this.stopNotes.delete(key);
+				this.env.log.info(`[${this.profile.id}] told the agent which approved commands were running at Stop`);
+			}
 			const links = blocks.filter(b => b.type === 'resource_link').map(b => (b.type === 'resource_link' ? b.name : ''));
 			this.env.log.info(`[${this.profile.id}] prompt: text${links.length ? ` + resource_link ${links.join(', ')}` : ''}`);
 			const result = await session.prompt(blocks);
-			show(renderer.finish(result.stopReason === 'cancelled' ? 'stopped' : 'ended'));
+			close(result.stopReason === 'cancelled' ? 'stopped' : 'ended');
 			transcript.endTurn(result.stopReason === 'cancelled');
 			// The contract guard, in the app too: the agent must never call fs/* or terminal/* (we don't serve them).
 			const forbidden = this.client?.supervisor.running?.connection.forbiddenInbound() ?? [];
 			this.env.log[forbidden.length ? 'error' : 'info'](`[${this.profile.id}] turn ended: ${result.stopReason}; fs/terminal requests from the agent: ${forbidden.length ? forbidden.join(', ') : 'none'}`);
 			return this.result(result, stream, session);
 		} catch (e) {
-			show(renderer.finish(token.isCancellationRequested ? 'stopped' : 'interrupted'));
+			close(token.isCancellationRequested ? 'stopped' : 'interrupted');
 			transcript.endTurn(token.isCancellationRequested);
 			if (token.isCancellationRequested) {
 				return { metadata: { stopReason: 'cancelled' }, ...this.details(session, true) };
@@ -996,7 +1024,8 @@ export class HarnessChat implements vscode.Disposable {
 		return { metadata: { error: crashed ? 'crashed' : 'failed' } };
 	}
 
-	private async askPermission(p: PermissionPrompt, signal: AbortSignal, request: vscode.ChatRequest, token: vscode.CancellationToken): Promise<string | undefined> {
+	private async askPermission(p: PermissionPrompt, signal: AbortSignal, request: vscode.ChatRequest, token: vscode.CancellationToken, notApproved: Set<string>): Promise<string | undefined> {
+		notApproved.add(p.toolCallId);
 		const buttons = permissionButtons(p);
 		const lines: string[] = [];
 		if (p.command) {
@@ -1017,7 +1046,11 @@ export class HarnessChat implements vscode.Disposable {
 			const part = result.content[0];
 			const label = part instanceof vscode.LanguageModelTextPart ? part.value : undefined;
 			const index = label === undefined ? -1 : buttons.indexOf(label);
-			return index >= 0 ? p.choices[index]!.optionId : undefined;
+			const choice = index >= 0 ? p.choices[index]! : undefined;
+			if (choice?.kind.startsWith('allow')) {
+				notApproved.delete(p.toolCallId);
+			}
+			return choice?.optionId;
 		} catch (e) {
 			this.env.log.info(`[${this.profile.id}] permission prompt closed: ${String(e)}`);
 			return undefined;

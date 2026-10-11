@@ -42,7 +42,9 @@ export class StreamWriter {
 export function toolPart(card: ToolCard): vscode.ChatToolInvocationPart {
 	const part = new vscode.ChatToolInvocationPart(card.toolName, card.id);
 	part.enablePartialUpdate = true;
-	part.isConfirmed = true;
+	// Not confirmed while its permission prompt is open. Core doesn't pass this on for live updates yet; with the
+	// core change asked for in #32, Stop shows an approved, running command as stopped instead of Skipped.
+	part.isConfirmed = !card.awaitingApproval;
 	part.isComplete = card.complete;
 	part.isError = card.error;
 	part.invocationMessage = new vscode.MarkdownString(card.invocation);
