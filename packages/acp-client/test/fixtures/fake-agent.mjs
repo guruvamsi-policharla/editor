@@ -8,7 +8,9 @@
 //   "edit <path>" reports an edit tool call for <path> (locations), writes "edited\n" to it, and ends
 // Env: FAKE_AUTH=1 → session/new fails with authRequired. FAKE_NO_RESUME=1 → no resume capability.
 // FAKE_NO_LOAD=1 → no loadSession/list capability. FAKE_STORE=<dir> → sessions (with their history, replayed by
-// session/load) are kept in <dir>/sessions.json, so they survive a restart.
+// session/load) are kept in <dir>/sessions.json, so they survive a restart. FAKE_RESUME_MODE=<mode> → session/resume
+// and session/load come back in that mode (default: default). FAKE_REJECT=<id>=<value>[,…] → set_config_option
+// refuses those values.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
@@ -83,18 +85,21 @@ const connection = acp.agent({ name: 'fake-agent' })
 		for (const update of entry.history) {
 			await connection.client.notify(acp.methods.client.session.update, { sessionId: ctx.params.sessionId, update });
 		}
-		const state = { mode: 'default', model: 'big', effort: 'high', loaded: true };
+		const state = { mode: process.env.FAKE_RESUME_MODE ?? 'default', model: 'big', effort: 'high', loaded: true };
 		sessions.set(ctx.params.sessionId, state);
 		return { configOptions: options(state) };
 	})
 	.onRequest(acp.methods.agent.session.resume, async ctx => {
-		const state = { mode: 'default', model: 'big', effort: 'high', resumed: true };
+		const state = { mode: process.env.FAKE_RESUME_MODE ?? 'default', model: 'big', effort: 'high', resumed: true };
 		sessions.set(ctx.params.sessionId, state);
 		return { configOptions: options(state) };
 	})
 	.onRequest(acp.methods.agent.session.close, async () => ({}))
 	.onRequest(acp.methods.agent.session.setConfigOption, async ctx => {
 		const state = sessions.get(ctx.params.sessionId);
+		if ((process.env.FAKE_REJECT ?? '').split(',').includes(`${ctx.params.configId}=${ctx.params.value}`)) {
+			throw acp.RequestError.invalidParams(undefined, `${ctx.params.configId}=${ctx.params.value} isn't available`);
+		}
 		state[ctx.params.configId] = ctx.params.value;
 		return { configOptions: options(state) };
 	})

@@ -17,6 +17,11 @@ export interface ChatEntry {
 	created: number;
 	updated: number;
 	turns: number;
+	/**
+	 * The chat's own option values (mode, model, effort, …; ACP config option id → value), as its session last
+	 * had them: a reopened chat shows them and gets them back (settings.ts). Missing in chats saved before.
+	 */
+	settings?: Record<string, string>;
 }
 
 export interface SearchHit {
@@ -92,6 +97,15 @@ export class ChatHistory {
 			this.texts.set(entry.resource, text ?? '');
 		}
 		this.write(INDEX, entries);
+	}
+
+	/** Updates a saved chat's settings (no-op for a chat that isn't saved yet). */
+	saveSettings(resource: string, settings: Record<string, string>): void {
+		const entry = this.get(resource);
+		if (entry && JSON.stringify(entry.settings) !== JSON.stringify(settings)) {
+			this.entries = this.index().map(e => (e === entry ? { ...e, settings } : e));
+			this.write(INDEX, this.entries);
+		}
 	}
 
 	remove(resource: string, writeIndex = true): void {

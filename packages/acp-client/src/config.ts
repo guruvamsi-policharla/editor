@@ -76,3 +76,38 @@ export function pendingDefaults(options: readonly acp.SessionConfigOption[] | nu
 	}
 	return out;
 }
+
+/** How much a value of the profile's permission option lets the agent do without asking: 0 is the strictest. */
+export function permissionRank(profile: HarnessProfile, value: string): number {
+	const order = profile.permissionOption?.strictest ?? [];
+	const i = order.indexOf(value);
+	return i >= 0 ? i : order.length;
+}
+
+/** Whether `value` of the permission option lets the agent do more without asking than `than`. */
+export function isLooser(profile: HarnessProfile, value: string, than: string): boolean {
+	return value !== than && permissionRank(profile, value) > permissionRank(profile, than);
+}
+
+/** The strictest value of the profile's permission option that the options offer. */
+export function strictestOffered(options: readonly acp.SessionConfigOption[] | null | undefined, profile: HarnessProfile): string | undefined {
+	const id = profile.permissionOption?.configId;
+	const o = options?.find(x => x.id === id);
+	if (o?.type !== 'select') {
+		return undefined;
+	}
+	return flatChoices(o).map(c => c.value).sort((a, b) => permissionRank(profile, a) - permissionRank(profile, b))[0];
+}
+
+/** The select options' current values, by option id (a chat's settings, saved with it). */
+export function optionValues(options: readonly acp.SessionConfigOption[] | null | undefined): Record<string, string> {
+	return Object.fromEntries((options ?? []).filter((o): o is SelectOption => o.type === 'select').map(o => [o.id, String(o.currentValue)]));
+}
+
+/** The options with these values selected (a value an option doesn't offer leaves it as it is). */
+export function withValues(options: readonly acp.SessionConfigOption[] | null | undefined, values: Readonly<Record<string, string>>): acp.SessionConfigOption[] {
+	return (options ?? []).map(o => {
+		const value = values[o.id];
+		return o.type === 'select' && value !== undefined && flatChoices(o).some(c => c.value === value) ? { ...o, currentValue: value } : o;
+	});
+}

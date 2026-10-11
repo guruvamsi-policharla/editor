@@ -46,6 +46,12 @@ export interface HarnessProfile {
 	 * for another chat's turn to end. Keyed by config id.
 	 */
 	readonly readOnlyValues?: Readonly<Record<string, readonly string[]>>;
+	/**
+	 * The option that decides what the agent may do without asking, its values strictest first. A chat's saved
+	 * value that can't be set again (after a restart, say) falls back to the strictest value offered, never to a
+	 * looser one. Values not listed count as the loosest.
+	 */
+	readonly permissionOption?: { readonly configId: string; readonly strictest: readonly string[] };
 	/** A codicon id for the harness's chats. */
 	readonly icon?: string;
 	/** Where plan mode lives (`mode=plan` for Claude, `collaboration_mode=plan` for Codex). */
@@ -86,6 +92,8 @@ export const CLAUDE: HarnessProfile = {
 	dangerousValues: { mode: ['bypassPermissions'] },
 	timing: { default: 'live' },
 	readOnlyValues: { mode: ['plan'] },
+	// Manual asks before every edit and command; Plan doesn't edit (leaving it asks); Auto approves by itself.
+	permissionOption: { configId: 'mode', strictest: ['default', 'plan', 'acceptEdits', 'auto', 'bypassPermissions'] },
 	icon: 'sparkle',
 	planOption: { configId: 'mode', value: 'plan' },
 	login: { args: ['auth', 'login'] },
@@ -107,6 +115,7 @@ export const CODEX: HarnessProfile = {
 	// The adapter sends approval policy, sandbox, model, effort and speed with each turn.
 	timing: { default: 'next-turn', byId: { collaboration_mode: 'live' } },
 	readOnlyValues: { mode: ['read-only'], collaboration_mode: ['plan'] },
+	permissionOption: { configId: 'mode', strictest: ['read-only', 'workspace-write', 'agent', 'agent-full-access'] },
 	icon: 'terminal',
 	planOption: { configId: 'collaboration_mode', value: 'plan' },
 	login: { args: ['login'] },

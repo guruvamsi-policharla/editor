@@ -102,4 +102,16 @@ describe('chat history store', () => {
 		expect(new ChatHistory(dir).list()).toEqual([]);
 		expect(a.transcript('agent-claude:/c1')).toBeUndefined();
 	});
+
+	it('each chat keeps its own settings across a restart; setting one chat\'s leaves the other\'s alone (#33)', () => {
+		const a = new ChatHistory(dir);
+		a.save(entry(1, { settings: { mode: 'acceptEdits', model: 'haiku' } }));
+		a.save(entry(2));
+		a.saveSettings('agent-claude:/c2', { mode: 'default', model: 'haiku' });
+		a.saveSettings('agent-claude:/nope', { mode: 'default' });
+		const b = new ChatHistory(dir);
+		expect(b.get('agent-claude:/c2')!.settings).toEqual({ mode: 'default', model: 'haiku' });
+		expect(b.get('agent-claude:/c1')!.settings).toEqual({ mode: 'acceptEdits', model: 'haiku' });
+		expect(b.get('agent-claude:/nope')).toBeUndefined();
+	});
 });

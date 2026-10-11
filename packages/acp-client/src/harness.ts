@@ -4,7 +4,7 @@
  * (`session/resume` when the agent supports it, else a fresh session).
  */
 import * as acp from '@agentclientprotocol/sdk';
-import { pendingDefaults } from './config.js';
+import { isLooser, optionValues, pendingDefaults, strictestOffered } from './config.js';
 import { PermissionBroker } from './permissions.js';
 import type { HarnessProfile } from './profiles.js';
 import { SessionView, type Change } from './reducer.js';
@@ -38,6 +38,28 @@ export function errorMessage(e: unknown): string {
  */
 export type Recovery = 'live' | 'resumed' | 'loaded' | 'new';
 
+/** What `applySettings` did. */
+export interface SettingsResult {
+	applied: { id: string; value: string }[];
+	failed: { id: string; value: string; error: string }[];
+	/** The permission option's value after falling back to the strictest one (set when the wanted one didn't hold). */
+	fellBackTo?: string;
+	/** False when the session's permission option is still looser than wanted. */
+	permissionHeld: boolean;
+}
+
+/** A recovered session is looser than it was, and couldn't be set back: nothing was sent. */
+export class PermissionNotRestoredError extends Error {
+	constructor(readonly current: string | undefined) {
+		super(`the session came back in a mode that asks less often (${current ?? 'unknown'}) and couldn't be switched back, so nothing was sent`);
+	}
+}
+
+function offers(options: readonly acp.SessionConfigOption[], id: string, value: string): boolean {
+	const o = options.find(x => x.id === id);
+	return o?.type === 'select' && o.options.flatMap(x => ('options' in x ? x.options : [x])).some(c => c.value === value);
+}
+
 export class AcpSession {
 	readonly view = new SessionView();
 	/** True while `session/load` replays the conversation (listeners that render live turns ignore those). */
@@ -62,20 +84,28 @@ export class AcpSession {
 
 	/**
 	 * Make sure the session lives on the running adapter. After a crash, or for a chat reopened from history:
-	 * resume it (no replay), else load it (replayed into the view), else start a new one.
+	 * resume it (no replay), else load it (replayed into the view), else start a new one. Each of those starts from
+	 * the agent's (or the profile's) defaults, so the options the view had before (the chat's: the last ones seen, or
+	 * the ones a restored session was given) are set again: `settings` says how that went.
 	 */
-	async ensureLive(): Promise<{ ready: Ready; recovery: Recovery }> {
+	async ensureLive(): Promise<{ ready: Ready; recovery: Recovery; settings?: SettingsResult }> {
 		const ready = await this.harness.supervisor.get();
 		if (ready.generation === this.generation) {
 			return { ready, recovery: 'live' };
 		}
+		const before = optionValues(this.view.state.configOptions);
+		const recovery = await this.recover(ready);
+		return { ready, recovery, settings: await this.applySettings(before) };
+	}
+
+	private async recover(ready: Ready): Promise<Recovery> {
 		const oldId = this.id;
 		if (ready.init.agentCapabilities?.sessionCapabilities?.resume) {
 			try {
 				const res = await ready.connection.resumeSession({ sessionId: oldId, cwd: this.harness.cwd, mcpServers: [], ...this.harness.meta() });
 				this.generation = ready.generation;
 				this.emit(this.view.setConfigOptions(res.configOptions ?? this.view.state.configOptions));
-				return { ready, recovery: 'resumed' };
+				return 'resumed';
 			} catch {
 				// fall through
 			}
@@ -83,7 +113,7 @@ export class AcpSession {
 		if (ready.init.agentCapabilities?.loadSession) {
 			try {
 				await this.harness.loadInto(this, ready);
-				return { ready, recovery: 'loaded' };
+				return 'loaded';
 			} catch {
 				// fall through to a new session
 			}
@@ -93,11 +123,15 @@ export class AcpSession {
 		this.id = res.sessionId;
 		this.generation = ready.generation;
 		this.emit(this.view.setConfigOptions(res.configOptions));
-		return { ready, recovery: 'new' };
+		return 'new';
 	}
 
+	/** Throws, without prompting, when a recovered session couldn't get its permission option back (see ensureLive). */
 	async prompt(prompt: string | acp.ContentBlock[]): Promise<acp.PromptResponse> {
-		const { ready } = await this.ensureLive();
+		const { ready, settings } = await this.ensureLive();
+		if (settings && !settings.permissionHeld) {
+			throw new PermissionNotRestoredError(settings.fellBackTo);
+		}
 		return ready.connection.prompt(this.id, prompt);
 	}
 
@@ -107,6 +141,51 @@ export class AcpSession {
 		const res = await ready.connection.setConfigOption(this.id, configId, value);
 		this.emit(this.view.setConfigOptions(res.configOptions));
 		return this.view.state.configOptions;
+	}
+
+	/**
+	 * Bring the session's options to a chat's own values (a resume or load starts from the agent's defaults, and a
+	 * new session from the profile's). Values the agent doesn't offer are skipped. The permission option is never
+	 * left looser than wanted: when its value can't be set, the strictest value offered is set instead.
+	 * `permissionHeld` says whether that worked (when false, the session may do more without asking than wanted).
+	 */
+	async applySettings(wanted: Readonly<Record<string, string>>): Promise<SettingsResult> {
+		const profile = this.harness.profile;
+		const result: SettingsResult = { applied: [], failed: [], permissionHeld: true };
+		const set = async (id: string, value: string): Promise<boolean> => {
+			try {
+				await this.setOption(id, value);
+				result.applied.push({ id, value });
+				return true;
+			} catch (e) {
+				result.failed.push({ id, value, error: errorMessage(e) });
+				return false;
+			}
+		};
+		await this.ensureLive();
+		for (const [id, value] of Object.entries(wanted)) {
+			const current = optionValues(this.view.state.configOptions);
+			// Earlier changes can add or remove options (a model without effort): read them again each time.
+			if (current[id] !== undefined && current[id] !== value && offers(this.view.state.configOptions, id, value)) {
+				await set(id, value);
+			}
+		}
+		const permission = profile.permissionOption?.configId;
+		const want = permission ? wanted[permission] : undefined;
+		const now = () => (permission ? optionValues(this.view.state.configOptions)[permission] : undefined);
+		if (permission && want !== undefined && now() !== undefined && now() !== want) {
+			// A value the agent doesn't offer (anymore) can't be compared: only the strictest one is safe.
+			const unknown = !offers(this.view.state.configOptions, permission, want);
+			if (unknown || isLooser(profile, now()!, want)) {
+				const strictest = strictestOffered(this.view.state.configOptions, profile);
+				if (strictest && strictest !== now()) {
+					await set(permission, strictest);
+				}
+				result.fellBackTo = now();
+				result.permissionHeld = unknown ? now() === strictest : !isLooser(profile, now()!, want);
+			}
+		}
+		return result;
 	}
 
 	/** Stop the running turn: open permission prompts are answered `cancelled`, then `session/cancel`. */
