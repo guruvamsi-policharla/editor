@@ -144,10 +144,29 @@ index 00000000..cc411273
 +	return ' ';
 +}
 diff --git a/src/vs/workbench/contrib/chat/browser/attachments/chatDynamicVariables.ts b/src/vs/workbench/contrib/chat/browser/attachments/chatDynamicVariables.ts
-index 78675ef8..1d7a8cd5 100644
+index 78675ef8..0209250d 100644
 --- a/src/vs/workbench/contrib/chat/browser/attachments/chatDynamicVariables.ts
 +++ b/src/vs/workbench/contrib/chat/browser/attachments/chatDynamicVariables.ts
-@@ -108,7 +108,18 @@ export class ChatDynamicVariableModel extends Disposable implements IChatWidgetC
+@@ -88,6 +88,18 @@ export class ChatDynamicVariableModel extends Disposable implements IChatWidgetC
+ 					removed.push(ref);
+ 					return null;
+ 				}
++
++				// Text typed or pasted inside a reference turns it back into plain text: the reference goes, every
++				// character stays. Decided from the change's offsets, not from the decoration: in the chat input the
++				// decoration doesn't always grow with an insertion inside it, and deleting its stale range removed
++				// the typed text and all but the last character of the reference (`@sections/intro.tex:L4` became
++				// `4`, #23). Deleting inside a reference (Backspace) still removes all of it, below.
++				const end = data.rangeOffset + data.text.length;
++				if (e.changes.some(change => change.rangeLength === 0 && change.text.length > 0 && data.rangeOffset < change.rangeOffset && change.rangeOffset < end)) {
++					removed.push(ref);
++					return null;
++				}
++
+ 				const newRange = model.getDecorationRange(data.id);
+ 
+ 				if (!newRange) {
+@@ -108,7 +120,18 @@ export class ChatDynamicVariableModel extends Disposable implements IChatWidgetC
  						return { ...ref, range: preservedRange };
  					}
  
@@ -167,7 +186,7 @@ index 78675ef8..1d7a8cd5 100644
  						this.widget.inputEditor.executeEdits(this.id, [{
  							range: newRange,
  							text: '',
-@@ -176,6 +187,30 @@ export class ChatDynamicVariableModel extends Disposable implements IChatWidgetC
+@@ -176,6 +199,30 @@ export class ChatDynamicVariableModel extends Disposable implements IChatWidgetC
  		return model.getValueInRange(range) === data.text ? range : undefined;
  	}
  
@@ -368,3 +387,47 @@ index 6502863c..ac6ebfe4 100644
  		const otherVariables = element.variables.filter(variable => !isExplicitFileOrImageVariableEntry(variable) && !isPasteVariableEntry(variable));
  		const isStickyAndEditing = !element.confirmation && isStickyScrollRow && element.id === this.viewModel?.editing?.id;
  		if (!element.confirmation && !isStickyAndEditing) {
+diff --git a/src/vs/workbench/contrib/chat/test/browser/attachments/chatVariables.test.ts b/src/vs/workbench/contrib/chat/test/browser/attachments/chatVariables.test.ts
+index 04e89f2a..34c0d69b 100644
+--- a/src/vs/workbench/contrib/chat/test/browser/attachments/chatVariables.test.ts
++++ b/src/vs/workbench/contrib/chat/test/browser/attachments/chatVariables.test.ts
+@@ -319,6 +319,39 @@ suite('ChatDynamicVariableModel', () => {
+ 		});
+ 	});
+ 
++	test('typing inside a reference turns it into plain text and keeps every character (#23)', () => {
++		const { editor, model } = createDynamicVariableModel('@sections/intro.tex:L2 @sections/intro.tex:L4  then');
++		model.addReference(createMockVariable({ id: 'a', range: new Range(1, 1, 1, 23) }));
++		model.addReference(createMockVariable({ id: 'b', range: new Range(1, 24, 1, 46) }));
++
++		editor.executeEdits('test', [{ range: new Range(1, 34, 1, 34), text: 'Z' }]);
++
++		assert.deepStrictEqual({
++			text: editor.getValue(),
++			variables: model.variables.map(variable => [variable.id, variable.range]),
++		}, {
++			text: '@sections/intro.tex:L2 @sections/Zintro.tex:L4  then',
++			variables: [['a', new Range(1, 1, 1, 23)]],
++		});
++	});
++
++	test('pasting inside a reference turns it into plain text too; Backspace inside one still removes it whole', () => {
++		const { editor, model } = createDynamicVariableModel('@main.tex:L7 @main.tex:L9 ');
++		model.addReference(createMockVariable({ id: 'a', range: new Range(1, 1, 1, 13) }));
++		model.addReference(createMockVariable({ id: 'b', range: new Range(1, 14, 1, 26) }));
++
++		editor.executeEdits('test', [{ range: new Range(1, 6, 1, 6), text: 'pasted' }]);
++		editor.executeEdits('test', [{ range: new Range(1, 30, 1, 31), text: '' }]);
++
++		assert.deepStrictEqual({
++			text: editor.getValue(),
++			variables: model.variables,
++		}, {
++			text: '@mainpasted.tex:L7  ',
++			variables: [],
++		});
++	});
++
+ 	test('does not retain attachment payload after the backing attachment is removed', () => {
+ 		const attachment = createMockAttachment({
+ 			kind: 'image',
