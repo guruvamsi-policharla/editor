@@ -255,3 +255,18 @@ export function permissionButtons(p: Pick<PermissionPrompt, 'choices'>): string[
 		return text;
 	});
 }
+
+/** The marker a stopped turn ends with: in the live footer (`footer`), and in a reopened chat's transcript. */
+export const STOPPED = 'Stopped';
+
+/**
+ * A response's footer details: "Stopped" for a turn ended by Stop (core drops a response's updates after Stop,
+ * but takes its result's details, so that's where the live transcript can say so), then the model and context use.
+ */
+export function footer(info: { stopped?: boolean; model?: string; usage?: { used: number; size: number } }): string {
+	return [
+		info.stopped ? STOPPED : undefined,
+		info.model,
+		info.usage?.size ? `${Math.round(100 * info.usage.used / info.usage.size)}% of context` : undefined,
+	].filter(Boolean).join(' · ');
+}

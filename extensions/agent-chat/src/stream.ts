@@ -1,7 +1,7 @@
 // Render ops → VS Code chat stream parts. Never pushes edit parts (textEdit/workspaceEdit/externalEdit): the
 // harness writes files itself and agent-review shows Keep/Undo, so the chat's own editing session stays empty.
 import * as vscode from 'vscode';
-import type { RenderOp, ToolCard } from './render.js';
+import { STOPPED, type RenderOp, type ToolCard } from './render.js';
 import type { TranscriptTurn } from './transcript.js';
 
 const TODO_TOOL = 'manage_todo_list';
@@ -88,7 +88,7 @@ export function historyTurns(turns: readonly TranscriptTurn[], participant: stri
 			}
 		}
 		if (turn.stopped) {
-			parts.push(new vscode.ChatResponseMarkdownPart(new vscode.MarkdownString('\n\n*Stopped.*')));
+			parts.push(new vscode.ChatResponseMarkdownPart(new vscode.MarkdownString(`\n\n*${STOPPED}.*`)));
 		}
 		out.push(new vscode.ChatResponseTurn2(parts, {}, participant));
 	});

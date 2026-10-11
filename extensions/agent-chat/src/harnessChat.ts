@@ -27,13 +27,15 @@ import type { ChatEntry, ChatHistory } from './history.js';
 import { loginCommand, resolveLaunch } from './launch.js';
 import { HarnessModels } from './models.js';
 import { promptBlocks, type PromptReference } from './prompt.js';
-import { permissionButtons, TurnRenderer } from './render.js';
+import { footer, permissionButtons, TurnRenderer } from './render.js';
 import type { Lease, TurnScheduler } from './scheduler.js';
 import { attributeChanges, ECHO_MS, modelIdentifier, shownSettings, startValues, type PickerEvent, type PickerPush } from './settings.js';
 import { historyTurns, StreamWriter } from './stream.js';
 import { ReplayBuilder, TranscriptBuilder } from './transcript.js';
 
 const CONFIRM_TOOL = 'vscode_get_confirmation_with_options';
+/** How long after Stop a turn's result may take before a "Stopped" one goes ahead (core waits a second). */
+const STOP_RESULT_MS = 600;
 /** Opening a chat this long after activation counts as the user's doing (not a window restore): warm up. */
 const WARM_AFTER_MS = 5000;
 
@@ -681,7 +683,23 @@ export class HarnessChat implements vscode.Disposable {
 	// ---------------------------------------------------------------------------------------------------------
 	// A turn
 
-	private async handle(request: vscode.ChatRequest, context: vscode.ChatContext, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<vscode.ChatResult> {
+	/**
+	 * A message. After Stop, core takes the result (its footer says "Stopped") only if it comes within a second, and
+	 * the agent can take longer to end the turn: then the result goes ahead and the turn finishes behind it.
+	 */
+	private handle(request: vscode.ChatRequest, context: vscode.ChatContext, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<vscode.ChatResult> {
+		const turn = this.turn(request, context, stream, token);
+		let sub: vscode.Disposable | undefined;
+		const stopped = new Promise<vscode.ChatResult>(resolve => {
+			sub = token.onCancellationRequested(() => setTimeout(() => {
+				const key = context.chatSessionContext?.chatSessionItem.resource.toString();
+				resolve({ metadata: { stopReason: 'cancelled' }, ...this.details(key ? this.sessions.get(key) : undefined, true) });
+			}, STOP_RESULT_MS));
+		});
+		return Promise.race([turn, stopped]).finally(() => sub?.dispose());
+	}
+
+	private async turn(request: vscode.ChatRequest, context: vscode.ChatContext, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<vscode.ChatResult> {
 		this.env.markUsed();
 		if (!vscode.workspace.isTrusted) {
 			stream.warning(`${this.label} doesn't run in Restricted Mode. Trust this workspace to use it.`);
@@ -846,7 +864,7 @@ export class HarnessChat implements vscode.Disposable {
 			show(renderer.finish(token.isCancellationRequested ? 'stopped' : 'interrupted'));
 			transcript.endTurn(token.isCancellationRequested);
 			if (token.isCancellationRequested) {
-				return {};
+				return { metadata: { stopReason: 'cancelled' }, ...this.details(session, true) };
 			}
 			return await this.turnError(e, stream);
 		} finally {
@@ -926,14 +944,14 @@ export class HarnessChat implements vscode.Disposable {
 				stream.warning(`${this.label} declined to continue.`);
 				break;
 		}
-		const usage = session.view.state.usage;
-		const model = this.controlsFor(session).find(c => c.placement === 'model');
-		const modelName = model?.choices.find(c => c.id === model.current)?.name;
-		const details = [
-			modelName,
-			usage?.size ? `${Math.round(100 * usage.used / usage.size)}% of context` : undefined,
-		].filter(Boolean).join(' · ');
-		return { metadata: { stopReason: result.stopReason }, ...(details ? { details } : {}) };
+		return { metadata: { stopReason: result.stopReason }, ...this.details(session, result.stopReason === 'cancelled') };
+	}
+
+	/** The footer: "Stopped" for a stopped turn, the model, the context use. */
+	private details(session: AcpSession | undefined, stopped: boolean): { details?: string } {
+		const model = session && this.controlsFor(session).find(c => c.placement === 'model');
+		const details = footer({ stopped, model: model?.choices.find(c => c.id === model.current)?.name, ...(session?.view.state.usage ? { usage: session.view.state.usage } : {}) });
+		return details ? { details } : {};
 	}
 
 	private startError(e: unknown, stream: vscode.ChatResponseStream): vscode.ChatResult {
