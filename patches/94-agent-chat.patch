@@ -431,3 +431,28 @@ index 04e89f2a..34c0d69b 100644
  	test('does not retain attachment payload after the backing attachment is removed', () => {
  		const attachment = createMockAttachment({
  			kind: 'image',
+diff --git a/src/vs/workbench/contrib/chat/browser/widget/media/chat.css b/src/vs/workbench/contrib/chat/browser/widget/media/chat.css
+index 14644bdb..8c58e7ab 100644
+--- a/src/vs/workbench/contrib/chat/browser/widget/media/chat.css
++++ b/src/vs/workbench/contrib/chat/browser/widget/media/chat.css
+@@ -2168,6 +2168,20 @@ have to be updated for changes to the rules above, or to support more deeply nes
+ 	max-width: 100%;
+ }
+ 
++/* Agent chat: in a narrow chat (the sessions list beside it) the pickers under the input wrap onto a second row
++   instead of cutting every label down to a few letters ("Accept …", "O."). A label longer than the row still
++   ends in an ellipsis (#37). */
++.interactive-session .chat-secondary-toolbar .chat-secondary-input-toolbar .monaco-action-bar .actions-container,
++.interactive-session .chat-secondary-toolbar .chat-sessionPicker-container {
++	flex-wrap: wrap;
++	row-gap: 2px;
++}
++
++.interactive-session .chat-secondary-toolbar .chat-sessionPicker-item {
++	flex-shrink: 0;
++	max-width: 100%;
++}
++
+ .monaco-workbench .interactive-session .chat-input-toolbars .monaco-action-bar .action-item .codicon,
+ .monaco-workbench .interactive-session .chat-input-toolbars .action-label .codicon {
+ 	color: var(--vscode-icon-foreground) !important;
