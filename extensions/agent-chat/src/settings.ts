@@ -92,3 +92,14 @@ export function startValues(saved: { settings?: ChatSettings } | undefined, defa
 	const strictest = strictestOffered(options, profile);
 	return strictest && profile.permissionOption ? { [profile.permissionOption.configId]: strictest } : {};
 }
+
+/** The language model vendor the harnesses' models are registered under (models.ts). */
+export const MODEL_VENDOR = 'agent-chat';
+
+/**
+ * A harness model value as core's language model identifier (`<vendor>/<id>`, the id being `<session type>:<value>`),
+ * which a history request's `modelId` names: core selects it in a reopened chat's model picker.
+ */
+export function modelIdentifier(sessionType: string, value: string): string {
+	return `${MODEL_VENDOR}/${sessionType}:${value}`;
+}

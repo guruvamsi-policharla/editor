@@ -103,6 +103,18 @@ describe('chat history store', () => {
 		expect(a.transcript('agent-claude:/c1')).toBeUndefined();
 	});
 
+	it('each turn keeps the model it ran on, so a reopened chat\'s model picker can show it after a restart (#25)', () => {
+		const t = new TranscriptBuilder();
+		t.startTurn('one');
+		t.setModel('default');
+		t.startTurn('two');
+		t.setModel('haiku');
+		t.setModel(undefined);
+		const a = new ChatHistory(dir);
+		a.save(entry(1), t.turns, t.text());
+		expect(new ChatHistory(dir).transcript('agent-claude:/c1')!.map(turn => turn.model)).toEqual(['default', 'haiku']);
+	});
+
 	it('each chat keeps its own settings across a restart; setting one chat\'s leaves the other\'s alone (#33)', () => {
 		const a = new ChatHistory(dir);
 		a.save(entry(1, { settings: { mode: 'acceptEdits', model: 'haiku' } }));

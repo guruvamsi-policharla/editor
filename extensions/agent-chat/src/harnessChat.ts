@@ -29,7 +29,7 @@ import { HarnessModels } from './models.js';
 import { promptBlocks, type PromptReference } from './prompt.js';
 import { permissionButtons, TurnRenderer } from './render.js';
 import type { Lease, TurnScheduler } from './scheduler.js';
-import { attributeChanges, ECHO_MS, shownSettings, startValues, type PickerEvent, type PickerPush } from './settings.js';
+import { attributeChanges, ECHO_MS, modelIdentifier, shownSettings, startValues, type PickerEvent, type PickerPush } from './settings.js';
 import { historyTurns, StreamWriter } from './stream.js';
 import { ReplayBuilder, TranscriptBuilder } from './transcript.js';
 
@@ -323,7 +323,7 @@ export class HarnessChat implements vscode.Disposable {
 		const options = selections(this.groupsFor(resource));
 		this.pushed(undefined, key, options);
 		return {
-			history: historyTurns(turns ?? [], this.type, key),
+			history: historyTurns(turns ?? [], this.type, key, value => modelIdentifier(this.type, value)),
 			requestHandler: undefined,
 			options,
 			...(entry ? { title: entry.title } : {}),
@@ -769,6 +769,9 @@ export class HarnessChat implements vscode.Disposable {
 				this.remember(session);
 				this.refresh(session);
 			}
+			// Saved with the turn: a reopened chat's model picker shows the model its last message ran on (core takes
+			// it from the history's last request).
+			transcript.setModel(this.controlsFor(session).find(c => c.placement === 'model')?.current);
 
 			// One agent edits at a time: wait while another chat's turn runs (plan mode never waits).
 			let waitedFor: string | undefined;

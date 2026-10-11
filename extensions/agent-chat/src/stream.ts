@@ -60,12 +60,16 @@ export function toolPart(card: ToolCard): vscode.ChatToolInvocationPart {
 	return part;
 }
 
-/** A saved transcript as core's chat history: one request and one response per turn. */
-export function historyTurns(turns: readonly TranscriptTurn[], participant: string, chatId: string): (vscode.ChatRequestTurn2 | vscode.ChatResponseTurn2)[] {
+/**
+ * A saved transcript as core's chat history: one request and one response per turn. A request carries the model
+ * it ran on (`modelId`, the language model identifier): core selects the last one in a reopened chat's model
+ * picker, instead of the session type's default.
+ */
+export function historyTurns(turns: readonly TranscriptTurn[], participant: string, chatId: string, modelId: (value: string) => string = v => v): (vscode.ChatRequestTurn2 | vscode.ChatResponseTurn2)[] {
 	const out: (vscode.ChatRequestTurn2 | vscode.ChatResponseTurn2)[] = [];
 	turns.forEach((turn, i) => {
 		// Request ids must be unique across chats.
-		out.push(new vscode.ChatRequestTurn2(turn.prompt, undefined, [], participant, [], undefined, `${chatId}#${i}`, undefined, undefined));
+		out.push(new vscode.ChatRequestTurn2(turn.prompt, undefined, [], participant, [], undefined, `${chatId}#${i}`, turn.model ? modelId(turn.model) : undefined, undefined));
 		const parts: (vscode.ChatResponseMarkdownPart | vscode.ChatResponseThinkingProgressPart | vscode.ChatToolInvocationPart)[] = [];
 		for (const op of turn.ops) {
 			switch (op.op) {

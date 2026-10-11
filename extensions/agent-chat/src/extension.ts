@@ -14,7 +14,7 @@ import * as vscode from 'vscode';
 import { AdapterInstaller, BUILTIN_PROFILES } from '@editor/acp-client';
 import { HarnessChat } from './harnessChat.js';
 import { ChatHistory } from './history.js';
-import { HarnessModels } from './models.js';
+import { HarnessModels, MODEL_VENDOR } from './models.js';
 import { TurnScheduler } from './scheduler.js';
 
 let lastUsed: number | undefined;
@@ -25,7 +25,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(log);
 
 	const models = new HarnessModels();
-	context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider('agent-chat', models));
+	context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider(MODEL_VENDOR, models));
 	const installer = new AdapterInstaller(join(context.globalStorageUri.fsPath, 'adapters'), join(context.extensionPath, 'dist', 'adapters'));
 	const markUsed = () => { lastUsed = Date.now(); };
 	// Chats belong to the workspace folder they ran in. Kept in global storage under a hash of the folder's path:
