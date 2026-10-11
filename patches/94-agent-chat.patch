@@ -266,10 +266,20 @@ index 6ba765d1..051bd5b8 100644
  
  	private handleAttachmentOpen(index: number, attachment: IChatRequestVariableEntry): void {
 diff --git a/src/vs/workbench/contrib/chat/common/model/chatModel.ts b/src/vs/workbench/contrib/chat/common/model/chatModel.ts
-index f3863489..66b5cd71 100644
+index f3863489..fdd4e999 100644
 --- a/src/vs/workbench/contrib/chat/common/model/chatModel.ts
 +++ b/src/vs/workbench/contrib/chat/common/model/chatModel.ts
-@@ -1072,6 +1072,9 @@ export class Response extends AbstractResponse implements IDisposable {
+@@ -43,7 +43,8 @@ import { ILanguageModelChatMetadata, ILanguageModelChatMetadataAndIdentifier } f
+ import { IIntendedModelSelection, ModelSelectionReason } from '../modelSelection.js';
+ import { IChatAgentCommand, IChatAgentData, IChatAgentResult, IChatAgentService, UserSelectedTools, reviveSerializedAgent } from '../participants/chatAgents.js';
+ import { ChatRequestTextPart, IParsedChatRequest, reviveParsedChatRequest } from '../requestParser/chatParserTypes.js';
+-import { chatSessionResourceToId, LocalChatSessionUri } from './chatUri.js';
++import { chatSessionResourceToId, getChatSessionType, LocalChatSessionUri } from './chatUri.js';
++import { localChatSessionType } from '../chatSessionsService.js';
+ import { ObjectMutationLog } from './objectMutationLog.js';
+ 
+ 
+@@ -1072,6 +1073,9 @@ export class Response extends AbstractResponse implements IDisposable {
  		);
  
  		if (existingInvocation) {
@@ -279,7 +289,7 @@ index f3863489..66b5cd71 100644
  			if (progress.toolSpecificData !== undefined) {
  				existingInvocation.toolSpecificData = progress.toolSpecificData;
  			}
-@@ -1107,6 +1110,7 @@ export class Response extends AbstractResponse implements IDisposable {
+@@ -1107,6 +1111,7 @@ export class Response extends AbstractResponse implements IDisposable {
  			{},
  			undefined // chatRequestId
  		);
@@ -287,7 +297,7 @@ index f3863489..66b5cd71 100644
  
  		if (progress.isComplete) {
  			// Already completed on first push
-@@ -1667,7 +1671,15 @@ export class ChatResponseModel extends Disposable implements IChatResponseModel
+@@ -1667,13 +1672,26 @@ export class ChatResponseModel extends Disposable implements IChatResponseModel
  		// spinner/"Editing files" label. See https://github.com/microsoft/vscode/issues/288701.
  		for (const part of this._response.value) {
  			if (part.kind === 'toolInvocation' && part instanceof ChatToolInvocation) {
@@ -304,6 +314,17 @@ index f3863489..66b5cd71 100644
  			} else if (part instanceof ChatPlanReviewData) {
  				part.dismiss();
  			} else if (part instanceof ChatQuestionCarouselData) {
+ 				part.dismiss(undefined);
+ 			}
+ 		}
++		// An extension's chat session (agent chat): core drops the extension's updates after Stop, so the marker its
++		// reopened transcript ends with is added here, and the live view shows the reply was stopped too.
++		if (!this.isComplete && getChatSessionType(this.session.sessionResource) !== localChatSessionType) {
++			this._response.updateContent({ kind: 'markdownContent', content: new MarkdownString('\n\n*Stopped.*') });
++		}
+ 
+ 		const completedAt = Date.now();
+ 		this._elapsedMs ??= Math.max(0, completedAt - this.confirmationAdjustedTimestamp.get());
 diff --git a/src/vs/workbench/contrib/chat/common/model/chatProgressTypes/chatToolInvocation.ts b/src/vs/workbench/contrib/chat/common/model/chatProgressTypes/chatToolInvocation.ts
 index 13aa48ff..7d00a226 100644
 --- a/src/vs/workbench/contrib/chat/common/model/chatProgressTypes/chatToolInvocation.ts
@@ -359,7 +380,7 @@ index 13aa48ff..7d00a226 100644
  	 * Transition from streaming state to prepared/executing state.
  	 * Called when the full tool call is ready.
 diff --git a/src/vs/workbench/contrib/chat/test/common/model/chatModel.test.ts b/src/vs/workbench/contrib/chat/test/common/model/chatModel.test.ts
-index e6e923ef..702d44de 100644
+index e6e923ef..5d2ce134 100644
 --- a/src/vs/workbench/contrib/chat/test/common/model/chatModel.test.ts
 +++ b/src/vs/workbench/contrib/chat/test/common/model/chatModel.test.ts
 @@ -32,7 +32,7 @@ import { ChatAgentService, IChatAgentService } from '../../../common/participant
@@ -371,7 +392,7 @@ index e6e923ef..702d44de 100644
  import { IToolResult, ToolDataSource } from '../../../common/tools/languageModelToolsService.js';
  import { ChatAgentLocation, ChatModeKind } from '../../../common/constants.js';
  import { MockChatService } from '../chatService/mockChatService.js';
-@@ -1728,6 +1728,45 @@ suite('ChatResponseModel', () => {
+@@ -1728,6 +1728,61 @@ suite('ChatResponseModel', () => {
  		assert.strictEqual(response.state, ResponseModelState.Cancelled);
  	});
  
@@ -412,6 +433,22 @@ index e6e923ef..702d44de 100644
 +		const waitingState = waiting.state.get();
 +		assert.strictEqual(waitingState.type, IChatToolInvocation.StateKind.Cancelled);
 +		assert.strictEqual(waitingState.type === IChatToolInvocation.StateKind.Cancelled && waitingState.reason, ToolConfirmKind.Skipped);
++	});
++
++	test('cancellation marks an extension\'s chat session reply "Stopped."; a local chat\'s reply is left as is', async () => {
++		const send = (model: ChatModel) => {
++			const text = 'explain';
++			const request = model.addRequest({ text, parts: [new ChatRequestTextPart(new OffsetRange(0, text.length), new Range(1, text.length, 1, text.length), text)] }, { variables: [] }, 0);
++			model.acceptResponseProgress(request, { kind: 'markdownContent', content: new MarkdownString('A batch window trades latency for thr') });
++			model.cancelRequest(request);
++			return request.response!.response.toString();
++		};
++
++		const contributed = testDisposables.add(instantiationService.createInstance(ChatModel, undefined, { initialLocation: ChatAgentLocation.Chat, canUseTools: true, resource: URI.parse('agent-claude:/session-1') }));
++		assert.strictEqual(send(contributed), 'A batch window trades latency for thr\n\n*Stopped.*');
++
++		const local = testDisposables.add(instantiationService.createInstance(ChatModel, undefined, { initialLocation: ChatAgentLocation.Chat, canUseTools: true }));
++		assert.strictEqual(send(local), 'A batch window trades latency for thr');
 +	});
 +
  	test('completed tool invocation ignores duplicate completion', async () => {
