@@ -128,6 +128,19 @@ describe.runIf(hasGit())('git operations', () => {
     expect(pendingPaths()).toEqual([]);
   });
 
+  it('#31 (by decision): a partial stage accepts the staged hunk; the commit then accepts the unstaged hunk too', async () => {
+    await agentWrite('a.txt', 'a1\na2\nA3\na4\nA5\na6\na7\n');
+    const oid = gitWithInput(ws.root, 'a1\na2\nA3\na4\na5\na6\na7\n', 'hash-object', '-w', '--stdin').trim();
+    ws.git('update-index', '--cacheinfo', `100644,${oid},a.txt`); // stage line 3 only
+    await engine.checkGit();
+    expect((await engine.getFileChange('a.txt'))!.hunks.map((h) => h.newLines)).toEqual([['A5\n']]); // line 5 still pending
+    ws.git('commit', '-qm', 'line 3 only');
+    expect(await engine.checkGit()).toEqual({ kind: 'head', accepted: ['a.txt'] });
+    expect(pendingPaths()).toEqual([]); // Keep File: the uncommitted line 5 too
+    expect(await baselineFiles(engine)).toMatchObject({ 'a.txt': 'a1\na2\nA3\na4\nA5\na6\na7\n' });
+    expect(ws.git('diff', '--', 'a.txt')).toContain('+A5'); // while git still shows it as unstaged
+  });
+
   it('a commit with a rename accepts both paths', async () => {
     await engine.handleFsEvents([ws.remove('b.txt'), ws.write('renamed.txt', 'b\n')]);
     await agentWrite('a.txt', 'agent\n');
