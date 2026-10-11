@@ -40,6 +40,25 @@ describe('turn scheduler: one agent edits at a time', () => {
 		expect(order).toEqual(['b', 'c']);
 	});
 
+	it('closing a waiting chat gives up its place: its message never runs, the next one in line starts (#21)', async () => {
+		const s = new TurnScheduler();
+		const a = (await s.acquire(A))!;
+		let bRan = false;
+		const b = s.acquire(B).then(l => { bRan = !!l; return l; });
+		const c = s.acquire(C);
+		await tick();
+		expect(s.isWaiting('b')).toBe(true);
+		expect(s.cancelChat('b')).toBe(1);
+		expect(await b).toBeUndefined();
+		expect(s.isWaiting('b')).toBe(false);
+		expect(s.waiting.map(w => w.holder.chat)).toEqual(['c']);
+		expect(s.cancelChat('b')).toBe(0);
+		a.release();
+		(await c)!.release();
+		expect(bRan).toBe(false);
+		expect(s.blockers('x')).toEqual([]);
+	});
+
 	it('Stop while waiting gives up the place (no lease); Run now starts alongside', async () => {
 		const s = new TurnScheduler();
 		const a = (await s.acquire(A))!;

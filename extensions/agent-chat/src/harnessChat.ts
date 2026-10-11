@@ -84,6 +84,8 @@ export class HarnessChat implements vscode.Disposable {
 	private pickerTimer: ReturnType<typeof setTimeout> | undefined;
 	/** Chats whose turn is running. */
 	private readonly running = new Set<string>();
+	/** Chats whose message is waiting for another chat's turn → the editor tab it was sent from. */
+	private readonly waitingTabs = new Map<string, vscode.Tab>();
 	/** Chats whose session is getting its settings back (resumed with the agent's defaults): not shown or saved. */
 	private readonly reconciling = new Set<string>();
 	private readonly items = new Map<string, vscode.ChatSessionItem>();
@@ -140,6 +142,7 @@ export class HarnessChat implements vscode.Disposable {
 			provideChatSessionContent: resource => this.content(resource),
 		};
 		this.publishModels();
+		this.disposables.push(vscode.window.tabGroups.onDidChangeTabs(e => this.onTabsClosed(e.closed)));
 		return vscode.Disposable.from(controller, participant, vscode.chat.registerChatSessionContentProvider(this.type, provider, participant), this);
 	}
 
@@ -785,11 +788,26 @@ export class HarnessChat implements vscode.Disposable {
 					stream.markdown(`Another chat is working in this workspace: **${who}**. This message starts when it's done, so the two agents don't edit the same files at once.\n\n`);
 					stream.button({ command: 'agentChat.runNow', title: 'Run now', arguments: [id] });
 					stream.progress(`Waiting for ${who} to finish…`);
+					const tab = this.chatTab(key);
+					if (tab) {
+						this.waitingTabs.set(key, tab);
+					}
 				},
 			});
+			this.waitingTabs.delete(key);
 			if (!lease) {
 				transcript.endTurn(true);
-				return {};
+				if (!stop.signal.aborted) {
+					// The chat was closed while waiting (the response itself goes on: core keeps a chat with a running
+					// request): the message is dropped, and the reopened chat says so.
+					stream.clearToPreviousToolInvocation(vscode.ChatResponseClearToPreviousToolInvocationReason.NoReason);
+					stream.markdown('*Not sent: the chat was closed while this message was waiting.*');
+					transcript.add([{ op: 'markdown', text: '*Not sent: the chat was closed while this message was waiting.*' }]);
+					return { metadata: { stopReason: 'closed' } };
+				}
+				// Stop while waiting. Core drops the response's updates after Stop, so the waiting line can't be cleared:
+				// the footer says it wasn't sent.
+				return { details: 'Stopped while waiting: not sent', metadata: { stopReason: 'cancelled' } };
 			}
 			if (waitedFor) {
 				// The waiting line and its Run now button are done once the turn starts (Run now would only say so):
@@ -860,6 +878,31 @@ export class HarnessChat implements vscode.Disposable {
 			}
 		});
 		this.refresh(session);
+	}
+
+	/**
+	 * The editor tab a chat's message was sent from: the active tab when it's a chat editor and the side bar's chat
+	 * isn't this one. Closing it gives up the chat's waiting message (#21).
+	 */
+	private chatTab(key: string): vscode.Tab | undefined {
+		if (vscode.window.activeChatPanelSessionResource?.toString() === key) {
+			return undefined;
+		}
+		const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+		const chatInput = (vscode as unknown as { TabInputChat?: abstract new (...args: never[]) => unknown }).TabInputChat;
+		return tab && chatInput && tab.input instanceof chatInput ? tab : undefined;
+	}
+
+	/** Closed chat tabs: their chats' waiting messages are given up (they would run with nobody looking). */
+	private onTabsClosed(closed: readonly vscode.Tab[]): void {
+		for (const [key, tab] of this.waitingTabs) {
+			// The same Tab object, or (should the API hand out a new one) the same chat tab in the same group.
+			if (closed.some(t => t === tab || (t.label === tab.label && t.group.viewColumn === tab.group.viewColumn && t.input?.constructor === tab.input?.constructor))) {
+				this.waitingTabs.delete(key);
+				const n = this.env.scheduler.cancelChat(key);
+				this.env.log.info(`[${this.profile.id}] chat tab closed: ${n} waiting message(s) dropped`);
+			}
+		}
 	}
 
 	/** The session is in a mode that can't edit (plan, read-only): its turns don't wait for other chats. */
