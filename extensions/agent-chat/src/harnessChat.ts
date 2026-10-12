@@ -4,7 +4,10 @@
 //   profile's placeholder model); the adapter starts on the first message, or in the background when the user
 //   opens a new chat of this type after startup.
 // - ACP config options → the native model picker (model) and option pickers (everything else), re-rendered
-//   from every response and `config_option_update`. Dangerous values (Codex Full access) need a modal confirm.
+//   from every response and `config_option_update`. Dangerous values (Codex Full access, Claude's Bypass
+//   permissions) need a modal confirm each time they're chosen; while a chat is in one, the status bar says so.
+//   Bypass is never saved with a chat or restored: after a reload, restart or adapter recovery the chat is back in
+//   the mode it had before (`transientValues`, AcpSession.keptValues).
 // - Permission requests → core's confirmation tool, which can't be auto-approved; Stop → `session/cancel`.
 // - Not logged in → a "Sign in" picker and a warning with a button that runs the harness's login in a terminal.
 // - An adapter crash ends the turn with an error; the next message restarts it and resumes the session.
@@ -19,7 +22,7 @@ import { join } from 'node:path';
 import * as vscode from 'vscode';
 import {
 	AdapterInstaller, AgentSupervisor, claudePersistence, codexPersistence, configControls, errorMessage, HarnessClient,
-	isAuthRequired, isDangerous, optionValues, PermissionBroker, withOverride, withValues,
+	isAuthRequired, isDangerous, isTransient, optionValues, PermissionBroker, withOverride, withValues,
 	type AcpSession, type acp, type AgentStatus, type ConfigControl, type HarnessProfile, type PermissionPrompt, type ProfileOverride, type SettingsResult,
 } from '@editor/acp-client';
 import { changedSelections, groupsFromControls, modelChoices, signInGroup, SIGN_IN_GROUP } from './groups.js';
@@ -29,7 +32,7 @@ import { HarnessModels } from './models.js';
 import { promptBlocks, type PromptReference } from './prompt.js';
 import { footer, permissionButtons, runningCommands, stoppedCommandsNote, TurnRenderer } from './render.js';
 import type { Lease, TurnScheduler } from './scheduler.js';
-import { attributeChanges, ECHO_MS, modelIdentifier, shownSettings, startValues, type PickerEvent, type PickerPush } from './settings.js';
+import { attributeChanges, dangerousConfirmation, ECHO_MS, modelIdentifier, shownSettings, startValues, type PickerEvent, type PickerPush } from './settings.js';
 import { historyTurns, StreamWriter } from './stream.js';
 import { ReplayBuilder, TranscriptBuilder } from './transcript.js';
 
@@ -104,6 +107,12 @@ export class HarnessChat implements vscode.Disposable {
 	/** When a turn last showed a crash in the chat (no second notification for the same crash). */
 	private crashShownAt = 0;
 	private readonly disposables: vscode.Disposable[] = [];
+	/** Dangerous values confirmed in a chat's picker before it had a session: its next message doesn't ask again. */
+	private readonly confirmedPicks = new WeakMap<vscode.ChatSessionInputState, Map<string, string>>();
+	/** The same, by chat (moved there from a new chat's input state when it gets its resource). */
+	private readonly confirmedChats = new Map<string, Map<string, string>>();
+	/** Shown while a chat of this harness is in a dangerous mode (Bypass permissions). */
+	private statusItem: vscode.StatusBarItem | undefined;
 
 	constructor(readonly profile: HarnessProfile, private readonly env: ChatEnv) {
 		this.type = `agent-${profile.id}`;
@@ -135,6 +144,11 @@ export class HarnessChat implements vscode.Disposable {
 			this.items.set(resource.toString(), item);
 			// Core copies the new chat's picker values to it next, and reports them to every chat (settings.ts).
 			this.pushed(undefined, resource.toString(), selections(ctx.inputState.groups));
+			const confirmed = this.confirmedPicks.get(ctx.inputState);
+			if (confirmed?.size) {
+				this.confirmedChats.set(resource.toString(), new Map(confirmed));
+				this.confirmedPicks.delete(ctx.inputState);
+			}
 			return item;
 		};
 		controller.getChatSessionInputState = (resource, ctx) => this.inputState(resource, ctx);
@@ -178,7 +192,12 @@ export class HarnessChat implements vscode.Disposable {
 				log.info(`[${this.profile.id}] ready: ${s.agentInfo?.name ?? '?'} ${s.agentInfo?.version ?? ''}`);
 				void this.fetchListed();
 				break;
+			case 'stopped':
+				// Chats in Bypass leave it with the adapter (AcpSession.ensureLive): pickers and status bar say so now.
+				this.refresh();
+				break;
 			case 'exited':
+				this.refresh();
 				log.error(`[${this.profile.id}] adapter exited (${s.signal ?? `code ${s.code}`}), crash ${s.crashes}\n${s.stderr.slice(-2000)}`);
 				if (!this.turns && Date.now() - this.crashShownAt > 5000) {
 					void vscode.window.showWarningMessage(`${this.label} stopped unexpectedly. It restarts with your next message.`, 'Show Log').then(a => { if (a) { log.show(); } });
@@ -382,7 +401,8 @@ export class HarnessChat implements vscode.Disposable {
 			created: prev?.created ?? item?.timing?.created ?? Date.now(),
 			updated: Date.now(),
 			turns: transcript?.turns.length ?? prev?.turns ?? 0,
-			...(session && !this.reconciling.has(key) ? { settings: optionValues(session.view.state.configOptions) } : prev?.settings ? { settings: prev.settings } : {}),
+			// Never Bypass: a chat in it is saved with the mode it had before (AcpSession.keptValues).
+			...(session && !this.reconciling.has(key) ? { settings: session.keptValues() } : prev?.settings ? { settings: prev.settings } : {}),
 		};
 		try {
 			this.env.history.save(entry, transcript?.turns, transcript?.text());
@@ -399,6 +419,7 @@ export class HarnessChat implements vscode.Disposable {
 		this.transcripts.delete(key);
 		this.items.delete(key);
 		this.env.history.remove(key);
+		this.updateStatus();
 		if (resource.path.startsWith(LISTED)) {
 			// Listed by the agent and never opened here: only the agent's list has it.
 			this.env.history.forgetSession(this.profile.id, decodeURIComponent(resource.path.slice(LISTED.length)));
@@ -418,9 +439,9 @@ export class HarnessChat implements vscode.Disposable {
 		return `agentChat.config.${this.profile.id}`;
 	}
 
-	/** The options last seen, for the pickers' choices before a session runs (their values are per chat). */
+	/** The options last seen, for the pickers' choices before a session runs (their values are per chat; never Bypass). */
 	private remember(session: AcpSession): void {
-		void this.env.context.globalState.update(this.cacheKey(), session.view.state.configOptions);
+		void this.env.context.globalState.update(this.cacheKey(), withValues(session.view.state.configOptions, session.keptValues()));
 	}
 
 	private cached(): acp.SessionConfigOption[] | undefined {
@@ -438,7 +459,8 @@ export class HarnessChat implements vscode.Disposable {
 	private optionsFor(resource: vscode.Uri | undefined): acp.SessionConfigOption[] {
 		const session = this.sessionFor(resource);
 		if (session) {
-			return session.view.state.configOptions;
+			// A session the adapter lost (restart, crash) comes back without Bypass (AcpSession.ensureLive): show that.
+			return this.live(session) ? session.view.state.configOptions : withValues(session.view.state.configOptions, session.keptValues());
 		}
 		const entry = resource ? this.env.history.get(resource.toString()) : undefined;
 		return withValues(this.cached(), startValues(entry, withOverride(this.profile, this.override()).defaults, this.cached(), this.profile));
@@ -446,6 +468,11 @@ export class HarnessChat implements vscode.Disposable {
 
 	private savedSettings(entry: ChatEntry): Record<string, string> {
 		return startValues(entry, undefined, this.cached(), this.profile);
+	}
+
+	/** The session is on the running adapter (not one to resume after a restart or crash). */
+	private live(session: AcpSession): boolean {
+		return this.client?.supervisor.running?.generation === session.generation;
 	}
 
 	private sessionFor(resource: vscode.Uri | undefined): AcpSession | undefined {
@@ -484,6 +511,7 @@ export class HarnessChat implements vscode.Disposable {
 			this.setGroups(state, this.groupsFor(state.sessionResource, state));
 		}
 		this.publishModels(only);
+		this.updateStatus();
 	}
 
 	/**
@@ -576,23 +604,34 @@ export class HarnessChat implements vscode.Disposable {
 		const key = state.sessionResource?.toString();
 		const entry = key ? this.env.history.get(key) : undefined;
 		for (const change of changedSelections(groups, configControls(this.optionsFor(state.sessionResource), this.profile))) {
-			if (isDangerous(this.profile, change.id, change.value) && !await this.confirmDangerous(change.id, change.value)) {
-				this.revert(state, change.id, change.previous);
-			} else if (entry && key) {
+			const confirmed = key ? this.confirmedChats.get(key) ?? new Map<string, string>() : this.confirmedPicks.get(state) ?? new Map<string, string>();
+			confirmed.delete(change.id);
+			if (isDangerous(this.profile, change.id, change.value)) {
+				if (!await this.confirmDangerous(change.id, change.value)) {
+					this.revert(state, change.id, change.previous);
+					continue;
+				}
+				confirmed.set(change.id, change.value);
+			}
+			if (key) {
+				this.confirmedChats.set(key, confirmed);
+			} else {
+				this.confirmedPicks.set(state, confirmed);
+			}
+			// Bypass isn't saved with the chat: a restart before its next message opens it in its earlier mode.
+			if (entry && key && !isTransient(this.profile, change.id, change.value)) {
 				this.env.history.saveSettings(key, { ...this.savedSettings(entry), [change.id]: change.value });
 			}
 		}
 	}
 
+	/** The modal confirm for a dangerous value: asked every time one is chosen (dangerousConfirmation). */
 	private async confirmDangerous(configId: string, value: string): Promise<boolean> {
 		const control = this.controlsFor(undefined).find(c => c.id === configId);
 		const name = control?.choices.find(c => c.id === value)?.name.replace(' ⚠', '') ?? value;
-		const yes = `Use ${name}`;
-		const answer = await vscode.window.showWarningMessage(
-			`${this.label}: switch to ${name}?`,
-			{ modal: true, detail: `${name} lets ${this.label} run commands and edit anything without asking first, outside this workspace too. Edits in the workspace still show up for review.` },
-			yes,
-		);
+		const { message, detail, yes } = dangerousConfirmation(this.label, name, isTransient(this.profile, configId, value));
+		const answer = await vscode.window.showWarningMessage(message, { modal: true, detail }, yes);
+		this.env.log.info(`[${this.profile.id}] confirm ${configId}=${value}: ${answer === yes ? 'yes' : 'no'}`);
 		return answer === yes;
 	}
 
@@ -635,9 +674,13 @@ export class HarnessChat implements vscode.Disposable {
 	private async reconcile(key: string, session: AcpSession, shown: Record<string, string>, stream: vscode.ChatResponseStream, settings: SettingsResult | undefined): Promise<boolean> {
 		const controls = this.controlsFor(session);
 		const wanted = { ...shown };
+		// A dangerous value confirmed in the picker before the chat had a session isn't asked again (once).
+		const confirmed = this.confirmedChats.get(key);
+		this.confirmedChats.delete(key);
 		for (const [id, value] of Object.entries(wanted)) {
 			const control = controls.find(c => c.id === id);
-			if (!control || control.placement === 'model' || control.current === value || (isDangerous(this.profile, id, value) && !await this.confirmDangerous(id, value))) {
+			if (!control || control.placement === 'model' || control.current === value
+				|| (isDangerous(this.profile, id, value) && confirmed?.get(id) !== value && !await this.confirmDangerous(id, value))) {
 				delete wanted[id];
 			}
 		}
@@ -676,7 +719,7 @@ export class HarnessChat implements vscode.Disposable {
 			return;
 		}
 		try {
-			this.env.history.saveSettings(key, optionValues(session.view.state.configOptions));
+			this.env.history.saveSettings(key, session.keptValues());
 		} catch (e) {
 			this.env.log.warn(`[${this.profile.id}] couldn't save the chat's settings: ${errorMessage(e)}`);
 		}
@@ -778,7 +821,7 @@ export class HarnessChat implements vscode.Disposable {
 		this.running.add(key);
 		try {
 			this.reconciling.add(key);
-			const { recovery, settings } = await session.ensureLive();
+			const { recovery, settings, left } = await session.ensureLive();
 			if (recovery === 'resumed' && !firstMessage) {
 				stream.progress(`Reconnected to ${this.label}.`);
 			} else if (recovery === 'new') {
@@ -786,6 +829,14 @@ export class HarnessChat implements vscode.Disposable {
 					? `${this.label} couldn't reopen the earlier session, so this chat continues in a new one: earlier messages aren't in its context.`
 					: `${this.label} restarted, and this chat continues in a new session: earlier messages aren't in its context.`;
 				stream.warning(notice);
+			}
+			// Bypass ends with the session it was chosen in: the recovered one is back in the mode from before, and
+			// this message runs in it (the picker still showing Bypass doesn't put it back without a new choice).
+			for (const l of left ?? []) {
+				delete shown[l.id];
+				const names = this.controlsFor(session).find(c => c.id === l.id)?.choices;
+				const name = (v: string | undefined) => names?.find(c => c.id === v)?.name.replace(' ⚠', '') ?? v ?? 'another mode';
+				stream.warning(`${this.label} restarted, and this chat left ${name(l.value)}: it's in ${name(l.to)} again. Choose ${name(l.value)} again to go back to it.`);
 			}
 
 			// The chat's pickers (a new chat's picks before its first message too; the agent's own switches, leaving
@@ -975,11 +1026,43 @@ export class HarnessChat implements vscode.Disposable {
 		return { metadata: { stopReason: result.stopReason }, ...this.details(session, result.stopReason === 'cancelled') };
 	}
 
-	/** The footer: "Stopped" for a stopped turn, the model, the context use. */
+	/** The footer: "Stopped" for a stopped turn, a dangerous mode (Bypass permissions), the model, the context use. */
 	private details(session: AcpSession | undefined, stopped: boolean): { details?: string } {
 		const model = session && this.controlsFor(session).find(c => c.placement === 'model');
-		const details = footer({ stopped, model: model?.choices.find(c => c.id === model.current)?.name, ...(session?.view.state.usage ? { usage: session.view.state.usage } : {}) });
+		const dangerous = session && this.dangerousMode(session);
+		const details = footer({ stopped, ...(dangerous ? { dangerous } : {}), model: model?.choices.find(c => c.id === model.current)?.name, ...(session?.view.state.usage ? { usage: session.view.state.usage } : {}) });
 		return details ? { details } : {};
+	}
+
+	/** The name of the dangerous value the session is in (Bypass permissions), if any. */
+	private dangerousMode(session: AcpSession): string | undefined {
+		for (const c of this.controlsFor(session)) {
+			const choice = c.choices.find(ch => ch.id === c.current);
+			if (choice?.dangerous) {
+				return choice.name.replace(' ⚠', '');
+			}
+		}
+		return undefined;
+	}
+
+	/** The status bar item: shown, with the warning colors, while any chat of this harness is in a dangerous mode. */
+	private updateStatus(): void {
+		const chats = [...this.sessions].flatMap(([key, session]) => {
+			const mode = this.live(session) ? this.dangerousMode(session) : undefined;
+			return mode ? [{ key, mode, title: this.items.get(key)?.label ?? this.env.history.get(key)?.title ?? 'chat' }] : [];
+		});
+		if (!chats.length) {
+			this.statusItem?.hide();
+			return;
+		}
+		const item = this.statusItem ??= vscode.window.createStatusBarItem(`agentChat.dangerous.${this.profile.id}`, vscode.StatusBarAlignment.Left, 1000);
+		item.name = `${this.label}: dangerous mode`;
+		item.text = `$(warning) ${this.label}: ${chats[0]!.mode}${chats.length > 1 ? ` (${chats.length} chats)` : ''}`;
+		item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+		item.color = new vscode.ThemeColor('statusBarItem.warningForeground');
+		item.tooltip = `${chats.map(c => `“${c.title}”: ${c.mode}`).join('\n')}\n\n${this.label} runs commands and edits files there without asking. Its edits in the workspace still show up for review. Pick another mode in the chat to leave it.`;
+		item.command = { command: 'agentChat.openChat', title: 'Show the chat', arguments: [chats[0]!.key] };
+		item.show();
 	}
 
 	private startError(e: unknown, stream: vscode.ChatResponseStream): vscode.ChatResult {
@@ -1061,6 +1144,7 @@ export class HarnessChat implements vscode.Disposable {
 	}
 
 	dispose(): void {
+		this.statusItem?.dispose();
 		this.disposables.forEach(d => d.dispose());
 		void this.client?.dispose();
 	}

@@ -78,6 +78,13 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('agentChat.login', async (id?: string) => chatFor(id ?? await pickHarness())?.login()),
 		vscode.commands.registerCommand('agentChat.restart', async (id?: string) => chatFor(id ?? await pickHarness())?.restart()),
 		vscode.commands.registerCommand('agentChat.showLog', () => log.show()),
+		// The status bar's Bypass permissions item: shows the chat that's in it.
+		vscode.commands.registerCommand('agentChat.openChat', async (resource: string) => {
+			const uri = vscode.Uri.parse(resource);
+			if (!await Promise.resolve(vscode.commands.executeCommand<boolean>('_agentChat.openChat', uri, 'sidebar')).catch(() => false)) {
+				await vscode.commands.executeCommand('vscode.open', uri);
+			}
+		}),
 		vscode.commands.registerCommand('agentChat.lastUsed', () => lastUsed),
 		// Cmd/Ctrl+L to chat: insert the reference at the cursor of the last focused chat input, as an inline pill,
 		// without sending it. Without the core command (an older core), the reference replaces the input.

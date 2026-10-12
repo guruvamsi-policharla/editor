@@ -13,7 +13,7 @@ The editor-independent ACP client ([PLAN.md](../../PLAN.md) Phase 4, design in [
 | `config.ts` | Config options → UI controls: `model` → the model picker, other selects → pickers in the agent's order, hidden values dropped, dangerous ones flagged, timing attached |
 | `installer.ts` | `AdapterInstaller`: pinned adapters installed on first use with `npm ci` against the lockfiles in `adapters/<id>/` (integrity-checked, `--ignore-scripts`), staged and renamed into place. `--omit=optional` (no bundled harness binary, 66 MB instead of 299 MB for Claude) when the user's CLI is on PATH |
 
-Approved defaults (docs/acp-design.md, Decisions): Claude starts in Accept edits (commands still prompt) with Bypass removed from the session (`allowDangerouslySkipPermissions: false`) and hidden; Codex starts in Workspace access (`INITIAL_AGENT_MODE`), with Full access flagged dangerous.
+Approved defaults (docs/acp-design.md, Decisions): Claude starts in Accept edits (commands still prompt); every session allows Bypass (`_meta.claudeCode.options.allowDangerouslySkipPermissions: true`, the adapter's `--allow-dangerously-skip-permissions`), which is dangerous (confirmed) and transient (`transientValues`: never a default, never saved with a chat, dropped when a session is recovered; `AcpSession.keptValues`, `withoutTransient`); Codex starts in Workspace access (`INITIAL_AGENT_MODE`), with Full access flagged dangerous.
 
 ## Tests
 

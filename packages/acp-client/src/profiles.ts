@@ -37,8 +37,14 @@ export interface HarnessProfile {
 	readonly defaults?: Readonly<Record<string, string>>;
 	/** Values never offered in the UI (Claude's Bypass). Keyed by config id. */
 	readonly hiddenValues?: Readonly<Record<string, readonly string[]>>;
-	/** Values that need an explicit confirmation (Codex Full access). Keyed by config id. */
+	/** Values that need an explicit confirmation (Codex Full access, Claude's Bypass). Keyed by config id. */
 	readonly dangerousValues?: Readonly<Record<string, readonly string[]>>;
+	/**
+	 * Values a chat is only in for as long as it runs (Claude's Bypass): never a default, never saved with a chat,
+	 * and never set again after a reload, a restart or an adapter recovery. The chat goes back to the value it had
+	 * before (else the profile's default, else the strictest one offered). Keyed by config id.
+	 */
+	readonly transientValues?: Readonly<Record<string, readonly string[]>>;
 	/** When option changes apply: per config id, else `default`. */
 	readonly timing: { readonly default: OptionTiming; readonly byId?: Readonly<Record<string, OptionTiming>> };
 	/**
@@ -85,11 +91,16 @@ export const CLAUDE: HarnessProfile = {
 	label: 'Claude Code',
 	adapter: { npm: '@agentclientprotocol/claude-agent-acp', version: '0.87.0', bin: 'claude-agent-acp' },
 	harness: { binary: 'claude', env: 'CLAUDE_CODE_EXECUTABLE', fallbackPaths: ['~/.local/bin/claude', '~/.claude/local/claude'] },
-	// Bypass leaves the session's mode list; Accept edits is the approved default (commands still prompt).
-	sessionMeta: { claudeCode: { options: { allowDangerouslySkipPermissions: false } } },
+	// Bypass is allowed in every session: the adapter's `--allow-dangerously-skip-permissions` (it passes the option to
+	// the SDK, which starts Claude Code with that flag), so Bypass permissions is in the mode list. The adapter and
+	// Claude Code still refuse it as root outside a sandbox (`IS_SANDBOX`), and when settings disable it
+	// (`permissions.disableBypassPermissionsMode`): then it's simply not offered. A chat never starts in it: Accept
+	// edits is the approved default (commands still prompt), choosing Bypass is confirmed each time, and it's never
+	// restored (`transientValues`).
+	sessionMeta: { claudeCode: { options: { allowDangerouslySkipPermissions: true } } },
 	defaults: { mode: 'acceptEdits' },
-	hiddenValues: { mode: ['bypassPermissions'] },
 	dangerousValues: { mode: ['bypassPermissions'] },
+	transientValues: { mode: ['bypassPermissions'] },
 	timing: { default: 'live' },
 	readOnlyValues: { mode: ['plan'] },
 	// Manual asks before every edit and command; Plan doesn't edit (leaving it asks); Auto approves by itself.
@@ -143,6 +154,11 @@ export const TACT: HarnessProfile = {
 
 export const BUILTIN_PROFILES: readonly HarnessProfile[] = [CLAUDE, CODEX, TACT];
 
+/** Whether a chat only keeps `value` while it runs (see `transientValues`). */
+export function isTransient(profile: HarnessProfile, configId: string, value: string): boolean {
+	return profile.transientValues?.[configId]?.includes(value) ?? false;
+}
+
 /** User overrides from settings (`agentChat.harnesses.<id>`). */
 export interface ProfileOverride {
 	/** An installed adapter command to run instead of the pinned npm install. */
@@ -157,10 +173,12 @@ export function withOverride(profile: HarnessProfile, override: ProfileOverride 
 	if (!override) {
 		return profile;
 	}
+	// A transient value (Claude's Bypass) is never a default, also not the user's.
+	const defaults = Object.fromEntries(Object.entries(override.defaults ?? {}).filter(([id, value]) => !isTransient(profile, id, value)));
 	return {
 		...profile,
 		env: { ...profile.env, ...override.env },
-		defaults: { ...profile.defaults, ...override.defaults },
+		defaults: { ...profile.defaults, ...defaults },
 	};
 }
 

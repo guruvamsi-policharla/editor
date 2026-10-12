@@ -9,7 +9,7 @@
 //   including the values we set ourselves and the ones core sets when it opens a chat. So a change is only taken
 //   as the user's in the chat it was reported to when that's unambiguous (see `attributeChanges`); every message
 //   still runs with what its chat's pickers show (core keeps those per chat, `initialSessionOptions`).
-import { isLooser, strictestOffered, type acp, type HarnessProfile } from '@editor/acp-client';
+import { isLooser, strictestOffered, withoutTransient, type acp, type HarnessProfile } from '@editor/acp-client';
 
 export type ChatSettings = Record<string, string>;
 
@@ -80,17 +80,31 @@ export function without(settings: ChatSettings, ids: readonly string[]): ChatSet
 /**
  * The values a chat's pickers start from before its session runs: a saved chat's own (one saved before settings
  * were kept: the strictest mode, its own is unknown); a new chat's are the profile's defaults (Claude: Accept
- * edits), never another chat's.
+ * edits), never another chat's. Never a transient value (Claude's Bypass): chats are saved without it, and a
+ * value that got in anyway is replaced by the profile's default (else the strictest mode).
  */
 export function startValues(saved: { settings?: ChatSettings } | undefined, defaults: Readonly<ChatSettings> | undefined, options: readonly acp.SessionConfigOption[] | undefined, profile: HarnessProfile): ChatSettings {
 	if (!saved) {
-		return { ...defaults };
+		return withoutTransient({ ...defaults }, undefined, profile, options);
 	}
 	if (saved.settings) {
-		return saved.settings;
+		return withoutTransient(saved.settings, undefined, profile, options);
 	}
 	const strictest = strictestOffered(options, profile);
 	return strictest && profile.permissionOption ? { [profile.permissionOption.configId]: strictest } : {};
+}
+
+/**
+ * The modal confirm for a dangerous value (Claude's Bypass permissions, Codex's Full access), asked every time one is
+ * chosen. `transient`: the chat leaves it when it restarts (Bypass).
+ */
+export function dangerousConfirmation(label: string, name: string, transient: boolean): { message: string; detail: string; yes: string } {
+	return {
+		message: `${label}: switch to ${name}?`,
+		detail: `${name} lets ${label} run commands and edit anything without asking first, outside this workspace too. Edits in the workspace still show up for review with Keep/Undo.`
+			+ (transient ? ` This chat stays in ${name} until you pick another mode; after a reload or restart it's back in the mode it had before.` : ''),
+		yes: `Use ${name}`,
+	};
 }
 
 /** The language model vendor the harnesses' models are registered under (models.ts). */

@@ -5,7 +5,7 @@
  * negotiate, or unknown types) are skipped.
  */
 import type * as acp from '@agentclientprotocol/sdk';
-import { optionTiming, type HarnessProfile, type OptionTiming } from './profiles.js';
+import { isTransient, optionTiming, type HarnessProfile, type OptionTiming } from './profiles.js';
 
 export interface ConfigChoice {
 	id: string;
@@ -70,7 +70,7 @@ export function pendingDefaults(options: readonly acp.SessionConfigOption[] | nu
 	const out: { id: string; value: string }[] = [];
 	for (const [id, value] of Object.entries(profile.defaults ?? {})) {
 		const o = options?.find(x => x.id === id);
-		if (o?.type === 'select' && String(o.currentValue) !== value && flatChoices(o).some(c => c.value === value)) {
+		if (!isTransient(profile, id, value) && o?.type === 'select' && String(o.currentValue) !== value && flatChoices(o).some(c => c.value === value)) {
 			out.push({ id, value });
 		}
 	}
@@ -110,4 +110,29 @@ export function withValues(options: readonly acp.SessionConfigOption[] | null | 
 		const value = values[o.id];
 		return o.type === 'select' && value !== undefined && flatChoices(o).some(c => c.value === value) ? { ...o, currentValue: value } : o;
 	});
+}
+
+/**
+ * Values a chat can be saved and restored with: a transient value (Claude's Bypass) is replaced by the one the chat
+ * had before (`previous`), else the profile's default, else the strictest value offered; never by another transient
+ * one. With `options`, only values they offer count (without them, nothing is checked).
+ */
+export function withoutTransient(values: Readonly<Record<string, string>>, previous: Readonly<Record<string, string>> | undefined, profile: HarnessProfile, options?: readonly acp.SessionConfigOption[] | null): Record<string, string> {
+	const out = { ...values };
+	for (const [id, value] of Object.entries(values)) {
+		if (!isTransient(profile, id, value)) {
+			continue;
+		}
+		const o = options?.find(x => x.id === id);
+		const usable = (v: string | undefined): v is string => v !== undefined && !isTransient(profile, id, v)
+			&& (!options || (o?.type === 'select' && flatChoices(o).some(c => c.value === v)));
+		const strictest = id === profile.permissionOption?.configId ? strictestOffered(options, profile) : undefined;
+		const fallback = [previous?.[id], profile.defaults?.[id], strictest].find(usable);
+		if (fallback !== undefined) {
+			out[id] = fallback;
+		} else {
+			delete out[id];
+		}
+	}
+	return out;
 }

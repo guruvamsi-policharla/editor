@@ -105,13 +105,13 @@ For agents that speak [ACP](https://agentclientprotocol.com) (Claude Code via [c
   - list/resume sessions.
 
   Codex applies mode, model, effort and fast changes from the next turn. Effort and fast appear only for models that support them.
-- **Defaults.** Claude starts in Accept edits (commands still prompt); Codex starts in Workspace access. Claude's Bypass is hidden; Codex's Full access needs a confirmation. The chat lives in the secondary side bar (right), and sessions can also open as editor tabs. The user's installed `claude`/`codex` are used when found on PATH; otherwise pinned adapters are downloaded on first use.
+- **Defaults.** Claude starts in Accept edits (commands still prompt); Codex starts in Workspace access. Claude's Bypass permissions needs a confirmation every time it's chosen and is never a default or restored after a restart (Oct 12, 2026; hidden before); Codex's Full access needs a confirmation. The chat lives in the secondary side bar (right), and sessions can also open as editor tabs. The user's installed `claude`/`codex` are used when found on PATH; otherwise pinned adapters are downloaded on first use.
 - **Standing permission rules aren't in ACP.** A rules editor edits the harness's own files: `permissions.allow/deny/ask` in Claude's `settings.json` files, and `prefix_rule` in `~/.codex/rules/default.rules`. Then it restarts the agent and resumes the chat.
 - **Cmd+L** inserts `@path:L42-58` into the chat input (always the chat, never the agent terminal). The reference goes to the agent as text, plus a `resource_link` for the file.
 - **Permission safety:**
   - only an explicit click answers a prompt;
   - prompts show the exact command or paths and whether "always" writes a persistent rule;
-  - dangerous modes (Claude Bypass, Codex Full access) need confirmation and show a badge; Claude Bypass is hidden by default;
+  - dangerous modes (Claude Bypass, Codex Full access) need confirmation and show a badge; Claude Bypass is never a default and never restored;
   - adapter versions are pinned, and agents don't start in Restricted Mode.
 - `.claude/settings.local.json` joins the built-in ignores, so "always allow" clicks don't show up as agent edits. tact has no ACP: our adapter (`packages/tact-acp`) bridges to the web API of a tact UI run in a hidden pty; a `tact acp` subcommand remains a separate upstream contribution.
 

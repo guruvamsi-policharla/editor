@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type * as acp from '@agentclientprotocol/sdk';
-import { BUILTIN_PROFILES, CLAUDE, CODEX, configControls, isDangerous, launchFor, npmAdapter, optionTiming, pendingDefaults, TACT, withOverride } from '../src/index.js';
+import { BUILTIN_PROFILES, CLAUDE, CLIENT_CAPABILITIES, CODEX, configControls, isDangerous, isTransient, launchFor, npmAdapter, optionTiming, pendingDefaults, TACT, withOverride, withoutTransient, type HarnessProfile } from '../src/index.js';
 
 const claudeFixture = JSON.parse(readFileSync(new URL('./fixtures/claude-0.87.0.json', import.meta.url), 'utf8'));
 const claudeOptions: acp.SessionConfigOption[] = claudeFixture.sessionNew.configOptions;
@@ -50,13 +50,50 @@ describe('config controls', () => {
 		expect(controls[0]!.plan).toBe('plan');
 	});
 
-	it('hides Bypass, but keeps a hidden value that is currently selected', () => {
+	it('Claude offers Bypass permissions, marked dangerous (confirmed each time); a hidden value stays hidden unless selected', () => {
 		const withBypass = structuredClone(claudeOptions);
 		const mode = withBypass[0] as acp.SessionConfigOption & { type: 'select'; options: acp.SessionConfigSelectOption[] };
-		mode.options.push({ value: 'bypassPermissions', name: 'Bypass' });
-		expect(configControls(withBypass, CLAUDE)[0]!.choices.map(c => c.id)).not.toContain('bypassPermissions');
+		mode.options.push({ value: 'bypassPermissions', name: 'Bypass permissions', description: 'Accepts all permissions' });
+		expect(configControls(withBypass, CLAUDE)[0]!.choices.find(c => c.id === 'bypassPermissions')).toEqual({ id: 'bypassPermissions', name: 'Bypass permissions', description: 'Accepts all permissions', dangerous: true });
+		expect(isDangerous(CLAUDE, 'mode', 'bypassPermissions')).toBe(true);
+		expect(isTransient(CLAUDE, 'mode', 'bypassPermissions')).toBe(true);
+		// Only where the agent advertises it: the recorded options (Bypass disabled) have none.
+		expect(configControls(claudeOptions, CLAUDE)[0]!.choices.map(c => c.id)).not.toContain('bypassPermissions');
+		const hiding: HarnessProfile = { ...CLAUDE, hiddenValues: { mode: ['bypassPermissions'] } };
+		expect(configControls(withBypass, hiding)[0]!.choices.map(c => c.id)).not.toContain('bypassPermissions');
 		mode.currentValue = 'bypassPermissions';
-		expect(configControls(withBypass, CLAUDE)[0]!.choices.find(c => c.id === 'bypassPermissions')).toMatchObject({ dangerous: true });
+		expect(configControls(withBypass, hiding)[0]!.choices.map(c => c.id)).toContain('bypassPermissions');
+	});
+
+	it('Bypass is allowed at launch (session/new _meta), and the client claims no fs or terminal capability', () => {
+		expect(CLAUDE.sessionMeta).toEqual({ claudeCode: { options: { allowDangerouslySkipPermissions: true } } });
+		expect(CLIENT_CAPABILITIES).toEqual({});
+		expect(CLIENT_CAPABILITIES).not.toHaveProperty('fs');
+		expect(CLIENT_CAPABILITIES).not.toHaveProperty('terminal');
+		// Other harnesses: nothing new.
+		expect(CODEX.sessionMeta).toBeUndefined();
+		expect(CODEX.transientValues).toBeUndefined();
+		expect(TACT.dangerousValues).toBeUndefined();
+	});
+
+	it('the default mode is never Bypass: not the profile\'s, not a user override\'s, not one the agent starts in', () => {
+		expect(CLAUDE.defaults?.mode).toBe('acceptEdits');
+		expect(withOverride(CLAUDE, { defaults: { mode: 'bypassPermissions', effort: 'max' } }).defaults).toEqual({ mode: 'acceptEdits', effort: 'max' });
+		expect(withOverride(CLAUDE, { defaults: { mode: 'default' } }).defaults).toEqual({ mode: 'default' });
+		const withBypass = structuredClone(claudeOptions);
+		(withBypass[0] as acp.SessionConfigOption & { options: acp.SessionConfigSelectOption[] }).options.push({ value: 'bypassPermissions', name: 'Bypass permissions' });
+		expect(pendingDefaults(withBypass, { ...CLAUDE, defaults: { mode: 'bypassPermissions' } })).toEqual([]);
+	});
+
+	it('values a chat is saved with: Bypass becomes the mode from before, else the default, else the strictest', () => {
+		const withBypass = structuredClone(claudeOptions);
+		(withBypass[0] as acp.SessionConfigOption & { options: acp.SessionConfigSelectOption[] }).options.push({ value: 'bypassPermissions', name: 'Bypass permissions' });
+		expect(withoutTransient({ mode: 'bypassPermissions', effort: 'high' }, { mode: 'default' }, CLAUDE, withBypass)).toEqual({ mode: 'default', effort: 'high' });
+		expect(withoutTransient({ mode: 'bypassPermissions' }, { mode: 'bypassPermissions' }, CLAUDE, withBypass)).toEqual({ mode: 'acceptEdits' });
+		expect(withoutTransient({ mode: 'bypassPermissions' }, undefined, { ...CLAUDE, defaults: {} }, withBypass)).toEqual({ mode: 'default' });
+		expect(withoutTransient({ mode: 'plan' }, { mode: 'default' }, CLAUDE, withBypass)).toEqual({ mode: 'plan' });
+		// Codex's Full access isn't transient: kept as before.
+		expect(withoutTransient({ mode: 'agent-full-access' }, undefined, CODEX)).toEqual({ mode: 'agent-full-access' });
 	});
 
 	it('Codex Full access is dangerous; boolean options are skipped', () => {
