@@ -201,7 +201,7 @@ describe('ReviewEngine user saves', () => {
     expect(await baselineFiles(engine)).toEqual({ 'renamed/b.txt': 'b\n' });
   });
 
-  it('editing part of an agent-created file folds the user lines; the rest stays pending as hunks', async () => {
+  it('editing an agent-created file keeps it a pending creation, with the user\'s edit in it', async () => {
     const ws = memWorkspace({});
     const engine = await ws.open();
     const agent = 'a1\na2\na3\n';
@@ -211,8 +211,8 @@ describe('ReviewEngine user saves', () => {
     await engine.reportUserSave('new.txt', saved, { edits: [{ offset: 3, length: 2, text: 'mine', origin: 'user' }] });
     ws.write('new.txt', saved);
     await engine.handleFsEvents([ws.abs('new.txt')]);
-    expect(await baselineFiles(engine)).toEqual({ 'new.txt': 'mine\n' });
-    expect(engine.listChanges()[0]).toMatchObject({ kind: 'modified', reviewMode: 'hunk' });
+    expect(await baselineFiles(engine)).toEqual({});
+    expect(engine.listChanges()[0]).toMatchObject({ kind: 'created', reviewMode: 'file' });
   });
 
   it('a formatter-only save of an agent-created file keeps it a pending creation', async () => {

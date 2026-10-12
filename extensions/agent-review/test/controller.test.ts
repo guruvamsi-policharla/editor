@@ -281,6 +281,90 @@ describe('ReviewController', () => {
     expect(await ctl.lineCounts(ctl.pendingFiles[0]!)).toEqual({ added: 2, removed: 1 }); // the agent's work is still pending
   });
 
+  it('saving never accepts: typing in a change, saved again and again, stays pending; the editor\'s review baseline is taken as is', async () => {
+    await open();
+    const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\n');
+    const shown = core.shown.get(abs)!.baseline;
+    let text = read(abs);
+    for (const typed of [' mine', ' more']) {
+      dirty.add(abs);
+      // The editor folded nothing typed on the change's line: its review baseline is still the one it was shown.
+      text = text.replace('New methods.', `New methods.${typed}`);
+      await ctl.onWillSave(abs, text, undefined, text, shown);
+      fs.writeFileSync(abs, text);
+      dirty.delete(abs);
+      await ctl.onBufferSettled(abs);
+      await ctl.handleFsEvents([abs]);
+      await ctl.idle();
+      expect(await ctl.baselineText(abs)).toBe('Intro.\nMethods.\nResults.\n');
+      expect(await ctl.lineCounts(ctl.pendingFiles[0]!)).toEqual({ added: 1, removed: 1 });
+    }
+    // Typing on a line with no change folds in, as the editor's baseline says.
+    dirty.add(abs);
+    text = text.replace('Intro.', 'Intro!');
+    await ctl.onWillSave(abs, text, undefined, text, 'Intro!\nMethods.\nResults.\n');
+    expect(await ctl.baselineText(abs)).toBe('Intro!\nMethods.\nResults.\n');
+    await ctl.idle();
+    expect(core.calls.filter((c) => c.startsWith('set'))).toHaveLength(1); // nothing pushed back: the editor has it
+  });
+
+  it('a stale review baseline (the engine moved on while the buffer was dirty) is not used', async () => {
+    await open();
+    const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\n');
+    dirty.add(abs);
+    // Kept from the list while the buffer is dirty: the push to the editor waits for the buffer.
+    await ctl.acceptFile(abs);
+    const text = 'Intro!\nNew methods.\nResults.\n';
+    await ctl.onWillSave(abs, text, undefined, text, 'Intro!\nMethods.\nResults.\n');
+    // The engine's own attribution: the user's line folds in; the kept change stays kept.
+    expect(await ctl.baselineText(abs)).toBe('Intro!\nNew methods.\nResults.\n');
+  });
+
+  it('Ctrl+Z of Keep / Undo from the list puts the change back exactly (baseline and disk); doing it again works', async () => {
+    await open();
+    const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\n');
+    const pendingBefore = await ctl.lineCounts(ctl.pendingFiles[0]!);
+    // Keep from the list, then Ctrl+Z.
+    const baseline = await ctl.baselineBytes(abs);
+    await ctl.acceptFile(abs);
+    expect(ctl.pendingFiles).toEqual([]);
+    await ctl.restoreBaseline(abs, baseline ?? null);
+    expect(await ctl.baselineText(abs)).toBe('Intro.\nMethods.\nResults.\n');
+    expect(await ctl.lineCounts(ctl.pendingFiles[0]!)).toEqual(pendingBefore);
+    expect(core.shown.get(abs)?.baseline).toBe('Intro.\nMethods.\nResults.\n');
+    // Undo from the list (on disk), then Ctrl+Z: the agent's text is back, pending.
+    const disk = fs.readFileSync(abs);
+    await ctl.rejectFile(abs);
+    expect(read(abs)).toBe('Intro.\nMethods.\nResults.\n');
+    await ctl.restoreDisk(abs, disk);
+    expect(read(abs)).toBe('Intro.\nNew methods.\nResults.\n');
+    expect(await ctl.baselineText(abs)).toBe('Intro.\nMethods.\nResults.\n');
+    expect(await ctl.lineCounts(ctl.pendingFiles[0]!)).toEqual(pendingBefore);
+    // Ctrl+Shift+Z: Undo again.
+    await ctl.rejectFile(abs);
+    expect(ctl.pendingFiles).toEqual([]);
+  });
+
+  it('Ctrl+Z of Keep Deletion and of Restore File: the deletion is pending again', async () => {
+    await open();
+    const abs = path.join(root, 'paper.tex');
+    fs.rmSync(abs);
+    await ctl.handleFsEvents([abs]);
+    await ctl.idle();
+    expect(ctl.pendingFiles.map((f) => f.kind)).toEqual(['deleted']);
+    const baseline = await ctl.baselineBytes(abs);
+    await ctl.acceptFile(abs); // Keep Deletion
+    expect(ctl.pendingFiles).toEqual([]);
+    await ctl.restoreBaseline(abs, baseline ?? null);
+    expect(ctl.pendingFiles.map((f) => f.kind)).toEqual(['deleted']);
+    await ctl.rejectFile(abs); // Restore File
+    expect(read(abs)).toBe('Intro.\nMethods.\nResults.\n');
+    expect(ctl.pendingFiles).toEqual([]);
+    await ctl.restoreDisk(abs, null);
+    expect(fs.existsSync(abs)).toBe(false);
+    expect(ctl.pendingFiles.map((f) => f.kind)).toEqual(['deleted']);
+  });
+
   it('a save in flight is not an external change, even if the list asks for line counts before the write', async () => {
     await open();
     const abs = await agentWrite('paper.tex', 'Intro.\nNew methods.\nResults.\n');
@@ -387,7 +471,7 @@ describe('ReviewController', () => {
     expect(logs.get('k')).toEqual([]);
   });
 
-  it('without the save-participant version, the same save counts the formatter as the user (stock VS Code)', async () => {
+  it('without the save-participant version, the same save counts the formatter as the user (stock VS Code): still pending', async () => {
     fs.writeFileSync(path.join(root, 'conf.ini'), 'a=1\nb=2\n');
     await open();
     const abs = await agentWrite('conf.ini', 'a=1\nb=20\n');
@@ -396,7 +480,9 @@ describe('ReviewController', () => {
     logs.onChange('k', [{ rangeOffset: 4, rangeLength: 4, text: 'b = 20' }], true, 2);
     dirty.add(abs);
     await userSave(abs, 'a=1\nb = 20\n', [...logs.get('k')!]);
-    expect(ctl.pendingFiles).toEqual([]); // the agent line was "rewritten by the user": folded
+    // The agent line was "rewritten by the user": saving never accepts, so it stays pending.
+    expect(ctl.pendingFiles.map((f) => path.basename(f.absPath))).toEqual(['conf.ini']);
+    expect(await ctl.baselineText(abs)).toBe('a=1\nb=2\n');
   });
 
   it('created files show with an empty baseline; Undo deletes them', async () => {

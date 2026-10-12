@@ -74,14 +74,26 @@
 }
 
 /*
- * Track changes: deleted words struck through in the line, right before the new ones. The struck text and the
- * strike are tinted red, so that a short word (a renamed `x`) still reads as a deleted letter, not as `*`.
+ * Deleted text is struck through wherever it shows:
+ *  - track changes: deleted words in the line, right before the new ones. The struck text and the strike are tinted
+ *    red, so that a short word (a renamed `x`) still reads as a deleted letter, not as `*`.
+ *  - red rows: every row of a deleted block (`agent-review-deleted-whole-lines`), and the deleted words of rewritten
+ *    lines (`char-delete`, whole lines included). The rows keep their syntax colors, and the strike is drawn in the
+ *    text's own color, which reads on the red rows in every theme.
+ * The selectors outrank token styles (`.mtku` underline, `.mtks`), so no token turns the strike off.
  */
 .monaco-editor .inline-deleted-text.agent-review-deleted-text {
 	text-decoration-line: line-through;
 	text-decoration-thickness: 1px;
 	text-decoration-color: var(--vscode-editorGutter-deletedBackground);
 	color: var(--vscode-gitDecoration-deletedResourceForeground);
+}
+
+.monaco-editor .chat-editing-original-zone.agent-review-deleted-lines .view-line .char-delete,
+.monaco-editor .chat-editing-original-zone.agent-review-deleted-whole-lines .view-line span {
+	text-decoration-line: line-through;
+	text-decoration-thickness: 1px;
+	text-decoration-style: solid;
 }
 
 /*
@@ -150,7 +162,11 @@
 }
 
 .monaco-editor.hc-black .inline-deleted-text.agent-review-deleted-text,
-.monaco-editor.hc-light .inline-deleted-text.agent-review-deleted-text {
+.monaco-editor.hc-light .inline-deleted-text.agent-review-deleted-text,
+.monaco-editor.hc-black .chat-editing-original-zone.agent-review-deleted-lines .view-line .char-delete,
+.monaco-editor.hc-light .chat-editing-original-zone.agent-review-deleted-lines .view-line .char-delete,
+.monaco-editor.hc-black .chat-editing-original-zone.agent-review-deleted-whole-lines .view-line span,
+.monaco-editor.hc-light .chat-editing-original-zone.agent-review-deleted-whole-lines .view-line span {
 	text-decoration-color: var(--vscode-diffEditor-removedTextBorder);
 	text-decoration-thickness: 2px;
 }

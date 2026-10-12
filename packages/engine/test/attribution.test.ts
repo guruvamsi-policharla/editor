@@ -110,24 +110,32 @@ describe('foldUserSave', () => {
     expect(computeHunks(next, L(S)).map((h) => h.newLines)).toEqual([['agent\n']]);
   });
 
-  it("the user's edit wins when they rewrite the agent's whole hunk", () => {
+  it("rewriting the agent's whole hunk keeps it pending (saving never accepts)", () => {
     const B = L('x\n');
     const D = L('agent\n');
     const next = foldUserSave(B, D, trackEdits(J(D), [edit(J(D), 'agent', 'mine')])!);
-    expect(J(next)).toBe('mine\n');
+    expect(J(next)).toBe('x\n');
   });
 
-  it('a partly edited hunk shrinks to its untouched lines', () => {
+  it('a partly edited hunk stays pending as a whole', () => {
     const B = L('x\n');
     const D = L('a1\na2\na3\n');
     const S = 'a1\nmine\na3\n';
     const next = foldUserSave(B, D, trackEdits(J(D), [edit(J(D), 'a2', 'mine')])!);
-    expect(J(next)).toBe('x\nmine\n');
-    const pending = computeHunks(next, L(S));
-    expect(pending.map((h) => [h.oldLines, h.newLines])).toEqual([
-      [['x\n'], ['a1\n']],
-      [[], ['a3\n']],
-    ]);
+    expect(J(next)).toBe('x\n');
+    expect(computeHunks(next, L(S)).map((h) => [h.oldLines, h.newLines])).toEqual([[['x\n'], ['a1\n', 'mine\n', 'a3\n']]]);
+  });
+
+  it('typing that touches an agent hunk keeps it pending: a word added to its line, a line inserted after it, a removed common line inside it', () => {
+    const B = L('c1\nold\nc2\nc3\n');
+    const D = L('c1\nagent\nc2\nc3\n');
+    const cases: [TrackedEdit, string][] = [
+      [edit(J(D), 'agent', 'agent mine'), 'c1\nold\nc2\nc3\n'],
+      [edit(J(D), 'agent\n', 'agent\nnew line\n'), 'c1\nold\nc2\nc3\n'],
+      [{ offset: J(D).indexOf('agent'), length: 'agent\nc2\n'.length, text: 'merged\n', origin: 'user' }, 'c1\nold\nc2\nc3\n'],
+      [edit(J(D), 'c3', 'c3 mine'), 'c1\nold\nc2\nc3 mine\n'], // not touching: folds
+    ];
+    for (const [e, expected] of cases) { expect(J(foldUserSave(B, D, trackEdits(J(D), [e])!))).toBe(expected); }
   });
 
   it('formatter changes inside an agent hunk stay pending', () => {
@@ -176,7 +184,7 @@ describe('foldUserSave', () => {
     expect(J(next)).toBe('c1\nold\nc2\n');
   });
 
-  it('agent deletions stay pending unless the hunk is resolved', () => {
+  it('agent deletions stay pending when the user edits next to them', () => {
     const B = L('keep\ndel1\ndel2\nkeep2\n');
     const D = L('keep\nkeep2 edited by user?\n'.replace(' edited by user?', ''));
     // D deleted del1, del2. The user edits "keep".
@@ -251,7 +259,7 @@ describe('foldUserSave', () => {
    * Structured property: a file made of independent blocks separated by unique anchor lines.
    * Each block is untouched, agent-only, user-only (outside agent hunks), formatter-only outside,
    * formatter inside an agent hunk, or a partial user edit of an agent addition. The fold must
-   * produce exactly the expected baseline, and what remains pending must be exactly the agent's work.
+   * produce exactly the expected baseline: what remains pending is the agent's work, with any edits inside it.
    */
   type Block = 'same' | 'agent' | 'user' | 'fmtOutside' | 'fmtInside' | 'partial' | 'agentDelete' | 'userThenDelete';
   it('property: block-structured saves fold exactly the right lines', () => {
@@ -292,9 +300,8 @@ describe('foldUserSave', () => {
                 edits.push({ block: i, from: `agent${i}\n`, to: `agentfmt${i}\n`, origin: 'formatter' });
                 break;
               case 'partial':
-                // Pure agent addition of three lines; the user rewrites the middle one.
+                // Pure agent addition of three lines; the user rewrites the middle one: all three stay pending.
                 D.push(`add${i}a\n`, `add${i}b\n`, `add${i}c\n`);
-                expected.push(`mine${i}\n`);
                 saved.push(`add${i}a\n`, `mine${i}\n`, `add${i}c\n`);
                 edits.push({ block: i, from: `add${i}b\n`, to: `mine${i}\n`, origin: 'user' });
                 break;

@@ -39,10 +39,12 @@ describe('format on save with the user text', () => {
     });
   }
 
-  it('without the user text, a log that does not replay still counts everything as the user\'s (stock VS Code)', async () => {
-    const { engine, r } = await save({ edits: [...typing.slice(1), formatter] });
+  it('without the user text, a log that does not replay counts everything as the user\'s (stock VS Code): still pending', async () => {
+    const { engine, r, baseline } = await save({ edits: [...typing.slice(1), formatter] });
     expect(r.attribution).toBe('fallback');
-    expect(engine.listChanges()).toEqual([]);
+    // Saving never accepts: the "user's" rewrite of the agent's line keeps the hunk pending.
+    expect(engine.listChanges().map((c) => c.path)).toEqual(['data.json']);
+    expect(baseline).not.toContain('warmup');
   });
 
   it('a user edit saved with no formatter changes folds in as before', async () => {
@@ -107,5 +109,47 @@ describe('format on save with the user text', () => {
     const b = (await baselineFiles(engine))['p.tex']!;
     expect(b).toBe('The b6 scheme b7 a b8 b9 of b10 and b11~\\cite{b12}. We b13 it b14 the b15 in b16.\n');
     expect(engine.listChanges().map((c) => c.path)).toEqual(['p.tex']);
+  });
+});
+
+describe('saving never accepts, with format on save', () => {
+  it('the user\'s typing inside an agent hunk stays pending through format on save, save after save', async () => {
+    const ws = memWorkspace({ 'a.json': '{\n  "a": 1\n}\n' });
+    const engine = await ws.open();
+    const agent = '{\n  "a": 1, "b":2\n}\n';
+    await engine.handleFsEvents([ws.write('a.json', agent)]);
+    const user = '{\n  "a": 1, "b":2, "mine":3\n}\n';
+    const saved = '{\n  "a": 1,\n  "b": 2,\n  "mine": 3\n}\n';
+    await engine.reportUserSave('a.json', saved, { userContent: user });
+    await engine.handleFsEvents([ws.write('a.json', saved)]);
+    expect((await baselineFiles(engine))['a.json']).toBe('{\n  "a": 1\n}\n');
+    // Again: the user edits their own text inside the (still pending) hunk.
+    const saved2 = saved.replace('"mine": 3', '"mine": 4');
+    await engine.reportUserSave('a.json', saved2, { userContent: saved2 });
+    await engine.handleFsEvents([ws.write('a.json', saved2)]);
+    expect((await baselineFiles(engine))['a.json']).toBe('{\n  "a": 1\n}\n');
+    expect(engine.listChanges().map((c) => c.path)).toEqual(['a.json']);
+  });
+});
+
+describe('the review UI\'s baseline (reviewBaseline)', () => {
+  it('is used as the new baseline instead of the engine\'s attribution, with the file\'s line endings', async () => {
+    const ws = memWorkspace({ 'a.txt': 'one\r\ntwo\r\nthree\r\n' });
+    const engine = await ws.open();
+    await engine.handleFsEvents([ws.write('a.txt', 'one\r\nTWO\r\nthree\r\n')]);
+    const saved = 'one!\r\nTWO mine\r\nthree\r\n';
+    const r = await engine.reportUserSave('a.txt', saved, { reviewBaseline: 'one!\ntwo\nthree\n' });
+    expect(r.attribution).toBe('review');
+    expect((await baselineFiles(engine))['a.txt']).toBe('one!\r\ntwo\r\nthree\r\n');
+    const [hunk] = (await engine.getFileChange('a.txt'))!.hunks;
+    expect([hunk!.oldLines, hunk!.newLines]).toEqual([['two\r\n'], ['TWO mine\r\n']]);
+  });
+
+  it('an empty one for an agent-created file keeps it a pending creation', async () => {
+    const ws = memWorkspace({});
+    const engine = await ws.open();
+    await engine.handleFsEvents([ws.write('new.txt', 'a\n')]);
+    await engine.reportUserSave('new.txt', 'a mine\n', { reviewBaseline: '' });
+    expect(engine.listChanges()[0]).toMatchObject({ path: 'new.txt', kind: 'created' });
   });
 });

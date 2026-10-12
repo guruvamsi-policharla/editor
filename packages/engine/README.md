@@ -40,7 +40,7 @@ Multi-root workspaces: `MultiRootReview.open({ roots, storageBase })` makes one 
 ## Host contract
 
 - **Events.** The engine never watches the disk. Forward watcher events with `handleFsEvents`; only paths matter (each is re-examined). An event for the root (or `rescan()`) re-walks everything. Git state is checked after every event batch, so forwarding `.git/` events is optional (call `checkGit()` if you want to poll).
-- **User saves.** Call `reportUserSave(path, content, { edits })` before the bytes hit disk, or pass `base` (the disk content the buffer's edits started from). `edits` is the ordered buffer edit log since the last disk sync (VS Code `contentChanges`, flattened). Tag the user's own edits `'user'` (typing, paste, undo/redo, rename-symbol) and editor-triggered formatting `'formatter'` (format on save, format document, code actions on save). Without `edits`, every changed line counts as the user's.
+- **User saves.** Call `reportUserSave(path, content, { edits })` before the bytes hit disk, or pass `base` (the disk content the buffer's edits started from). `edits` is the ordered buffer edit log since the last disk sync (VS Code `contentChanges`, flattened). Tag the user's own edits `'user'` (typing, paste, undo/redo, rename-symbol) and editor-triggered formatting `'formatter'` (format on save, format document, code actions on save). Without `edits`, every changed line counts as the user's. A host whose review UI keeps its own baseline live (the fork's editor) passes it as `reviewBaseline`; the engine then takes it as is, so both agree on what is pending.
 - **User deletes/renames** in the editor: `reportUserDelete`, `reportUserRename`.
 - **Staleness.** Accept/reject re-read the disk. If a hunk id no longer matches, or a file changed since the engine last observed it, they throw `StaleChangeError` after refreshing, so the host re-renders and retries. `acceptAll`/`rejectAll` skip such files and report them in `skipped`.
 
@@ -50,7 +50,7 @@ Multi-root workspaces: `MultiRootReview.open({ roots, storageBase })` makes one 
 | --- | --- |
 | First open | baseline = disk, nothing pending |
 | Agent edits a region several times | one combined hunk against the baseline |
-| User save | the user's edited lines fold into the baseline; untouched agent lines stay pending (a partly edited hunk shrinks) |
+| User save | never accepts: edits outside pending agent hunks fold into the baseline; a hunk the user edited (on its lines, or new lines at its edge) stays pending as a whole, with the edits in it, until accept/reject |
 | Formatter on save | inside a pending agent hunk: stays pending; elsewhere: folds in |
 | Created / deleted file | file-level unit; reject deletes / restores it |
 | Delete + create, identical content | one rename unit; reject moves it back |

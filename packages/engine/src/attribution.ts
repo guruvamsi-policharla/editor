@@ -10,14 +10,15 @@
  *
  * From that we derive, for every line of the saved content, whether it is an
  * untouched disk line or a new line (and who wrote it), then fold only the
- * right lines into the baseline (`foldUserSave`):
+ * right lines into the baseline (`foldUserSave`). Saving never accepts any
+ * part of an agent's change (Guru, Oct 12 2026: "I will make multiple
+ * iterations when I save"):
  *
- *  - lines the user edited fold into the baseline ("the user's edit wins")
- *  - untouched agent lines stay pending, so a partly edited hunk shrinks
- *  - formatter changes inside a pending agent hunk stay pending as part of it
- *  - formatter changes elsewhere fold into the baseline
- *  - an agent hunk's deleted baseline lines stay pending unless the user
- *    rewrote every line the agent added in that hunk (then the hunk is resolved)
+ *  - edits outside pending agent hunks fold into the baseline
+ *  - edits inside or touching a pending agent hunk (the user's or a
+ *    formatter's) keep the whole hunk pending: the baseline keeps the hunk's
+ *    accepted lines, so the hunk shows them against the agent's text with the
+ *    user's edits in it, until Keep or Undo
  */
 import { diffRegions } from './diff/myers.js';
 import { joinLines, splitLines } from './text.js';
@@ -46,16 +47,27 @@ export interface SavedLine {
    */
   moved?: boolean;
   /**
-   * Not in the saved content: a line of the user's, before format on save mixed it into agent text, that goes into
-   * the baseline in its place (see addFormatterPass).
+   * Not in the saved content: a line the user typed outside the agent's hunks, before format on save mixed it into
+   * agent text, that goes into the baseline in its place (see addFormatterPass).
    */
   ghost?: boolean;
+  /**
+   * For a line the user wrote: whether they wrote it inside or touching an agent hunk (then it stays pending with the
+   * hunk) or outside every hunk (then it folds in, even where format on save moved it next to agent lines). Unset:
+   * decided by where the line is in the saved content.
+   */
+  insideAgent?: boolean;
 }
 
 export interface Provenance {
   lines: SavedLine[];
   /** Disk lines that were removed, and by whom. */
   removedBy: Map<number, EditOrigin>;
+  /**
+   * Disk lines the user removed inside or touching an agent hunk (they stay in the baseline, pending with it), when
+   * decided before format on save (see `markInsideAgent`). Unset: decided by where the removal is.
+   */
+  removedInsideAgent?: Set<number>;
 }
 
 /** Attribute every changed line of `saved` to a single origin by diffing it against `disk`. */
@@ -180,6 +192,10 @@ const MAX_REGION_TOKENS = 20_000;
  * edit log: unchanged lines keep their provenance, and removed disk lines count as removed by the formatter (unless
  * the user removed them first).
  *
+ * Lines the user wrote keep `insideAgent` (set by the host of the user pass, see `linesInsideAgent`): a formatted line
+ * made of words the user typed inside an agent hunk stays pending with it, one made only of words typed outside folds
+ * in, and only lines typed outside get ghosts.
+ *
  * Each new line is traced to the words it is made of (a word-level diff of the changed region): a formatter only
  * moves words around. A line with any word from an agent-added disk line (`isAgentLine`) is the formatter's and
  * carries agent text, so it stays pending as part of the agent's change. A line made of the user's words (and
@@ -219,6 +235,8 @@ export function addFormatterPass(user: Provenance, userText: string, saved: stri
     const moved = new Set<number>();
     /** New lines with a (letter/digit) word of the user's. */
     const userWords = new Set<number>();
+    /** New lines with a word the user typed inside an agent hunk. */
+    const userWordsInside = new Set<number>();
     const newWords: { word: string; line: number }[] = [];
     for (let j = r.bStart; j < r.bEnd; j++) { for (const w of s[j]!.match(WORD_RE) ?? []) { newWords.push({ word: w, line: j }); } }
     const found = new Map<number, Set<string>>();
@@ -231,6 +249,7 @@ export function addFormatterPass(user: Provenance, userText: string, saved: stri
           const kinds = found.get(line) ?? new Set<string>();
           if (!paired || oldWords[oi]!.line - r.aStart !== line - r.bStart) { moved.add(line); }
           if (oldWords[oi]!.kind === 'user' && /[\p{L}\p{N}]/u.test(oldWords[oi]!.word)) { userWords.add(line); }
+          if (oldWords[oi]!.kind === 'user' && user.lines[oldWords[oi]!.line]!.insideAgent === true) { userWordsInside.add(line); }
           kinds.add(oldWords[oi++]!.kind);
           if (!found.has(line)) { found.set(line, kinds); }
         }
@@ -257,19 +276,21 @@ export function addFormatterPass(user: Provenance, userText: string, saved: stri
       }
     }
     // The formatter mixed the user's words into a line with agent words: that line stays pending, so the user's text
-    // in it would be lost from the baseline (and Undo would delete it). Keep the user's lines of this region as they
-    // were before formatting in the baseline instead (ghosts), and fold none of the region's new lines.
+    // in it would be lost from the baseline (and Undo would delete it). Keep the user's lines of this region that
+    // were typed outside the agent's hunks as they were before formatting in the baseline instead (ghosts), and fold
+    // none of the region's new lines.
     let mixed = false;
     for (let j = r.bStart; j < r.bEnd; j++) { if (found.get(j)?.has('agent') && userWords.has(j)) { mixed = true; } }
     if (mixed) {
       for (let i = r.aStart; i < r.aEnd; i++) {
-        if (kindOf(i) === 'user') { lines.push({ text: u[i]!.endsWith('\n') ? u[i]! : `${u[i]!}\n`, src: -1, origin: 'user', ghost: true, moved: true }); }
+        if (kindOf(i) === 'user' && user.lines[i]!.insideAgent !== true) { lines.push({ text: u[i]!.endsWith('\n') ? u[i]! : `${u[i]!}\n`, src: -1, origin: 'user', ghost: true, moved: true }); }
       }
     }
     for (let j = r.bStart; j < r.bEnd; j++) {
       const kinds = found.get(j);
       const line: SavedLine = kinds?.has('agent') ? { text: s[j]!, src: -1, origin: 'formatter', agentText: true }
-        : { text: s[j]!, src: -1, origin: kinds?.has('user') && !mixed ? 'user' : 'formatter' };
+        : kinds?.has('user') && !mixed ? { text: s[j]!, src: -1, origin: 'user', insideAgent: userWordsInside.has(j) }
+          : { text: s[j]!, src: -1, origin: 'formatter' };
       if (moved.has(j) || mixed) { line.moved = true; }
       lines.push(line);
     }
@@ -277,11 +298,86 @@ export function addFormatterPass(user: Provenance, userText: string, saved: stri
     si = r.bEnd;
   }
   pushEqualUntil(u.length);
-  return { lines, removedBy };
+  return user.removedInsideAgent ? { lines, removedBy, removedInsideAgent: user.removedInsideAgent } : { lines, removedBy };
+}
+
+/** How the baseline (B) lines up with the disk (D): which D lines the agent added, and where its deletions sit. */
+interface AgentAlignment {
+  /** Per D line: the B line it is an unchanged copy of, or -1 for a line the agent added. */
+  dCommon: Int32Array;
+  /** Per D position (0..nD): the B lines the agent deleted right before D line q. */
+  delAt: number[][];
+}
+
+function alignAgent(baseline: readonly string[], disk: readonly string[]): AgentAlignment {
+  const nD = disk.length;
+  const dCommon = new Int32Array(nD).fill(-2);
+  const delAt: number[][] = Array.from({ length: nD + 1 }, () => []);
+  let bi = 0;
+  let di = 0;
+  for (const r of diffRegions(baseline, disk)) {
+    while (di < r.bStart) { dCommon[di++] = bi++; }
+    for (let b = r.aStart; b < r.aEnd; b++) { delAt[r.bStart]!.push(b); }
+    for (let d = r.bStart; d < r.bEnd; d++) { dCommon[d] = -1; }
+    bi = r.aEnd;
+    di = r.bEnd;
+  }
+  while (di < nD) { dCommon[di++] = bi++; }
+  return { dCommon, delAt };
 }
 
 /**
- * Compute the new baseline after a user save.
+ * Whether an edit of D lines [r0, r1) (r0 === r1: lines inserted before D line r0) is inside or touches an agent
+ * hunk: it rewrites or removes a line the agent added, spans one of its deletions, or inserts lines right next to
+ * them.
+ */
+function touchesAgent(al: AgentAlignment, r0: number, r1: number): boolean {
+  const isAgent = (d: number) => d >= 0 && d < al.dCommon.length && al.dCommon[d] === -1;
+  if (r0 === r1) { return isAgent(r0 - 1) || isAgent(r0) || al.delAt[r0]!.length > 0; }
+  for (let d = r0; d < r1; d++) { if (isAgent(d)) { return true; } }
+  for (let q = r0 + 1; q < r1; q++) { if (al.delAt[q]!.length > 0) { return true; } }
+  return false;
+}
+
+/** Saved lines [i, j) replaced disk lines [p, nextD) one for one, each in place (no words moved across lines). */
+function lineForLine(lines: readonly SavedLine[], i: number, j: number, p: number, nextD: number): boolean {
+  if (j - i === 0 || j - i !== nextD - p) { return false; }
+  for (let k = i; k < j; k++) { if (lines[k]!.moved) { return false; } }
+  return true;
+}
+
+/**
+ * Decide, for the user's part of a save (`user`: disk -> the user's text, before format on save), which lines the
+ * user wrote and which disk lines they removed inside or touching an agent hunk (see `touchesAgent`). The decision is
+ * recorded on `user` (`insideAgent`, `removedInsideAgent`), so that it survives format on save moving lines around.
+ */
+export function markInsideAgent(baseline: readonly string[], disk: readonly string[], user: Provenance): void {
+  const al = alignAgent(baseline, disk);
+  const removed = new Set<number>();
+  let p = 0;
+  let i = 0;
+  while (i <= user.lines.length) {
+    let j = i;
+    while (j < user.lines.length && user.lines[j]!.src < 0) { j++; }
+    const nextD = j < user.lines.length ? user.lines[j]!.src : disk.length;
+    if (lineForLine(user.lines, i, j, p, nextD)) {
+      // Each new line replaced one disk line: it is inside if that line was the agent's.
+      for (let k = i; k < j; k++) { if (user.lines[k]!.origin === 'user') { user.lines[k]!.insideAgent = al.dCommon[p + k - i] === -1; } }
+    } else {
+      const inside = touchesAgent(al, p, nextD);
+      for (let k = i; k < j; k++) { if (user.lines[k]!.origin === 'user') { user.lines[k]!.insideAgent = inside; } }
+      if (inside) { for (let d = p; d < nextD; d++) { if (user.removedBy.get(d) === 'user') { removed.add(d); } } }
+    }
+    p = nextD + 1;
+    i = j + 1;
+  }
+  user.removedInsideAgent = removed;
+}
+
+/**
+ * Compute the new baseline after a user save. Edits outside agent hunks fold in; an agent hunk that the user (or a
+ * formatter) edited stays pending as a whole: its accepted lines stay in the baseline, and nothing written inside it
+ * is folded. Only Keep, Undo or git resolve it.
  *
  * @param baseline current baseline lines (B)
  * @param disk disk lines the save started from (D)
@@ -289,59 +385,26 @@ export function addFormatterPass(user: Provenance, userText: string, saved: stri
  */
 export function foldUserSave(baseline: readonly string[], disk: readonly string[], saved: Provenance): string[] {
   const nD = disk.length;
-  // Alignment of B -> D: which D lines are common (and which agent-added), where agent deletions sit.
-  const dCommon = new Int32Array(nD).fill(-2); // -2 = common (filled below as B index), -1 = agent-added
-  const delAt: number[][] = Array.from({ length: nD + 1 }, () => []);
-  const hunkOfD = new Int32Array(nD).fill(-1);
-  const hunkOfB = new Int32Array(baseline.length).fill(-1);
-  const regions = diffRegions(baseline, disk);
-  let bi = 0;
-  let di = 0;
-  regions.forEach((r, h) => {
-    while (di < r.bStart) { dCommon[di++] = bi++; }
-    for (let b = r.aStart; b < r.aEnd; b++) {
-      delAt[r.bStart]!.push(b);
-      hunkOfB[b] = h;
-    }
-    for (let d = r.bStart; d < r.bEnd; d++) {
-      dCommon[d] = -1;
-      hunkOfD[d] = h;
-    }
-    bi = r.aEnd;
-    di = r.bEnd;
-  });
-  while (di < nD) { dCommon[di++] = bi++; }
-
-  // An agent hunk is resolved when the user rewrote every line the agent added in it.
-  const resolved = regions.map((r) => {
-    if (r.bEnd === r.bStart) { return false; }
-    for (let d = r.bStart; d < r.bEnd; d++) { if (saved.removedBy.get(d) !== 'user') { return false; } }
-    return true;
-  });
-  const isAgent = (d: number) => d >= 0 && d < nD && dCommon[d] === -1;
-
+  const al = alignAgent(baseline, disk);
+  const { dCommon, delAt } = al;
   const out: string[] = [];
   const emitDeletions = (q: number) => {
-    for (const b of delAt[q]!) { if (!resolved[hunkOfB[b]!]) { out.push(baseline[b]!); } }
+    for (const b of delAt[q]!) { out.push(baseline[b]!); }
   };
 
   const handleGap = (r0: number, r1: number, newLines: readonly SavedLine[]) => {
     if (r0 === r1 && newLines.length === 0) { return; }
-    let insideAgent = false;
-    if (r0 === r1) {
-      // Pure insertion: inside if it touches agent-added lines or sits on an agent deletion.
-      insideAgent = isAgent(r0 - 1) || isAgent(r0) || delAt[r0]!.length > 0;
-    } else {
-      for (let d = r0; d < r1 && !insideAgent; d++) { if (dCommon[d] === -1) { insideAgent = true; } }
-      for (let q = r0 + 1; q < r1 && !insideAgent; q++) { if (delAt[q]!.length > 0) { insideAgent = true; } }
-    }
-    // Removed common lines: drop (fold the removal) unless a formatter removed them inside an agent hunk.
+    const insideAgent = touchesAgent(al, r0, r1);
+    // Removed common lines: drop (fold the removal), unless they were part of an agent hunk's edit: then they stay
+    // in the baseline, pending with the hunk.
     for (let d = r0; d < r1; d++) {
       if (dCommon[d] === -1) { continue; }
-      if (insideAgent && saved.removedBy.get(d) === 'formatter') { out.push(disk[d]!); }
+      const keep = saved.removedBy.get(d) === 'user' && saved.removedInsideAgent ? saved.removedInsideAgent.has(d) : insideAgent;
+      if (keep) { out.push(disk[d]!); }
     }
     for (const l of newLines) {
-      if (l.origin === 'user' || (!insideAgent && !l.agentText)) { out.push(l.text); }
+      const fold = l.ghost || (l.origin === 'user' && l.insideAgent === false) || (l.insideAgent !== true && !insideAgent && !l.agentText);
+      if (fold) { out.push(l.text); }
     }
   };
 
@@ -353,15 +416,15 @@ export function foldUserSave(baseline: readonly string[], disk: readonly string[
     while (j < S.length && S[j]!.src < 0) { j++; }
     const nextD = j < S.length ? S[j]!.src : nD;
     const gap = S.slice(i, j);
-    if (gap.length > 0 && gap.length === nextD - p && gap.some((l) => l.origin === 'formatter') && !gap.some((l) => l.moved)) {
-      // A line-for-line rewrite that a formatter took part in (format on save touches runs of adjacent lines,
+    if (lineForLine(S, i, j, p, nextD)) {
+      // A line-for-line rewrite (edits on adjacent lines, or format on save, which touches runs of adjacent lines,
       // often next to or across agent hunks): pair each new line with the disk line it replaced and decide per
-      // line. A rewritten agent line stays pending unless the user wrote it; any other line folds in. Not when the
+      // line. A rewritten agent line stays pending, whoever rewrote it; any other line folds in. Not when a
       // formatter moved words across lines (a reflow): then a new line isn't its old line reformatted, and folding
       // it would drop the words it lost from the baseline (and Undo would delete them).
       for (let k = 0; k < gap.length; k++) {
         emitDeletions(p + k);
-        if ((dCommon[p + k] !== -1 && !gap[k]!.agentText) || gap[k]!.origin === 'user') { out.push(gap[k]!.text); }
+        if (dCommon[p + k] !== -1 && !gap[k]!.agentText && gap[k]!.insideAgent !== true) { out.push(gap[k]!.text); }
       }
       emitDeletions(nextD);
     } else {

@@ -54,6 +54,8 @@ import { IFileContent, IFileService } from '../../../../../platform/files/common
 import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { AgentReviewService } from '../../browser/agentReviewService.js';
 import { IConfirmation, IConfirmationResult, IDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
+import '../../browser/media/agentReview.css';
+import { mainWindow } from '../../../../../base/browser/window.js';
 
 suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 
@@ -507,6 +509,73 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.strictEqual(saves.length, 4);
 	});
 
+	test('Ctrl+Z after file Keep restores the previous baseline; Ctrl+Shift+Z keeps the file again', async () => {
+		const { entry } = await showPending();
+		await entry.accept();
+		assert.deepStrictEqual(hunkEvents.map(e => [e.kind, e.previousBaseline]), [['acceptFile', BASELINE]]);
+		await model.undo();
+		assert.deepStrictEqual(hunkEvents.slice(1).map(e => [e.kind, e.baseline]), [['restore', BASELINE]]);
+		await model.redo();
+		assert.deepStrictEqual(hunkEvents.slice(2).map(e => e.kind), ['acceptFile']);
+		assert.strictEqual(model.getValue(), DISK, 'the buffer is never touched');
+	});
+
+	test('Ctrl+Z after file Undo brings every change back pending (saved, as the Undo was); Ctrl+Shift+Z undoes them again', async () => {
+		trackSaves = true;
+		savedVersion = model.getAlternativeVersionId();
+		model.setValue('a ONE\nb two\nc THREE\n');
+		savedVersion = model.getAlternativeVersionId();
+		const { entry } = await showPending('a one\nb two\nc three\n');
+		assert.strictEqual(entry.changesCount.get(), 2);
+		assert.strictEqual(await entry.rejectFile(), 'saved');
+		assert.strictEqual(model.getValue(), 'a one\nb two\nc three\n');
+		await model.undo();
+		assert.strictEqual(model.getValue(), 'a ONE\nb two\nc THREE\n');
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 ? d : undefined));
+		assert.strictEqual(entry.originalModel.getValue(), 'a one\nb two\nc three\n', 'the baseline is as before: nothing folded in');
+		await timeout(10);
+		assert.strictEqual(saves.length, 2, 'saved, so the disk has the agent text again');
+		await model.redo();
+		assert.strictEqual(model.getValue(), 'a one\nb two\nc three\n');
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 0 ? d : undefined));
+	});
+
+	test('Ctrl+Z after Keep of a change the user typed in: pending exactly as before, and its Undo asks again', async () => {
+		model.setValue('One.\nTwo agent.\nThree.\n');
+		const { entry, integration } = await showPending('One.\nTwo.\nThree.\n');
+		typeAtEndOf(2, ' MINE');
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(2).endsWith('MINE') ? d : undefined));
+		await timeout(0);
+		await integration.acceptNearestChange(hunkWidgets()[0]);
+		assert.strictEqual(entry.originalModel.getValue(), 'One.\nTwo agent. MINE\nThree.\n');
+		await model.undo(); // the extension then pushes the previous baseline back
+		assert.deepStrictEqual(hunkEvents.at(-1)?.baseline, 'One.\nTwo.\nThree.\n');
+		await service.setBaseline(uri, 'One.\nTwo.\nThree.\n');
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 ? d : undefined));
+		await timeout(0);
+		confirmAnswer = false;
+		await integration.rejectNearestChange(hunkWidgets()[0]);
+		assert.strictEqual(confirms.length, 1, 'the typing is still known to be the user\'s');
+		assert.ok(String(confirms[0].detail).includes('MINE'));
+	});
+
+	test('review actions done in the extension (Keep Deletion, Restore File, the list) undo with Ctrl+Z, in the file\'s editor or outside the editors', async () => {
+		const runs: string[] = [];
+		const other = URI.parse('test:/deleted.tex');
+		service.pushUndo(other, 'Keep Deletion of deleted.tex', async () => { runs.push('undo keep'); }, async () => { runs.push('redo keep'); });
+		assert.strictEqual(service.undoOutsideEditors(true), undefined, 'nothing to redo yet');
+		await service.undoOutsideEditors(false);
+		assert.deepStrictEqual(runs, ['undo keep']);
+		await service.undoOutsideEditors(true);
+		assert.deepStrictEqual(runs, ['undo keep', 'redo keep']);
+		// In the file's editor, the action is on the file's own undo stack, in order with its edits.
+		service.pushUndo(uri, 'Keep paper.tex', async () => { runs.push('undo list keep'); }, async () => { runs.push('redo list keep'); });
+		await model.undo();
+		assert.deepStrictEqual(runs.at(-1), 'undo list keep');
+		await model.redo();
+		assert.deepStrictEqual(runs.at(-1), 'redo list keep');
+	});
+
 	test('Undo never saves a buffer that has unsaved user edits', async () => {
 		const { integration } = await showPending();
 		dirty = true;
@@ -787,31 +856,81 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		}
 	}
 
-	test('#15: typing right after text the agent inserted stays where it was typed, and Undo takes out only the agent text', async () => {
+	test('#15: typing right after text the agent inserted is part of that change (on its line): the baseline keeps the line as accepted', async () => {
 		model.setValue('The router is a softmax. The gate is learned.\nThis paper asks how the routing works.\n');
 		const { entry, integration } = await showPending('The router is a softmax.\nThis paper asks how the routing works.\n');
 		typeAtEndOf(1, ' ABC');
-		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && entry.originalModel.getValue().includes('ABC') ? d : undefined));
-		assert.strictEqual(entry.originalModel.getValue(), 'The router is a softmax. ABC\nThis paper asks how the routing works.\n', 'the typing is in the baseline at the place it was typed, not in the next line');
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(1).endsWith('ABC') ? d : undefined));
+		assert.strictEqual(entry.originalModel.getValue(), 'The router is a softmax.\nThis paper asks how the routing works.\n', 'nothing typed on the change\'s line is folded in');
 		await timeout(0); // the toolbars follow the new diff
 
+		confirmAnswer = true;
 		await integration.rejectNearestChange(hunkWidgets()[0]);
-		assert.strictEqual(model.getValue(), 'The router is a softmax. ABC\nThis paper asks how the routing works.\n');
-		assert.deepStrictEqual(confirms, [], 'nothing of the user\'s is undone, so no question');
+		assert.strictEqual(confirms.length, 1, 'Undo asks: the typing goes with the change');
+		assert.ok(String(confirms[0].detail).includes('ABC'));
+		assert.strictEqual(model.getValue(), 'The router is a softmax.\nThis paper asks how the routing works.\n');
+		await model.undo();
+		assert.strictEqual(model.getValue(), 'The router is a softmax. The gate is learned. ABC\nThis paper asks how the routing works.\n', 'Ctrl+Z brings both back');
 	});
 
-	test('#15: typing at the end of a line the agent rewrote stays in the buffer after that change\'s Undo (no question)', async () => {
-		// The tester's case (session 5): the agent shortened a long line, the user typed at its end, then Undo. The
-		// line comes back long, so the typing ends up off screen at its end; it must still be there.
+	test('#15: typing at the end of a line the agent rewrote is part of the change: Undo asks, and restores the accepted line', async () => {
+		// The tester's case (session 5): the agent shortened a long line, the user typed at its end, then Undo.
 		model.setValue('\\section{Method}\nA batch closes when full or at its deadline.\nRequests are padded.\n');
-		const { entry, integration } = await showPending('\\section{Method}\nA batch closes when it is full or when the oldest request reaches its deadline.\nRequests are padded.\n');
+		const BASE = '\\section{Method}\nA batch closes when it is full or when the oldest request reaches its deadline.\nRequests are padded.\n';
+		const { entry, integration } = await showPending(BASE);
 		typeAtEndOf(2, 'ZZZ');
-		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && entry.originalModel.getValue().includes('ZZZ') ? d : undefined));
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(2).endsWith('ZZZ') ? d : undefined));
+		assert.strictEqual(entry.originalModel.getValue(), BASE);
 		await timeout(0);
 
+		confirmAnswer = true;
 		await integration.rejectNearestChange(hunkWidgets()[0]);
-		assert.strictEqual(model.getLineContent(2), 'A batch closes when it is full or when the oldest request reaches its deadline.ZZZ');
-		assert.deepStrictEqual(confirms, []);
+		assert.strictEqual(confirms.length, 1);
+		assert.strictEqual(model.getValue(), BASE);
+	});
+
+	test('saving never accepts: typing a word away from the agent\'s on its line, or a new line after it, keeps the whole change pending; Keep takes both', async () => {
+		const BASE = 'Intro.\nThe model is small and fast.\nMiddle.\nEnd.\n';
+		model.setValue('Intro.\nThe model is large and fast.\nMiddle.\nEnd.\n');
+		const { entry, integration } = await showPending(BASE);
+		// A word apart from the agent's ("large"): not overlapping its characters, but on its line.
+		model.applyEdits([EditOperation.insert(new Position(2, model.getLineMaxColumn(2) - 1), ' indeed')]);
+		// Enter at the end of the agent's line and a new line.
+		model.applyEdits([EditOperation.insert(new Position(2, model.getLineMaxColumn(2)), '\nMy new line.')]);
+		// And a word on a line no change is on: folds in, as before.
+		model.applyEdits([EditOperation.insert(new Position(1, 1), 'My ')]);
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && d.changes[0].modified.endLineNumberExclusive === 4 && entry.originalModel.getValue().startsWith('My ') ? d : undefined));
+		assert.strictEqual(entry.originalModel.getValue(), 'My Intro.\nThe model is small and fast.\nMiddle.\nEnd.\n');
+		const [change] = entry.diffInfo.get().changes;
+		assert.deepStrictEqual([change.original.startLineNumber, change.original.endLineNumberExclusive, change.modified.startLineNumber, change.modified.endLineNumberExclusive], [2, 3, 2, 4], 'the old line against the agent\'s line with the typing, and the new line');
+
+		// A new baseline pushed after a save (the engine took the review's own) changes nothing pending; typing is still tracked.
+		await service.setBaseline(uri, 'My Intro.\nThe model is small and fast.\nMiddle.\nEnd.\n');
+		assert.strictEqual(entry.changesCount.get(), 1);
+		// A new baseline that differs elsewhere (another change kept from the list) keeps the typing tracked too.
+		await service.setBaseline(uri, 'My Intro.\nThe model is small and fast.\nMiddle.\nEnd!\n');
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 ? d : undefined));
+		await timeout(0);
+		assert.ok(entry.diffInfo.get().changes.some(c => c.modified.startLineNumber === 2));
+
+		await integration.acceptNearestChange(hunkWidgets().find(w => (w as unknown as { getStartLineNumber(): number | undefined }).getStartLineNumber() === 2)!);
+		assert.strictEqual(entry.originalModel.getValue(), 'My Intro.\nThe model is large and fast indeed.\nMy new line.\nMiddle.\nEnd!\n');
+	});
+
+	test('Undo of a change the user typed in still asks after a new baseline is pushed', async () => {
+		model.setValue('One.\nTwo agent.\nThree.\nFour agent.\n');
+		const { entry, integration } = await showPending('One.\nTwo.\nThree.\nFour.\n');
+		typeAtEndOf(2, ' MINE');
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 && model.getLineContent(2).endsWith('MINE') ? d : undefined));
+		// The other change is kept from the list: the extension pushes the new baseline.
+		await service.setBaseline(uri, 'One.\nTwo.\nThree.\nFour agent.\n');
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 ? d : undefined));
+		await timeout(0);
+		confirmAnswer = false;
+		await integration.rejectNearestChange(hunkWidgets()[0]);
+		assert.strictEqual(confirms.length, 1);
+		assert.ok(String(confirms[0].detail).includes('MINE'));
+		assert.ok(model.getValue().includes('MINE'));
 	});
 
 	test('#15: text typed inside an agent change goes with it, so its Undo asks first; cancelling changes nothing', async () => {
@@ -864,6 +983,99 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		modelService.updateModel(model, DISK + 'Agent line.\n', EditSources.reloadFromDisk());
 		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 ? d : undefined));
 		assert.strictEqual(entry.state.get(), ModifiedFileEntryState.Modified);
+	});
+
+	/** The text of each leaf span of `node`'s rows, struck through or not, with `node` shown in a `theme` editor. */
+	function strikes(node: HTMLElement, theme: string): { struck: string[]; plain: string[] } {
+		const host = document.createElement('div');
+		host.className = `monaco-editor ${theme}`;
+		const clone = node.cloneNode(true) as HTMLElement;
+		host.appendChild(clone);
+		document.body.appendChild(host);
+		try {
+			const struck: string[] = [];
+			const plain: string[] = [];
+			const leaves = [...clone.querySelectorAll('span')].filter(e => e.children.length === 0 && (e.textContent ?? '').replace(/\u00a0/g, ' ').trim());
+			for (const leaf of leaves) {
+				(mainWindow.getComputedStyle(leaf).textDecorationLine.includes('line-through') ? struck : plain).push((leaf.textContent ?? '').replace(/\u00a0/g, ' '));
+			}
+			return { struck, plain };
+		} finally {
+			host.remove();
+		}
+	}
+
+	const THEMES = ['vs', 'vs-dark', 'hc-black', 'hc-light'];
+
+	function inlineDeleted(): HTMLElement {
+		const span = document.createElement('span');
+		const struck = model.getAllDecorations().find(d => d.options.before?.inlineClassName?.includes('agent-review-deleted-text'))!;
+		span.className = struck.options.before!.inlineClassName!;
+		span.textContent = struck.options.before!.content;
+		const row = document.createElement('div');
+		row.className = 'view-line';
+		row.appendChild(span);
+		return row;
+	}
+
+	test('strikethrough: deleted text is struck through in every theme (whole deleted lines, deleted words of a rewrite, track changes)', async () => {
+		const paragraph = 'We present a batched scheme in which the committee never runs a key generation protocol $\\mathcal{O}(n^2)$.';
+		model.setValue(`\\section{Intro}\n${paragraph.replace('never runs', 'does not run')}\nMiddle.\nA completely different closing sentence.\nEnd.\n`);
+		await showPending(`\\section{Intro}\n${paragraph}\nMiddle.\nClosing $x^2$.\nDeleted \\emph{line} with $\\alpha + \\beta$ math.\nEnd.\n`);
+		const deletedZones = [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
+		const whole = deletedZones.filter(z => z.domNode.classList.contains('agent-review-deleted-whole-lines'));
+		const rewrite = deletedZones.filter(z => !z.domNode.classList.contains('agent-review-deleted-whole-lines'));
+		assert.strictEqual(whole.length + rewrite.length, deletedZones.length);
+		assert.ok(deletedZones.length >= 1, 'red rows for the rewrite (and the deleted line, alone or with it)');
+		for (const theme of THEMES) {
+			for (const z of deletedZones) {
+				const { struck } = strikes(z.domNode, theme);
+				assert.ok(struck.join('').includes('Closing'), `${theme}: the rewritten line's deleted words are struck: ${struck.join('|')}`);
+			}
+			const text = deletedZones.map(z => strikes(z.domNode, theme).struck.join('')).join('');
+			assert.ok(text.includes('Deleted') && text.includes('alpha'), `${theme}: the deleted line is struck, LaTeX included: ${text}`);
+			for (const z of whole) {
+				assert.deepStrictEqual(strikes(z.domNode, theme).plain, [], `${theme}: every piece of a deleted block is struck`);
+			}
+			const inline = strikes(inlineDeleted(), theme);
+			assert.deepStrictEqual([inline.struck.join('').trim(), inline.plain], ['never runs', []], `${theme}: track changes' deleted words are struck`);
+		}
+	});
+
+	test('strikethrough: a pure deletion is struck through on every wrapped row, and deletions next to insertions too', async () => {
+		editor.updateOptions({ wordWrap: 'wordWrapColumn', wordWrapColumn: 20 });
+		model.setValue('Intro.\nInserted by the agent.\nEnd.\n');
+		await showPending('Intro.\nThis long paragraph with $\\sum_i x_i$ was deleted by the agent, and all of it must stay readable.\nEnd.\n');
+		const deleted = [...zones.values()].filter(z => z.domNode.classList.contains('line-delete'));
+		assert.strictEqual(deleted.length, 1);
+		assert.ok(deleted[0].domNode.querySelectorAll('.view-line').length >= 1);
+		for (const theme of THEMES) {
+			const { struck } = strikes(deleted[0].domNode, theme);
+			const all = struck.join('').replace(/\s+/g, ' ');
+			assert.ok(all.includes('This long paragraph') && all.includes('stay readable'), `${theme}: every wrapped row's deleted words are struck (words shared with the inserted line are not deleted): ${all}`);
+		}
+	});
+
+	test('strikethrough: still there after typing in the change and saving again and again; gone after Keep and after Undo', async () => {
+		model.setValue('One.\nTwo agent.\nThree.\nFour.\n');
+		const { entry, integration } = await showPending('One.\nTwo.\nThree.\nDeleted line.\nFour.\n');
+		const struckRows = () => [...zones.values()].filter(z => z.domNode.classList.contains('agent-review-deleted-whole-lines')).map(z => strikes(z.domNode, 'vs').struck.join(''));
+		assert.deepStrictEqual(struckRows(), ['Deleted line.']);
+		for (const typed of [' a', ' b', ' c']) {
+			typeAtEndOf(2, typed);
+			// A save: the extension pushes the engine's baseline, which is the review's own.
+			await service.setBaseline(uri, entry.originalModel.getValue());
+			await waitForState(entry.diffInfo.map(d => d.changes.length === 2 && model.getLineContent(2).endsWith(typed) ? d : undefined));
+			await timeout(0);
+			assert.deepStrictEqual(struckRows(), ['Deleted line.']);
+			assert.ok(model.getAllDecorations().some(d => d.options.before?.inlineClassName?.includes('agent-review-deleted-text')) || [...zones.values()].some(z => z.domNode.classList.contains('agent-review-deleted-lines')));
+		}
+		await integration.acceptNearestChange(hunkWidgets().find(w => (w as unknown as { getStartLineNumber(): number | undefined }).getStartLineNumber() === 2)!);
+		await integration.rejectNearestChange(hunkWidgets()[0]);
+		await timeout(0);
+		assert.strictEqual(entry.changesCount.get(), 0);
+		assert.strictEqual([...zones.values()].filter(z => z.domNode.classList.contains('line-delete')).length, 0, 'no red rows left');
+		assert.ok(!model.getAllDecorations().some(d => d.options.before?.inlineClassName?.includes('agent-review-deleted-text')), 'no struck words left');
 	});
 
 	test('#19: agent-review lines carry their own classes (high contrast styles them)', async () => {
