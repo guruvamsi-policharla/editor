@@ -12,7 +12,7 @@
  * All public operations are serialized.
  */
 import * as path from 'node:path';
-import { addFormatterPass, foldUserSave, provenanceFromDiff, trackEdits, type Provenance, type TrackedEdit } from './attribution.js';
+import { addFormatterPass, foldUserSave, markInsideAgent, provenanceFromDiff, trackEdits, type Provenance, type TrackedEdit } from './attribution.js';
 import { acceptHunks, computeHunks, hunkRegion, rejectHunks, type Hunk } from './diff/hunks.js';
 import { diffRegions } from './diff/myers.js';
 import { nodeFileSystem, type FileStat, type FileSystem } from './fs.js';
@@ -145,11 +145,21 @@ export interface UserSaveOptions {
    * only way to know, and a log that doesn't replay counts every change as the user's.
    */
   userContent?: string;
+  /**
+   * The new baseline as the host's review UI has it (any line endings): the UI followed the user's typing and the
+   * save's formatting as they happened, folding in what didn't touch a pending change and keeping the rest pending
+   * with its hunk. Used instead of the engine's own attribution, so that the engine and the UI agree exactly on what
+   * is still pending. Only pass it when the UI's baseline started from this engine's current baseline.
+   */
+  reviewBaseline?: string;
 }
 
 export interface UserSaveResult {
-  /** 'edits' = tagged edits were used; 'diff' = no edits given; 'fallback' = edits didn't reproduce the content. */
-  attribution: 'edits' | 'diff' | 'fallback' | 'file';
+  /**
+   * 'edits' = tagged edits were used; 'diff' = no edits given; 'fallback' = edits didn't reproduce the content;
+   * 'review' = the review UI's baseline was used; 'file' = whole file (binary, large or ignored).
+   */
+  attribution: 'edits' | 'diff' | 'fallback' | 'review' | 'file';
 }
 
 export class StaleChangeError extends Error {
@@ -361,8 +371,9 @@ export class ReviewEngine {
   }
 
   /**
-   * Report a save from the editor. Lines the user edited fold into the baseline; untouched agent lines
-   * stay pending; formatter edits inside pending agent hunks stay pending, elsewhere they fold in.
+   * Report a save from the editor. Saving never accepts any part of an agent's change: edits outside pending agent
+   * hunks fold into the baseline; a hunk the user (or a formatter) edited stays pending as a whole, against its
+   * accepted text, until Keep, Undo or git resolves it.
    */
   reportUserSave(file: string, content: string | Uint8Array, options: UserSaveOptions = {}): Promise<UserSaveResult> {
     return this.run('reportUserSave', async () => {
@@ -405,29 +416,37 @@ export class ReviewEngine {
           diskText = convertEol(diskText, savedEol);
           baseText = convertEol(baseText, savedEol);
         }
-        let prov: Provenance | undefined;
-        if (options.userContent !== undefined) {
-          // Two passes: the user's edits (disk -> userContent), then the formatter's (userContent -> saved).
-          const userText = savedEol ? convertEol(options.userContent, savedEol) : options.userContent;
-          prov = options.edits ? trackEdits(diskText, options.edits.filter((e) => e.origin === 'user')) : undefined;
-          attribution = 'edits';
-          if (!prov || joinLines(prov.lines.map((l) => l.text)) !== userText) {
-            prov = provenanceFromDiff(diskText, userText, 'user');
-            attribution = options.edits ? 'fallback' : 'diff';
-          }
-          const agentLines = new Set<number>();
-          for (const r of diffRegions(splitLines(baseText), splitLines(diskText))) { for (let d = r.bStart; d < r.bEnd; d++) { agentLines.add(d); } }
-          prov = addFormatterPass(prov, userText, savedText, (d) => agentLines.has(d));
-        } else {
-          prov = options.edits ? trackEdits(diskText, options.edits) : undefined;
-          attribution = 'edits';
-          if (!prov || joinLines(prov.lines.map((l) => l.text)) !== savedText) {
-            prov = provenanceFromDiff(diskText, savedText, 'user');
-            attribution = options.edits ? 'fallback' : 'diff';
-          }
-        }
+        let folded: string[];
         const baseLines = splitLines(baseText);
-        const folded = foldUserSave(baseLines, splitLines(diskText), prov);
+        if (options.reviewBaseline !== undefined) {
+          attribution = 'review';
+          folded = splitLines(restoreLineEndings(savedEol ? convertEol(options.reviewBaseline, savedEol) : options.reviewBaseline, [savedText, baseText]));
+        } else {
+          let prov: Provenance | undefined;
+          if (options.userContent !== undefined) {
+            // Two passes: the user's edits (disk -> userContent), then the formatter's (userContent -> saved).
+            const userText = savedEol ? convertEol(options.userContent, savedEol) : options.userContent;
+            prov = options.edits ? trackEdits(diskText, options.edits.filter((e) => e.origin === 'user')) : undefined;
+            attribution = 'edits';
+            if (!prov || joinLines(prov.lines.map((l) => l.text)) !== userText) {
+              prov = provenanceFromDiff(diskText, userText, 'user');
+              attribution = options.edits ? 'fallback' : 'diff';
+            }
+            const agentLines = new Set<number>();
+            for (const r of diffRegions(baseLines, splitLines(diskText))) { for (let d = r.bStart; d < r.bEnd; d++) { agentLines.add(d); } }
+            // Whether the user typed each line inside an agent hunk is decided before format on save moves lines around.
+            markInsideAgent(baseLines, splitLines(diskText), prov);
+            prov = addFormatterPass(prov, userText, savedText, (d) => agentLines.has(d));
+          } else {
+            prov = options.edits ? trackEdits(diskText, options.edits) : undefined;
+            attribution = 'edits';
+            if (!prov || joinLines(prov.lines.map((l) => l.text)) !== savedText) {
+              prov = provenanceFromDiff(diskText, savedText, 'user');
+              attribution = options.edits ? 'fallback' : 'diff';
+            }
+          }
+          folded = foldUserSave(baseLines, splitLines(diskText), prov);
+        }
         if (this.traceFn) {
           const n = (o: string) => options.edits?.filter((e) => e.origin === o).length ?? 0;
           const before = diffRegions(baseLines, splitLines(diskText)).length;

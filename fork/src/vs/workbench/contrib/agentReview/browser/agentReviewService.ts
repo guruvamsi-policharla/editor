@@ -48,7 +48,18 @@ export interface IAgentReviewService {
 	 */
 	openMerge(uri: URI, base: string): Promise<boolean>;
 	getEntry(uri: URI): AgentReviewEntry | undefined;
+	/**
+	 * Put a review action that didn't go through the editor (Keep Deletion, Restore File, Keep/Undo from the Agent
+	 * Changes list) on `uri`'s undo stack: Ctrl+Z runs `undo`, Ctrl+Shift+Z `redo`. It interleaves with the file's own
+	 * edits in its editor, and is also reachable where no text editor has focus (see `undoOutsideEditors`).
+	 */
+	pushUndo(uri: URI, label: string, undo: () => Promise<unknown>, redo: () => Promise<unknown>): void;
+	/** Ctrl+Z / Ctrl+Shift+Z with no text editor focused: undo or redo the latest review action (undefined: there is none). */
+	undoOutsideEditors(redo: boolean): Promise<void> | undefined;
 }
+
+/** `code` of every undo element agent review pushes. */
+const UNDO_CODE_PREFIX = 'agentReview.';
 
 class AgentReviewSession extends Disposable implements IChatEditReviewSession {
 
@@ -109,6 +120,8 @@ export class AgentReviewService extends Disposable implements IAgentReviewServic
 	readonly onDidHunkAction = this._onDidHunkAction.event;
 
 	private readonly _undoHistory = new AgentReviewUndoHistory();
+	/** Files with review actions on their undo stacks, most recent last (for Ctrl+Z outside the editors). */
+	private readonly _undoUris: URI[] = [];
 	private readonly _undoHistoryListeners = this._register(new DisposableMap<string>());
 
 	constructor(
@@ -252,10 +265,49 @@ export class AgentReviewService extends Disposable implements IAgentReviewServic
 			type: UndoRedoElementType.Resource,
 			resource: uri,
 			label: localize('agentReview.keepUndoLabel', "Keep Agent Change"),
-			code: 'agentReview.keep',
+			code: `${UNDO_CODE_PREFIX}keep`,
 			undo: () => this._onDidHunkAction.fire({ uri, kind: 'restore', baseline: previousBaseline }),
 			redo: () => this._onDidHunkAction.fire(redo),
 		});
+		this._rememberUndoUri(uri);
+	}
+
+	pushUndo(uri: URI, label: string, undo: () => Promise<unknown>, redo: () => Promise<unknown>): void {
+		this._undoRedoService.pushElement({
+			type: UndoRedoElementType.Resource,
+			resource: uri,
+			label,
+			code: `${UNDO_CODE_PREFIX}action`,
+			undo: async () => { await undo(); },
+			redo: async () => { await redo(); },
+		});
+		this._rememberUndoUri(uri);
+	}
+
+	private _rememberUndoUri(uri: URI): void {
+		const i = this._undoUris.findIndex(u => isEqual(u, uri));
+		if (i >= 0) {
+			this._undoUris.splice(i, 1);
+		}
+		this._undoUris.push(uri);
+		if (this._undoUris.length > 50) {
+			this._undoUris.shift();
+		}
+	}
+
+	undoOutsideEditors(redo: boolean): Promise<void> | undefined {
+		for (let i = this._undoUris.length - 1; i >= 0; i--) {
+			const uri = this._undoUris[i];
+			const { past, future } = this._undoRedoService.getElements(uri);
+			const next = redo ? future.at(-1) : past.at(-1);
+			if (next?.code.startsWith(UNDO_CODE_PREFIX)) {
+				// Most recent first: the file's other actions are in its editor's hands.
+				this._undoUris.splice(i, 1);
+				this._undoUris.push(uri);
+				return Promise.resolve(redo ? this._undoRedoService.redo(uri) : this._undoRedoService.undo(uri));
+			}
+		}
+		return undefined;
 	}
 
 	remove(uri: URI): void {

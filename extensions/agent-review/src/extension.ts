@@ -7,6 +7,7 @@
  *   VS Code's chat-editing review UI: deleted lines as real rows, per-hunk Keep/Undo, the review bar.
  * - Review list (Explorer > Agent Changes), multi-file diff, agent terminal and Ctrl/Cmd+L.
  */
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { MultiRootReview } from '@editor/engine';
@@ -23,6 +24,18 @@ const CORE_SET_BASELINE = '_agentReview.setBaseline';
 const CORE_REMOVE = '_agentReview.remove';
 const CORE_CLEAR = '_agentReview.clear';
 const CORE_REJECT = '_agentReview.reject';
+const CORE_PUSH_UNDO = '_agentReview.pushUndo';
+
+/**
+ * A review action done here rather than in the editor, as core keeps it on the file's undo stack: Ctrl+Z puts the
+ * file's baseline (`keep`) or its disk content (`undo`) back as it was (base64; null: none), Ctrl+Shift+Z repeats it.
+ */
+interface UndoableAction {
+  kind: 'keep' | 'undo';
+  path: string;
+  before: string | null;
+  deletion: boolean;
+}
 
 let controller: ReviewController | undefined;
 let review: MultiRootReview | undefined;
@@ -174,7 +187,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // run after formatters, so their edits count as the user's.
   if (hasCore) {
     context.subscriptions.push(
-      vscode.commands.registerCommand('agentReview.ext.onWillWrite', async (e: { uri: CoreUri; userVersion: number; version: number; userText?: string }) => {
+      vscode.commands.registerCommand('agentReview.ext.onWillWrite', async (e: { uri: CoreUri; userVersion: number; version: number; userText?: string; baseline?: string }) => {
         const uri = toUri(e.uri);
         if (uri.scheme !== 'file') { return; }
         const doc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
@@ -183,11 +196,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         const inSync = doc.version === e.version;
         if (!inSync) { log.warn(`save of ${uri.fsPath}: document version ${doc.version}, core ${e.version}; attributing all edits to the user`); }
         const edits = logs.get(uri.toString(), inSync ? e.userVersion : undefined);
-        trace(`${uri.fsPath}: will write version ${e.version} (user edits up to ${e.userVersion}, document at ${doc.version}); edit log: ${edits ? `${edits.length} edits, ${edits.filter((x) => x.origin === 'formatter').length} by the formatter` : 'none'}; user text ${e.userText !== undefined ? 'given' : 'not given'}`);
+        trace(`${uri.fsPath}: will write version ${e.version} (user edits up to ${e.userVersion}, document at ${doc.version}); edit log: ${edits ? `${edits.length} edits, ${edits.filter((x) => x.origin === 'formatter').length} by the formatter` : 'none'}; user text ${e.userText !== undefined ? 'given' : 'not given'}; review baseline ${e.baseline !== undefined ? 'given' : 'not given'}`);
         // The text before save participants ran: given by core when they changed it; else it is what is written.
         const content = doc.getText();
         const userContent = e.userText ?? (e.version === e.userVersion ? content : undefined);
-        await ctl.onWillSave(uri.fsPath, content, edits, userContent);
+        await ctl.onWillSave(uri.fsPath, content, edits, userContent, e.baseline);
       }),
     );
   } else {
@@ -263,6 +276,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await vscode.window.showTextDocument(uiUri(real), { preview: false });
     }
   };
+  const b64 = (bytes: Uint8Array | undefined | null) => (bytes ? Buffer.from(bytes).toString('base64') : null);
+  const unb64 = (s: string | null) => (s === null ? null : new Uint8Array(Buffer.from(s, 'base64')));
+  const pushUndo = async (action: UndoableAction) => {
+    if (!hasCore) { return; }
+    const name = path.basename(action.path);
+    const label = action.kind === 'keep' ? (action.deletion ? `Keep Deletion of ${name}` : `Keep ${name}`) : (action.deletion ? `Restore ${name}` : `Undo Changes in ${name}`);
+    await vscode.commands.executeCommand(CORE_PUSH_UNDO, uiUri(normalizePath(action.path)), label, action);
+  };
+  context.subscriptions.push(vscode.commands.registerCommand('agentReview.ext.undoRedo', (action: UndoableAction, which: 'undo' | 'redo') => run(which === 'undo' ? 'Undo' : 'Redo', async () => {
+    trace(`${action.path}: ${which} of ${action.kind}${action.deletion ? ' (deletion)' : ''}`);
+    if (which === 'undo') {
+      if (action.kind === 'keep') { await ctl.restoreBaseline(action.path, unb64(action.before)); }
+      else { await ctl.restoreDisk(action.path, unb64(action.before)); }
+      // A deletion is pending again: show its review, as its tab did before.
+      if (action.deletion) { await showDeletion(ui.toUi(normalizePath(action.path)), { preview: false }); }
+    } else if (action.kind === 'keep') {
+      await ctl.acceptFile(action.path);
+      await settleDeletion(action.path, false);
+    } else {
+      await ctl.rejectFile(action.path);
+      await settleDeletion(action.path, true);
+    }
+  })));
   const run = async (what: string, fn: () => Promise<unknown>) => {
     try {
       await fn();
@@ -274,7 +310,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('agentReview.acceptFile', (arg?: FileItem | vscode.Uri) => run('Keep', async () => {
       const p = itemPath(arg);
       if (!p) { return; }
+      const f = ctl.pendingFiles.find((x) => x.absPath === normalizePath(p));
+      const before = await ctl.baselineBytes(p);
       await ctl.acceptFile(p);
+      if (f && f.kind !== 'renamed') { await pushUndo({ kind: 'keep', path: f.absPath, before: b64(before), deletion: f.kind === 'deleted' }); }
       await settleDeletion(p, false);
     })),
     vscode.commands.registerCommand('agentReview.keepDeletion', (arg?: vscode.Uri) => vscode.commands.executeCommand('agentReview.acceptFile', arg)),
@@ -282,7 +321,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('agentReview.rejectFile', (arg?: FileItem | vscode.Uri) => run('Undo', async () => {
       const p = itemPath(arg);
       if (!p) { return; }
+      const f = ctl.pendingFiles.find((x) => x.absPath === normalizePath(p));
+      const real = normalizePath(p);
+      const before = fs.existsSync(real) ? fs.readFileSync(real) : null;
+      // With unsaved edits the file is undone in its editor buffer, and that editor's Ctrl+Z takes it back.
+      const onDisk = !docs.isDirty(real);
       const outcome = await ctl.rejectFile(p);
+      // Undone on disk: Ctrl+Z writes the agent's version back.
+      if (onDisk && outcome === 'saved' && f && f.kind !== 'renamed') {
+        await pushUndo({ kind: 'undo', path: f.absPath, before: b64(before), deletion: f.kind === 'deleted' });
+      }
       if (outcome === 'unsaved') {
         void vscode.window.showInformationMessage(`Agent Review: undone in the editor. ${path.basename(p)} has unsaved edits, so it isn't saved yet; save it to write the undo to disk.`);
       }

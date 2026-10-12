@@ -28,6 +28,8 @@ import { IResolvedTextFileEditorModel, ITextFileSaveParticipant } from '../../..
 import { TestServiceAccessor, workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
 import { SaveParticipantsContribution } from '../../../codeEditor/browser/saveParticipants.js';
 import { AgentReviewSaveParticipants, IAgentReviewWillWriteEvent } from '../../browser/agentReviewSaveParticipant.js';
+import { IAgentReviewService } from '../../browser/agentReviewService.js';
+import { AgentReviewEntry } from '../../browser/agentReviewEntry.js';
 
 suite('AgentReview: save attribution with format on save', () => {
 
@@ -36,10 +38,16 @@ suite('AgentReview: save attribution with format on save', () => {
 	let accessor: TestServiceAccessor;
 	let events: { event: IAgentReviewWillWriteEvent; text: string }[];
 	let model: IResolvedTextFileEditorModel;
+	/** The review's baseline of the file, when it has pending changes. */
+	let reviewBaseline: string | undefined;
 
 	setup(async function () {
 		events = [];
+		reviewBaseline = undefined;
 		instantiationService = workbenchInstantiationService(undefined, disposables);
+		instantiationService.stub(IAgentReviewService, {
+			getEntry: () => reviewBaseline === undefined ? undefined : { originalModel: { getValue: () => reviewBaseline } } as unknown as AgentReviewEntry,
+		});
 		accessor = instantiationService.createInstance(TestServiceAccessor);
 		instantiationService.stub(ICommandService, new TestCommandService(instantiationService));
 		instantiationService.stub(IEditorWorkerService, new class extends TestEditorWorkerService {
@@ -121,6 +129,17 @@ suite('AgentReview: save attribution with format on save', () => {
 		assert.strictEqual(events.length, 1);
 		assert.strictEqual(events[0].event.userVersion, userVersion);
 		assert.strictEqual(events[0].text, 'alpha = 1\nbeta = 2\ndelta = 4\n# end\n');
+	});
+
+	test('a file under review: the review\'s baseline is reported with the write (the engine takes it as the new baseline)', async () => {
+		model.textEditorModel.applyEdits([EditOperation.replace(new Range(2, 1, 2, 9), 'gamma = 3')]);
+		await model.save({ reason: SaveReason.EXPLICIT });
+		assert.strictEqual(events[0].event.baseline, undefined, 'not under review: no baseline');
+
+		reviewBaseline = 'alpha = 1\nbeta = 2\n';
+		model.textEditorModel.applyEdits([EditOperation.replace(new Range(2, 1, 2, 10), 'gamma = 4')]);
+		await model.save({ reason: SaveReason.EXPLICIT });
+		assert.strictEqual(events[1].event.baseline, 'alpha = 1\nbeta = 2\n');
 	});
 
 	test('saves that skip participants (an Undo in the review UI) are not reported', async () => {

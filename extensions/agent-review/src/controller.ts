@@ -174,19 +174,22 @@ export class ReviewController {
       if (this.pushed.has(f.absPath)) { await this.unpush(f.absPath); }
       return;
     }
-    if (this.docs.isDirty(f.absPath) && this.pushed.has(f.absPath)) {
-      // The UI shows baseline vs. buffer; moving the baseline under unsaved typing would mislabel it.
-      this.log.trace?.(`${f.absPath}: baseline push deferred (unsaved edits)`);
-      this.deferred.add(f.absPath);
-      return;
-    }
     const engine = this.engineForRoot(f.root);
     const baseline = f.kind === 'created' ? '' : decode(await engine.getBaselineContent(f.rel));
     // Core's models keep one EOL per file, so a baseline that differs only in line endings looks the same there.
     // An external change is pushed anyway: the editor's review is a view, and the push makes sure it shows the file
     // (it compares the baseline itself, so this costs nothing when it already does).
     const pushed = this.pushed.get(f.absPath);
-    if (pushed !== undefined && equalIgnoringEol(pushed, baseline) && reason !== 'external') { return; }
+    if (pushed !== undefined && equalIgnoringEol(pushed, baseline) && reason !== 'external') {
+      this.deferred.delete(f.absPath);
+      return;
+    }
+    if (this.docs.isDirty(f.absPath) && pushed !== undefined) {
+      // The UI shows baseline vs. buffer; moving the baseline under unsaved typing would mislabel it.
+      this.log.trace?.(`${f.absPath}: baseline push deferred (unsaved edits)`);
+      this.deferred.add(f.absPath);
+      return;
+    }
     this.pushed.set(f.absPath, baseline);
     this.deferred.delete(f.absPath);
     this.log.trace?.(`${f.absPath}: baseline pushed to the editor (${reason ?? 'sync'})`);
@@ -261,8 +264,12 @@ export class ReviewController {
   /**
    * Before the editor writes a user save to disk. `userContent`: the buffer before save participants (format on
    * save) changed it, if known; the engine then tells the formatter's changes apart by diffing, not by the log.
+   * `reviewBaseline`: the editor's review baseline (its original side) for a file under review. It followed the
+   * typing live: edits on no line of a pending change folded in, the rest stayed pending with the change. When it
+   * started from the engine's current baseline (the last one pushed), the engine takes it as is, so the engine and
+   * the editor agree on what is pending after the save. Saving never accepts any part of a change.
    */
-  async onWillSave(absPath: string, content: string, edits: readonly TrackedEdit[] | undefined, userContent?: string): Promise<void> {
+  async onWillSave(absPath: string, content: string, edits: readonly TrackedEdit[] | undefined, userContent?: string, reviewBaseline?: string): Promise<void> {
     const abs = normalizePath(absPath);
     const engine = await this.review.engineFor(abs);
     if (!engine) { return; }
@@ -272,8 +279,22 @@ export class ReviewController {
       this.log.warn(`${abs} changed on disk since it was loaded; not attributing this save (merge it instead)`);
       return;
     }
+    let useReview = false;
+    if (reviewBaseline !== undefined) {
+      const pushed = this.pushed.get(abs);
+      const current = decode(await engine.getBaselineContent(abs).catch(() => undefined));
+      // Not when the engine's baseline moved since the editor got it (a push waiting for this buffer to be saved).
+      useReview = pushed !== undefined && !this.deferred.has(abs) && equalIgnoringEol(pushed, current);
+      if (!useReview) { this.log.trace?.(`${abs}: the editor's review baseline is stale; the engine attributes the save`); }
+    }
+    // The editor shows this baseline already: record it first so the engine's event doesn't push it back.
+    if (useReview) { this.pushed.set(abs, reviewBaseline!); }
     try {
-      await engine.reportUserSave(abs, content, { ...(edits ? { edits } : {}), ...(userContent !== undefined ? { userContent } : {}) });
+      await engine.reportUserSave(abs, content, {
+        ...(edits ? { edits } : {}),
+        ...(userContent !== undefined ? { userContent } : {}),
+        ...(useReview ? { reviewBaseline } : {}),
+      });
     } catch (err) {
       this.log.error(`reportUserSave failed for ${abs}`, err);
     }
@@ -362,6 +383,41 @@ export class ReviewController {
       }
     }
     return out;
+  }
+
+  /** Baseline (accepted) bytes of a file, or undefined if it has none (Ctrl+Z of a Keep from the list puts them back). */
+  async baselineBytes(absPath: string): Promise<Uint8Array | undefined> {
+    const abs = normalizePath(absPath);
+    const engine = await this.review.engineFor(abs);
+    return engine ? engine.getBaselineContent(abs).catch(() => undefined) : undefined;
+  }
+
+  /**
+   * Ctrl+Z of a Keep done outside the editor (the list, Keep Deletion): the baseline goes back to `bytes` (null: none,
+   * a pending creation), so the change is pending again. The disk is not touched.
+   */
+  async restoreBaseline(absPath: string, bytes: Uint8Array | null): Promise<void> {
+    const abs = normalizePath(absPath);
+    const engine = await this.review.engineFor(abs);
+    if (!engine) { return; }
+    this.pushed.delete(abs); // push it again, whatever the editor showed
+    await engine.setBaselineContent(abs, bytes);
+    await this.idle();
+  }
+
+  /**
+   * Ctrl+Z of an Undo done on disk outside the editor (the list, Restore File): the file goes back to `bytes` (null: it
+   * didn't exist, a deletion), as an outside write, so the change is pending again.
+   */
+  async restoreDisk(absPath: string, bytes: Uint8Array | null): Promise<void> {
+    const abs = normalizePath(absPath);
+    if (bytes === null) { fs.rmSync(abs, { force: true }); }
+    else {
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, bytes);
+    }
+    await this.handleFsEvents([abs]);
+    await this.idle();
   }
 
   /** Baseline (accepted) text of a file, or undefined if it has none. */

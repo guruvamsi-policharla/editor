@@ -56,24 +56,50 @@ describe('§7 agent edits the same region several times before review', () => {
 });
 
 describe('§7 user edits a pending hunk by hand', () => {
-  it("the user's edit wins; untouched agent lines stay pending as a smaller hunk", async () => {
+  it('saving never accepts: the whole hunk stays pending, with the user\'s edit in it, save after save', async () => {
     const ws = memWorkspace({ 'a.py': 'def f():\n    pass\n' });
     const engine = await ws.open();
     const agent = 'def f():\n    a = 1\n    b = 2\n    c = 3\n';
     await engine.handleFsEvents([ws.write('a.py', agent)]);
-    const saved = 'def f():\n    a = 1\n    b = 20\n    c = 3\n';
-    await engine.reportUserSave('a.py', saved, { edits: [editOf(agent, 'b = 2', 'b = 20')] });
-    ws.write('a.py', saved);
-    await engine.handleFsEvents([ws.abs('a.py')]);
-    expect(await baselineFiles(engine)).toEqual({ 'a.py': 'def f():\n    pass\n    b = 20\n' });
-    const hunks = (await engine.getFileChange('a.py'))!.hunks;
-    expect(hunks.map((h) => [h.oldLines, h.newLines])).toEqual([
-      [['    pass\n'], ['    a = 1\n']],
-      [[], ['    c = 3\n']],
-    ]);
-    // Rejecting what's left restores the original line and keeps the user's line.
+    let text = agent;
+    for (const [from, to] of [['b = 2', 'b = 20'], ['c = 3', 'c = 30'], ['b = 20', 'b = 200']] as const) {
+      const saved = text.replace(from, to);
+      await engine.reportUserSave('a.py', saved, { edits: [editOf(text, from, to)] });
+      ws.write('a.py', saved);
+      await engine.handleFsEvents([ws.abs('a.py')]);
+      text = saved;
+      expect(await baselineFiles(engine)).toEqual({ 'a.py': 'def f():\n    pass\n' });
+      const hunks = (await engine.getFileChange('a.py'))!.hunks;
+      expect(hunks.map((h) => [h.oldLines, h.newLines])).toEqual([[['    pass\n'], text.split(/(?<=\n)/).slice(1)]]);
+    }
+    // Keep accepts the combined text (the agent's and the user's).
+    const [hunk] = (await engine.getFileChange('a.py'))!.hunks;
+    await engine.acceptHunk('a.py', hunk!.id);
+    expect(await baselineFiles(engine)).toEqual({ 'a.py': 'def f():\n    a = 1\n    b = 200\n    c = 30\n' });
+    expect(engine.listChanges()).toEqual([]);
+  });
+
+  it('Undo of a hunk the user typed in restores its accepted text, typing included', async () => {
+    const ws = memWorkspace({ 'a.txt': 'one\ntwo\nthree\n' });
+    const engine = await ws.open();
+    const agent = 'one\nTWO\nthree\n';
+    await engine.handleFsEvents([ws.write('a.txt', agent)]);
+    const saved = 'one\nTWO and mine\nthree\n';
+    await engine.reportUserSave('a.txt', saved, { edits: [editOf(agent, 'TWO', 'TWO and mine')] });
+    ws.write('a.txt', saved);
+    await engine.handleFsEvents([ws.abs('a.txt')]);
     await engine.rejectAll();
-    expect(ws.read('a.py')).toBe('def f():\n    pass\n    b = 20\n');
+    expect(ws.read('a.txt')).toBe('one\ntwo\nthree\n');
+  });
+
+  it('a user line typed right next to an agent hunk (on its own line) folds in; the hunk is unchanged', async () => {
+    const ws = memWorkspace({ 'a.txt': 'one\ntwo\nthree\n' });
+    const engine = await ws.open();
+    const agent = 'one\nTWO\nthree\n';
+    await engine.handleFsEvents([ws.write('a.txt', agent)]);
+    const saved = 'one!\nTWO\nthree!\n';
+    await engine.reportUserSave('a.txt', saved, { edits: [editOf(agent, 'one', 'one!'), editOf(agent.replace('one', 'one!'), 'three', 'three!')] });
+    expect(await baselineFiles(engine)).toEqual({ 'a.txt': 'one!\ntwo\nthree!\n' });
   });
 
   it('user edits elsewhere in the file leave agent hunks untouched', async () => {

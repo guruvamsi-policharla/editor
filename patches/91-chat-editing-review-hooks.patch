@@ -1,5 +1,5 @@
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
-index 2e43b458..68215db2 100644
+index 2e43b458..52a8231f 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
 +++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
 @@ -17,12 +17,13 @@ import { AccessibleDiffViewer, IAccessibleDiffViewerModel } from '../../../../..
@@ -244,7 +244,7 @@ index 2e43b458..68215db2 100644
 +						if (deletedLines && !diffMode) {
 +							// Whole lines deleted next to the edited words: red rows, as in a deletion of their own.
 +							const domNode = document.createElement('div');
-+							domNode.className = `chat-editing-original-zone view-lines line-delete monaco-mouse-cursor-text${toolbarRows ? ' agent-review-deleted-lines' : ''}`;
++							domNode.className = `chat-editing-original-zone view-lines line-delete monaco-mouse-cursor-text${toolbarRows ? ' agent-review-deleted-lines agent-review-deleted-whole-lines' : ''}`;
 +							const lines = deletedLines.lines;
 +							const result = renderLines(new LineSource(
 +								lines.mapToLineArray(l => diff.originalModel.tokenization.getLineTokens(l)),
@@ -297,7 +297,7 @@ index 2e43b458..68215db2 100644
  					});
  				}
  
-@@ -421,21 +572,31 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -421,21 +572,33 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  				}
  
  				let extraLines = 0;
@@ -307,7 +307,9 @@ index 2e43b458..68215db2 100644
  				if (reviewMode && !diffMode) {
  					const domNode = document.createElement('div');
 -					domNode.className = 'chat-editing-original-zone view-lines line-delete monaco-mouse-cursor-text';
-+					domNode.className = `chat-editing-original-zone view-lines line-delete monaco-mouse-cursor-text${toolbarRows ? ' agent-review-deleted-lines' : ''}`;
++					// Agent review strikes deleted text through: every row of a pure deletion, and the deleted words (and
++					// whole deleted lines) of a rewrite (see agentReview.css).
++					domNode.className = `chat-editing-original-zone view-lines line-delete monaco-mouse-cursor-text${toolbarRows ? ` agent-review-deleted-lines${diffEntry.modified.isEmpty ? ' agent-review-deleted-whole-lines' : ''}` : ''}`;
  					const result = renderLines(source, renderOptions, decorations, domNode);
 -					extraLines = result.heightInLines;
 -					if (!isCreatedContent) {
@@ -333,7 +335,7 @@ index 2e43b458..68215db2 100644
  					}
  				}
  
-@@ -456,6 +617,39 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -456,6 +619,39 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  						this._diffHunkWidgetPool.putBack(widget);
  					}));
  
@@ -373,7 +375,7 @@ index 2e43b458..68215db2 100644
  					widget.layout(diffEntry.modified.startLineNumber);
  
  					this._diffHunkWidgets.push(widget);
-@@ -470,8 +664,26 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -470,8 +666,26 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  			}
  
  			this._diffVisualDecorations.set(!diffMode ? modifiedVisualDecorations : []);
@@ -400,7 +402,7 @@ index 2e43b458..68215db2 100644
  		const diffHunkDecoCollection = this._editor.createDecorationsCollection(diffHunkDecorations);
  
  		this._diffHunksRenderStore.add(toDisposable(() => {
-@@ -514,7 +726,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -514,7 +728,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  			if (e.target.type === MouseTargetType.CONTENT_VIEW_ZONE) {
  				const zone = e.target.detail;
  				const idx = this._viewZones.findIndex(id => id === zone.viewZoneId);
@@ -409,7 +411,7 @@ index 2e43b458..68215db2 100644
  					this._editor.setPosition(e.target.position);
  					this._editor.focus();
  				}
-@@ -532,7 +744,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -532,7 +746,8 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  			} else if (e.target.type === MouseTargetType.CONTENT_VIEW_ZONE) {
  				const zone = e.target.detail;
  				const idx = this._viewZones.findIndex(id => id === zone.viewZoneId);
@@ -419,7 +421,7 @@ index 2e43b458..68215db2 100644
  
  			} else if (e.target.position) {
  				const { position } = e.target;
-@@ -545,6 +758,9 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -545,6 +760,9 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  		}));
  
  		this._diffHunksRenderStore.add(Event.any(this._editor.onDidScrollChange, this._editor.onDidLayoutChange)(() => {
@@ -429,7 +431,7 @@ index 2e43b458..68215db2 100644
  			for (let i = 0; i < this._diffHunkWidgets.length; i++) {
  				const widget = this._diffHunkWidgets[i];
  				const range = diffHunkDecoCollection.getRange(i);
-@@ -642,7 +858,14 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -642,7 +860,14 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  		if (!this._editor.hasModel()) {
  			return undefined;
  		}
@@ -445,7 +447,7 @@ index 2e43b458..68215db2 100644
  		let closestWidget: DiffHunkWidget | undefined;
  		let closestDistance = Number.MAX_VALUE;
  
-@@ -699,7 +922,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -699,7 +924,7 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  				original: { resource: this._entry.originalURI },
  				modified: { resource: this._entry.modifiedURI },
  				options: { selection },
@@ -454,7 +456,7 @@ index 2e43b458..68215db2 100644
  			});
  
  			if (diffEditor && diffEditor.input) {
-@@ -735,6 +958,54 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
+@@ -735,6 +960,54 @@ export class ChatEditingCodeEditorIntegration implements IModifiedFileEntryEdito
  	}
  }
  
@@ -509,7 +511,7 @@ index 2e43b458..68215db2 100644
  class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  
  	private static _idPool = 0;
-@@ -745,6 +1016,19 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+@@ -745,6 +1018,19 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  	private _position: IOverlayWidgetPosition | undefined;
  	private _lastStartLineNumber: number | undefined;
  	private _removed: boolean = false;
@@ -529,7 +531,7 @@ index 2e43b458..68215db2 100644
  
  	constructor(
  		private readonly _editor: ICodeEditor,
-@@ -806,13 +1090,87 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+@@ -806,13 +1092,87 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  		return this._id;
  	}
  
@@ -618,7 +620,7 @@ index 2e43b458..68215db2 100644
  			stackOrdinal: 1,
  			preference: {
  				top: this._editor.getTopForLineNumber(startLineNumber) - scrollTop - (lineHeight * this._lineDelta),
-@@ -853,6 +1211,10 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+@@ -853,6 +1213,10 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
  		return this._lastStartLineNumber;
  	}
  
@@ -848,7 +850,7 @@ index c0b57e5f..ccf58dbe 100644
  			};
  		}
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
-index 309562ec..86307233 100644
+index 309562ec..12fb9489 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
 +++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
 @@ -20,7 +20,7 @@ import { LineRange } from '../../../../../editor/common/core/ranges/lineRange.js
@@ -860,7 +862,7 @@ index 309562ec..86307233 100644
  import { ModelDecorationOptions } from '../../../../../editor/common/model/textModel.js';
  import { offsetEditFromContentChanges, offsetEditFromLineRangeMapping, offsetEditToEditOperations } from '../../../../../editor/common/model/textModelStringEdit.js';
  import { IEditorWorkerService } from '../../../../../editor/common/services/editorWorker.js';
-@@ -80,7 +80,16 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -80,7 +80,22 @@ export class ChatEditingTextModelChangeService extends Disposable {
  	public get allEditsAreFromUs() {
  		return this._allEditsAreFromUs;
  	}
@@ -875,10 +877,16 @@ index 309562ec..86307233 100644
 +	public extendToSubwords = false;
 +	public preserveShortMatchingLines = false;
 +	public alignSimilarLines = false;
++	/**
++	 * Agent review: an edit on a line of a pending change (or one that inserts or removes lines at its edge) is part of
++	 * that change, even where it doesn't overlap the AI's own characters. It is never folded into the original, so the
++	 * whole change stays pending, the edit included, until it is kept or undone.
++	 */
++	public foldOnlyOutsideChangedLines = false;
  	private _diffOperation: Promise<IDocumentDiff | undefined> | undefined;
  	private _diffOperationIds: number = 0;
  
-@@ -118,6 +127,19 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -118,6 +133,19 @@ export class ChatEditingTextModelChangeService extends Disposable {
  
  	private _originalToModifiedEdit: StringEdit = StringEdit.empty;
  
@@ -898,7 +906,7 @@ index 309562ec..86307233 100644
  	private lineChangeCount: number = 0;
  	private linesAdded: number = 0;
  	private linesRemoved: number = 0;
-@@ -126,7 +148,8 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -126,7 +154,8 @@ export class ChatEditingTextModelChangeService extends Disposable {
  		private readonly originalModel: ITextModel,
  		private readonly modifiedModel: ITextModel,
  		private readonly state: IObservable<ModifiedFileEntryState>,
@@ -908,7 +916,7 @@ index 309562ec..86307233 100644
  		@IEditorWorkerService private readonly _editorWorkerService: IEditorWorkerService,
  		@IAccessibilitySignalService private readonly _accessibilitySignalService: IAccessibilitySignalService,
  	) {
-@@ -334,13 +357,50 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -334,13 +363,53 @@ export class ChatEditingTextModelChangeService extends Disposable {
  	private _reset() {
  		this._originalToModifiedEdit = StringEdit.empty;
  		this._diffInfo.set(nullDocumentDiff, undefined);
@@ -943,7 +951,9 @@ index 309562ec..86307233 100644
 +				: range.startLineNumber < lines.endLineNumberExclusive && lines.startLineNumber <= range.endLineNumber;
 +			if (inChange) {
 +				const text = this.modifiedModel.getValueInRange(range).trim();
-+				if (text) {
++				// Text the change's original side has (the typing was kept since) comes back with Undo: not lost.
++				const original = change.original.isEmpty ? '' : this.originalModel.getValueInRange(change.original.toExclusiveRange());
++				if (text && !original.includes(text)) {
 +					parts.push(text);
 +				}
 +			}
@@ -955,11 +965,12 @@ index 309562ec..86307233 100644
  		let didChange = false;
  		if (newOriginal !== undefined) {
  			this.originalModel.setValue(newOriginal);
-+			this._clearUserText(); // a new original: what the user typed is either in it now or the host decides
++			// What the user typed inside a change stays tracked: a new original (a save, another change kept, Ctrl+Z of a
++			// Keep) doesn't accept it. Typing that the original has (kept) is not reported by userTextIn.
  			didChange = true;
  		}
  		if (newModified !== undefined && this.modifiedModel.getValue() !== newModified) {
-@@ -357,7 +417,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -357,7 +426,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
  
  	private _mirrorEdits(event: IModelContentChangedEvent) {
  		const edit = offsetEditFromContentChanges(event.changes);
@@ -968,7 +979,13 @@ index 309562ec..86307233 100644
  
  		if (this._isEditFromUs || isExternalEdit) {
  			const e_sum = this._originalToModifiedEdit;
-@@ -391,10 +451,16 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -386,15 +455,21 @@ export class ChatEditingTextModelChangeService extends Disposable {
+ 			const e_ai = this._originalToModifiedEdit;
+ 			const e_user = edit;
+ 
+-			const e_user_r = e_user.tryRebase(e_ai.inverse(this.originalModel.getValue()));
++			const e_user_r = this.foldOnlyOutsideChangedLines && this._touchesChangedLines(e_ai, event) ? undefined : e_user.tryRebase(e_ai.inverse(this.originalModel.getValue()));
+ 
  			if (e_user_r === undefined) {
  				// user edits overlaps/conflicts with AI edits
  				this._originalToModifiedEdit = e_ai.compose(e_user);
@@ -986,11 +1003,52 @@ index 309562ec..86307233 100644
  			}
  
  			this._allEditsAreFromUs = false;
-@@ -406,11 +472,50 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -406,11 +481,91 @@ export class ChatEditingTextModelChangeService extends Disposable {
  		}
  	}
  
 -	private async _keepHunk(change: DetailedLineRangeMapping): Promise<boolean> {
++	/**
++	 * Whether a user edit is on a line the AI changed: the lines each one spans (in the text before the edit) overlap.
++	 * A range that ends right after a line break doesn't reach the next line; an empty one is on its line.
++	 */
++	private _touchesChangedLines(e_ai: StringEdit, event: IModelContentChangedEvent): boolean {
++		if (e_ai.isEmpty()) {
++			return false;
++		}
++		const before = e_ai.apply(this.originalModel.getValue());
++		const lineStarts = [0];
++		for (let i = before.indexOf('\n'); i !== -1; i = before.indexOf('\n', i + 1)) {
++			lineStarts.push(i + 1);
++		}
++		const lineOf = (offset: number) => {
++			let lo = 0;
++			let hi = lineStarts.length - 1;
++			while (lo < hi) {
++				const mid = (lo + hi + 1) >> 1;
++				if (lineStarts[mid] <= offset) {
++					lo = mid;
++				} else {
++					hi = mid - 1;
++				}
++			}
++			return lo + 1;
++		};
++		const spans: [number, number][] = [];
++		let delta = 0;
++		for (const r of e_ai.replacements) {
++			const start = r.replaceRange.start + delta;
++			const end = start + r.newText.length;
++			delta += r.newText.length - r.replaceRange.length;
++			spans.push([lineOf(start), end > start && before[end - 1] === '\n' ? lineOf(end - 1) : lineOf(end)]);
++		}
++		return event.changes.some(c => {
++			const first = c.range.startLineNumber;
++			const last = !Range.isEmpty(c.range) && c.range.endColumn === 1 ? c.range.endLineNumber - 1 : c.range.endLineNumber;
++			return spans.some(([a, b]) => first <= b && a <= last);
++		});
++	}
++
 +	/** Remember the text an edit (that touches a pending change) inserted, in the modified model's coordinates. */
 +	private _trackUserText(edit: StringEdit): void {
 +		const ranges: IModelDeltaDecoration[] = [];
@@ -1039,7 +1097,7 @@ index 309562ec..86307233 100644
  		const edits: ISingleEditOperation[] = [];
  		for (const edit of change.innerChanges ?? []) {
  			const newText = this.modifiedModel.getValueInRange(edit.modifiedRange);
-@@ -426,9 +531,11 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -426,9 +581,11 @@ export class ChatEditingTextModelChangeService extends Disposable {
  	}
  
  	private async _undoHunk(change: DetailedLineRangeMapping): Promise<boolean> {
@@ -1052,7 +1110,7 @@ index 309562ec..86307233 100644
  		const edits: ISingleEditOperation[] = [];
  		for (const edit of change.innerChanges ?? []) {
  			const newText = this.originalModel.getValueInRange(edit.originalRange);
-@@ -487,6 +594,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -487,6 +644,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
  		}
  
  		if (this.state.get() !== ModifiedFileEntryState.Modified) {
@@ -1060,7 +1118,7 @@ index 309562ec..86307233 100644
  			this._diffInfo.set(nullDocumentDiff, undefined);
  			this._originalToModifiedEdit = StringEdit.empty;
  			return nullDocumentDiff;
-@@ -501,7 +609,10 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -501,7 +659,10 @@ export class ChatEditingTextModelChangeService extends Disposable {
  			{
  				ignoreTrimWhitespace: false, // NEVER ignore whitespace so that undo/accept edits are correct and so that all changes (1 of 2) are spelled out
  				computeMoves: false,
@@ -1072,7 +1130,7 @@ index 309562ec..86307233 100644
  			},
  			'advanced'
  		);
-@@ -513,6 +624,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -513,6 +674,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
  		// only update the diff if the documents didn't change in the meantime
  		if (this.modifiedModel.getVersionId() === docVersionNow && this.originalModel.getVersionId() === snapshotVersionNow) {
  			const diff2 = diff ?? nullDocumentDiff;

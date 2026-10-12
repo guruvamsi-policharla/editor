@@ -6,9 +6,11 @@
 // Agent review wiring. The built-in agent-review extension (which hosts the review engine) talks to
 // this contribution through internal commands, so no extension-host protocol changes are needed:
 //   extension -> core: `_agentReview.setBaseline(uri, baselineText, kind)`, `_agentReview.remove(uri)`, `_agentReview.clear()`,
-//                      `_agentReview.openMerge(uri, baseText)` (agent write vs. unsaved edits, see agentReviewMerge.ts)
+//                      `_agentReview.openMerge(uri, baseText)` (agent write vs. unsaved edits, see agentReviewMerge.ts),
+//                      `_agentReview.pushUndo(uri, label, action)` (Ctrl+Z of a review action done in the extension)
 //   core -> extension: `agentReview.ext.onDidHunkAction({ uri, kind, baseline? })`,
-//                      `agentReview.ext.onWillWrite({ uri, userVersion, version })` (see agentReviewSaveParticipant.ts)
+//                      `agentReview.ext.onWillWrite({ uri, userVersion, version, userText?, baseline? })` (see agentReviewSaveParticipant.ts),
+//                      `agentReview.ext.undoRedo(action, 'undo' | 'redo')`
 // A typed proposed API can replace the commands later.
 
 import './media/agentReview.css';
@@ -21,6 +23,8 @@ import { IContextKeyService, RawContextKey } from '../../../../platform/contextk
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
+import { ICodeEditorService } from '../../../../editor/browser/services/codeEditorService.js';
+import { RedoCommand, UndoCommand } from '../../../../editor/browser/editorExtensions.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { AgentReviewKind, MERGE_EDITOR_ID } from './agentReviewEntry.js';
@@ -52,6 +56,42 @@ CommandsRegistry.registerCommand('_agentReview.clear', (accessor: ServicesAccess
  */
 CommandsRegistry.registerCommand('_agentReview.reject', (accessor: ServicesAccessor, uri: UriComponents): Promise<'saved' | 'unsaved' | 'deleted' | 'cancelled'> | undefined => {
 	return accessor.get(IAgentReviewService).getEntry(URI.revive(uri))?.rejectFile();
+});
+
+/**
+ * Put a review action the extension did (Keep Deletion, Restore File, Keep/Undo from the Agent Changes list) on the
+ * file's undo stack. Ctrl+Z / Ctrl+Shift+Z run `agentReview.ext.undoRedo(action, 'undo' | 'redo')` in the extension.
+ */
+CommandsRegistry.registerCommand('_agentReview.pushUndo', (accessor: ServicesAccessor, uri: UriComponents, label: string, action: unknown) => {
+	const commandService = accessor.get(ICommandService);
+	const run = (which: 'undo' | 'redo') => commandService.executeCommand('agentReview.ext.undoRedo', action, which);
+	accessor.get(IAgentReviewService).pushUndo(URI.revive(uri), label, () => run('undo'), () => run('redo'));
+});
+
+// Ctrl+Z / Ctrl+Shift+Z where no file's text editor has focus (the Agent Changes list, the Explorer, a deletion's review):
+// the latest review action. In a file's editor, its own undo stack has them in order with the typing. Below the
+// Explorer's own file operations (110).
+const UNDO_PRIORITY = 105;
+/**
+ * Whether a text editor with a file of its own has focus (then Ctrl+Z is that file's). The extension's read-only views
+ * (a deletion's review, the accepted text) have no undo of their own: there it is the review's.
+ */
+function hasEditorFocus(accessor: ServicesAccessor): boolean {
+	const scheme = accessor.get(ICodeEditorService).getFocusedCodeEditor()?.getModel()?.uri.scheme;
+	return scheme !== undefined && scheme !== 'agent-review-deleted' && scheme !== 'agent-review-accepted';
+}
+
+UndoCommand.addImplementation(UNDO_PRIORITY, 'agentReview', (accessor: ServicesAccessor) => {
+	if (hasEditorFocus(accessor)) {
+		return false;
+	}
+	return accessor.get(IAgentReviewService).undoOutsideEditors(false) ?? false;
+});
+RedoCommand.addImplementation(UNDO_PRIORITY, 'agentReview', (accessor: ServicesAccessor) => {
+	if (hasEditorFocus(accessor)) {
+		return false;
+	}
+	return accessor.get(IAgentReviewService).undoOutsideEditors(true) ?? false;
 });
 
 CommandsRegistry.registerCommand('_agentReview.openMerge', (accessor: ServicesAccessor, uri: UriComponents, base: string): Promise<boolean> => {

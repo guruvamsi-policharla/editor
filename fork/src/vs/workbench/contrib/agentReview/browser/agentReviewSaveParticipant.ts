@@ -14,7 +14,10 @@
 // version, userText })` right before the write. Buffer edits after `userVersion` were made by the
 // editor during the save, not by the user: the engine keeps them pending inside agent hunks and folds
 // them in elsewhere. `userText` lets the engine find them by diffing (user text -> written text) even
-// when the extension's edit log or document version can't be trusted.
+// when the extension's edit log or document version can't be trusted. `baseline` is the review's own
+// baseline (the original side) when the file is under review: it followed the typing and formatting live
+// (edits on no line of a pending change folded in, the rest pending with their change), so the engine
+// takes it as is and both agree on what is pending. Saving never accepts any part of a change.
 
 import { raceTimeout } from '../../../../base/common/async.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
@@ -24,6 +27,7 @@ import { ICommandService } from '../../../../platform/commands/common/commands.j
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IWorkbenchContribution } from '../../../common/contributions.js';
 import { ITextFileEditorModel, ITextFileService } from '../../../services/textfile/common/textfiles.js';
+import { IAgentReviewService } from './agentReviewService.js';
 
 /** Payload of `agentReview.ext.onWillWrite`. */
 export interface IAgentReviewWillWriteEvent {
@@ -34,6 +38,8 @@ export interface IAgentReviewWillWriteEvent {
 	readonly version: number;
 	/** The text at `userVersion` (as the user left it), when save participants changed it; else omitted. */
 	readonly userText?: string;
+	/** The review's baseline (original side) as of this write, when the file has pending changes; else omitted. */
+	readonly baseline?: string;
 }
 
 /** Same budget the extension host gets for onWillSaveTextDocument. */
@@ -51,6 +57,7 @@ export class AgentReviewSaveParticipants extends Disposable implements IWorkbenc
 		@ITextFileService textFileService: ITextFileService,
 		@ICommandService private readonly _commandService: ICommandService,
 		@ILogService private readonly _logService: ILogService,
+		@IAgentReviewService private readonly _agentReviewService: IAgentReviewService,
 	) {
 		super();
 		this._register(textFileService.files.addSaveParticipant({
@@ -76,9 +83,14 @@ export class AgentReviewSaveParticipants extends Disposable implements IWorkbenc
 			return;
 		}
 		const version = model.textEditorModel.getVersionId();
-		const event: IAgentReviewWillWriteEvent = version === user.version
-			? { uri: model.resource, userVersion: user.version, version }
-			: { uri: model.resource, userVersion: user.version, version, userText: user.text };
+		const baseline = this._agentReviewService.getEntry(model.resource)?.originalModel.getValue();
+		const event: IAgentReviewWillWriteEvent = {
+			uri: model.resource,
+			userVersion: user.version,
+			version,
+			...(version === user.version ? {} : { userText: user.text }),
+			...(baseline === undefined ? {} : { baseline }),
+		};
 		try {
 			// Bounded: a slow or missing extension must never block saving.
 			await raceTimeout(this._commandService.executeCommand('agentReview.ext.onWillWrite', event), WILL_WRITE_TIMEOUT_MS);
