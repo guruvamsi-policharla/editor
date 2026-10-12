@@ -4,9 +4,9 @@
  * (`session/resume` when the agent supports it, else a fresh session).
  */
 import * as acp from '@agentclientprotocol/sdk';
-import { isLooser, optionValues, pendingDefaults, strictestOffered } from './config.js';
+import { isLooser, optionValues, pendingDefaults, strictestOffered, withoutTransient } from './config.js';
 import { PermissionBroker } from './permissions.js';
-import type { HarnessProfile } from './profiles.js';
+import { isTransient, type HarnessProfile } from './profiles.js';
 import { SessionView, type Change } from './reducer.js';
 import type { AgentSupervisor, Ready } from './supervisor.js';
 
@@ -60,14 +60,45 @@ function offers(options: readonly acp.SessionConfigOption[], id: string, value: 
 	return o?.type === 'select' && o.options.flatMap(x => ('options' in x ? x.options : [x])).some(c => c.value === value);
 }
 
+/** A transient value (Claude's Bypass) a recovered session didn't get back: it's in `to` instead. */
+export interface LeftTransient {
+	id: string;
+	value: string;
+	to: string | undefined;
+}
+
 export class AcpSession {
 	readonly view = new SessionView();
 	/** True while `session/load` replays the conversation (listeners that render live turns ignore those). */
 	replaying = false;
 	private readonly listeners = new Set<(c: Change) => void>();
+	/** The last value of each option that wasn't transient: where the chat goes back to from Bypass. */
+	private readonly lastKept: Record<string, string> = {};
 
 	constructor(private readonly harness: HarnessClient, public id: string, public generation: number, configOptions: readonly acp.SessionConfigOption[] | null | undefined) {
 		this.view.setConfigOptions(configOptions);
+		this.track();
+	}
+
+	private track(): void {
+		for (const [id, value] of Object.entries(optionValues(this.view.state.configOptions))) {
+			if (!isTransient(this.harness.profile, id, value)) {
+				this.lastKept[id] = value;
+			}
+		}
+	}
+
+	/**
+	 * The session's option values as a chat saves them: a transient value (Claude's Bypass) is replaced by the value
+	 * the session had before it (else the profile's default, else the strictest offered). Never restores Bypass.
+	 */
+	keptValues(): Record<string, string> {
+		return withoutTransient(optionValues(this.view.state.configOptions), this.lastKept, this.harness.profile, this.view.state.configOptions);
+	}
+
+	/** Whether the session is in a transient value (Claude's Bypass) now. */
+	inTransient(): boolean {
+		return Object.entries(optionValues(this.view.state.configOptions)).some(([id, value]) => isTransient(this.harness.profile, id, value));
 	}
 
 	onChange(listener: (c: Change) => void): () => void {
@@ -77,6 +108,7 @@ export class AcpSession {
 
 	/** @internal */
 	emit(change: Change): void {
+		this.track();
 		for (const listener of [...this.listeners]) {
 			listener(change);
 		}
@@ -86,16 +118,48 @@ export class AcpSession {
 	 * Make sure the session lives on the running adapter. After a crash, or for a chat reopened from history:
 	 * resume it (no replay), else load it (replayed into the view), else start a new one. Each of those starts from
 	 * the agent's (or the profile's) defaults, so the options the view had before (the chat's: the last ones seen, or
-	 * the ones a restored session was given) are set again: `settings` says how that went.
+	 * the ones a restored session was given) are set again: `settings` says how that went. A transient value (Claude's
+	 * Bypass) isn't: the session goes back to the value it had before, and `left` says so.
 	 */
-	async ensureLive(): Promise<{ ready: Ready; recovery: Recovery; settings?: SettingsResult }> {
+	async ensureLive(): Promise<{ ready: Ready; recovery: Recovery; settings?: SettingsResult; left?: LeftTransient[] }> {
 		const ready = await this.harness.supervisor.get();
 		if (ready.generation === this.generation) {
 			return { ready, recovery: 'live' };
 		}
-		const before = optionValues(this.view.state.configOptions);
+		const current = optionValues(this.view.state.configOptions);
+		const before = this.keptValues();
 		const recovery = await this.recover(ready);
-		return { ready, recovery, settings: await this.applySettings(before) };
+		const settings = await this.applySettings(before);
+		await this.leaveTransient(settings);
+		const now = optionValues(this.view.state.configOptions);
+		const left = Object.entries(current).filter(([id, value]) => isTransient(this.harness.profile, id, value)).map(([id, value]) => ({ id, value, to: now[id] }));
+		return { ready, recovery, settings, ...(left.length ? { left } : {}) };
+	}
+
+	/**
+	 * A recovered session that came back in a transient value anyway (the adapter restores a resumed transcript's
+	 * last mode): set the strictest value offered; if that fails, the permission didn't hold (nothing is sent).
+	 */
+	private async leaveTransient(settings: SettingsResult): Promise<void> {
+		const profile = this.harness.profile;
+		for (const [id, value] of Object.entries(optionValues(this.view.state.configOptions))) {
+			if (!isTransient(profile, id, value)) {
+				continue;
+			}
+			const fallback = id === profile.permissionOption?.configId ? strictestOffered(this.view.state.configOptions, profile) : undefined;
+			try {
+				if (fallback === undefined || isTransient(profile, id, fallback)) {
+					throw new Error('no other value offered');
+				}
+				await this.setOption(id, fallback);
+				settings.applied.push({ id, value: fallback });
+				settings.fellBackTo = fallback;
+			} catch (e) {
+				settings.failed.push({ id, value: fallback ?? '', error: errorMessage(e) });
+				settings.permissionHeld = false;
+				settings.fellBackTo = value;
+			}
+		}
 	}
 
 	private async recover(ready: Ready): Promise<Recovery> {
@@ -248,6 +312,17 @@ export class HarnessClient {
 			} catch {
 				// a default the agent refuses is not fatal
 			}
+		}
+		// Never start in a transient value (Claude's settings.json can make Bypass the default mode): the strictest
+		// value offered instead, and no session at all when that fails.
+		const permission = this.profile.permissionOption?.configId;
+		const mode = permission ? optionValues(options)[permission] : undefined;
+		if (permission && mode !== undefined && isTransient(this.profile, permission, mode)) {
+			const strictest = strictestOffered(options, this.profile);
+			if (strictest === undefined || isTransient(this.profile, permission, strictest)) {
+				throw new Error(`${this.profile.label} started the session in ${mode}, and offers no other mode`);
+			}
+			options = (await ready.connection.setConfigOption(res.sessionId, permission, strictest)).configOptions;
 		}
 		return { ...res, configOptions: options };
 	}

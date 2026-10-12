@@ -285,11 +285,14 @@ export const STOPPED = 'Stopped';
 
 /**
  * A response's footer details: "Stopped" for a turn ended by Stop (core drops a response's updates after Stop,
- * but takes its result's details, so that's where the live transcript can say so), then the model and context use.
+ * but takes its result's details, so that's where the live transcript can say so), a dangerous mode the turn ran in
+ * ("⚠ Bypass permissions"), then the model and context use.
  */
-export function footer(info: { stopped?: boolean; model?: string; usage?: { used: number; size: number } }): string {
+export function footer(info: { stopped?: boolean; dangerous?: string; model?: string; usage?: { used: number; size: number } }): string {
 	return [
 		info.stopped ? STOPPED : undefined,
+		// The turn ran in a dangerous mode (Bypass permissions): no permission prompts.
+		info.dangerous ? `⚠ ${info.dangerous}` : undefined,
 		info.model,
 		info.usage?.size ? `${Math.round(100 * info.usage.used / info.usage.size)}% of context` : undefined,
 	].filter(Boolean).join(' · ');

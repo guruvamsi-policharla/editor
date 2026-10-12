@@ -7,6 +7,8 @@ import type { ConfigControl, HarnessProfile } from '@editor/acp-client';
 export type IconFactory = (id: string) => vscode.ThemeIcon;
 
 const NEXT_TURN = 'Applies from your next message';
+/** Added to a dangerous choice's description (Claude's Bypass permissions, Codex's Full access). */
+export const RISKY = 'Risky: runs commands and edits files without asking; you confirm it each time';
 
 const CATEGORY_ICON: Record<string, string> = {
 	mode: 'shield',
@@ -22,16 +24,21 @@ export function groupsFromControls(controls: readonly ConfigControl[], icon?: Ic
 	return controls.filter(c => c.placement === 'picker').map(c => {
 		const nextTurn = c.timing === 'next-turn';
 		const iconId = c.category ? CATEGORY_ICON[c.category] : undefined;
-		const items: vscode.ChatSessionProviderOptionItem[] = c.choices.map(ch => ({
-			id: ch.id,
-			name: ch.dangerous ? `${ch.name} ⚠` : ch.name,
-			...(ch.description || nextTurn ? { description: [ch.description, nextTurn ? NEXT_TURN : undefined].filter(Boolean).join(' · ') } : {}),
-			...(c.plan === ch.id ? { slashCommand: 'plan' } : {}),
+		const items: vscode.ChatSessionProviderOptionItem[] = c.choices.map(ch => {
+			const description = [ch.description, ch.dangerous ? RISKY : undefined, nextTurn ? NEXT_TURN : undefined].filter(Boolean).join(' · ');
 			// The footer shows the selected item's icon and name, not the group's: each choice carries its group's icon,
 			// so a bare "Default" or "Off" still says what it sets (effort's lightbulb, fast mode's bolt; the group's
 			// name is the tooltip). Prefixing the group's name ("Effort: Default") didn't fit the side bar's width.
-			...(icon && iconId ? { icon: icon(iconId) } : {}),
-		}));
+			// A dangerous one (Bypass permissions) has the warning icon instead, in the list and in the footer.
+			const itemIcon = ch.dangerous ? 'warning' : iconId;
+			return {
+				id: ch.id,
+				name: ch.dangerous ? `${ch.name} ⚠` : ch.name,
+				...(description ? { description } : {}),
+				...(c.plan === ch.id ? { slashCommand: 'plan' } : {}),
+				...(icon && itemIcon ? { icon: icon(itemIcon) } : {}),
+			};
+		});
 		const wanted = previous?.groups.find(g => g.id === c.id)?.selected?.id ?? c.current;
 		return {
 			id: c.id,

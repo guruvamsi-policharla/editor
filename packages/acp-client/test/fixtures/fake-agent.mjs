@@ -9,7 +9,7 @@
 // Env: FAKE_AUTH=1 → session/new fails with authRequired. FAKE_NO_RESUME=1 → no resume capability.
 // FAKE_NO_LOAD=1 → no loadSession/list capability. FAKE_STORE=<dir> → sessions (with their history, replayed by
 // session/load) are kept in <dir>/sessions.json, so they survive a restart. FAKE_RESUME_MODE=<mode> → session/resume
-// and session/load come back in that mode (default: default). FAKE_REJECT=<id>=<value>[,…] → set_config_option
+// and session/load come back in that mode (default: default). FAKE_NEW_MODE=<mode> → session/new starts in it. FAKE_REJECT=<id>=<value>[,…] → set_config_option
 // refuses those values.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -67,7 +67,7 @@ const connection = acp.agent({ name: 'fake-agent' })
 			throw acp.RequestError.authRequired();
 		}
 		const sessionId = `s${process.pid}-${nextSession++}`;
-		const state = { mode: 'default', model: 'big', effort: 'high', meta: ctx.params._meta };
+		const state = { mode: process.env.FAKE_NEW_MODE ?? 'default', model: 'big', effort: 'high', meta: ctx.params._meta };
 		sessions.set(sessionId, state);
 		stored.set(sessionId, { cwd: ctx.params.cwd, title: null, updatedAt: new Date().toISOString(), history: [] });
 		save();

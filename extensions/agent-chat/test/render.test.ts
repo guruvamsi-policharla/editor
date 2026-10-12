@@ -152,6 +152,7 @@ describe('the footer', () => {
 		expect(footer({ stopped: true, model: 'Haiku 5.5', usage: { used: 12, size: 100 } })).toBe('Stopped · Haiku 5.5 · 12% of context');
 		expect(footer({ stopped: true })).toBe(STOPPED);
 		expect(footer({ model: 'Haiku 5.5' })).toBe('Haiku 5.5');
+		expect(footer({ dangerous: 'Bypass permissions', model: 'Haiku 5.5' })).toBe('⚠ Bypass permissions · Haiku 5.5');
 		expect(footer({})).toBe('');
 	});
 });

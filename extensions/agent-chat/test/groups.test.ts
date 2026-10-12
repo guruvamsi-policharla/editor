@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { CLAUDE, CODEX, configControls, type acp } from '@editor/acp-client';
-import { changedSelections, groupsFromControls, modelChoices, signInGroup, SIGN_IN_GROUP } from '../src/groups.js';
+import { changedSelections, groupsFromControls, modelChoices, RISKY, signInGroup, SIGN_IN_GROUP } from '../src/groups.js';
 
 // Recorded from claude-agent-acp 0.87.0 (session/new with Bypass disabled).
 const fixture = JSON.parse(readFileSync(new URL('../../../packages/acp-client/test/fixtures/claude-0.87.0.json', import.meta.url), 'utf8'));
@@ -30,6 +30,20 @@ describe('pickers from config controls', () => {
 		const collab = groups.find(g => g.id === 'collaboration_mode')!;
 		expect(collab.description).toBeUndefined(); // live
 		expect(collab.items.find(i => i.id === 'plan')!.slashCommand).toBe('plan');
+	});
+
+	it('Claude with Bypass offered: it\'s in the mode picker with a warning icon and a risky description', () => {
+		const withBypass = structuredClone(claude);
+		(withBypass[0] as acp.SessionConfigOption & { options: acp.SessionConfigSelectOption[] }).options.push({ value: 'bypassPermissions', name: 'Bypass permissions', description: 'Accepts all permissions' });
+		const icon = (id: string) => ({ id }) as unknown as import('vscode').ThemeIcon;
+		const mode = groupsFromControls(configControls(withBypass, CLAUDE), icon)[0]!;
+		const bypass = mode.items.find(i => i.id === 'bypassPermissions')!;
+		expect(bypass.name).toBe('Bypass permissions ⚠');
+		expect(bypass.icon).toEqual({ id: 'warning' });
+		expect(bypass.description).toBe(`Accepts all permissions · ${RISKY}`);
+		expect(mode.items.find(i => i.id === 'acceptEdits')!.icon).toEqual({ id: 'shield' });
+		// Not the selection: a new chat opens in Accept edits (the agent's current value here is Manual).
+		expect(mode.selected!.id).not.toBe('bypassPermissions');
 	});
 
 	it('carries the untitled chat\'s selections over; a value no longer offered falls back to the current one', () => {

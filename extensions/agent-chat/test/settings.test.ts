@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CLAUDE, CODEX, isLooser, optionValues, strictestOffered, withValues, type acp } from '@editor/acp-client';
-import { attributeChanges, ECHO_MS, modelIdentifier, shownSettings, startValues, type PickerEvent, type PickerPush } from '../src/settings.js';
+import { attributeChanges, dangerousConfirmation, ECHO_MS, modelIdentifier, shownSettings, startValues, type PickerEvent, type PickerPush } from '../src/settings.js';
 
 const options: acp.SessionConfigOption[] = [
 	{ id: 'mode', name: 'Mode', category: 'mode', type: 'select', currentValue: 'acceptEdits', options: [{ value: 'default', name: 'Manual' }, { value: 'acceptEdits', name: 'Accept edits' }, { value: 'plan', name: 'Plan' }, { value: 'auto', name: 'Auto' }] },
@@ -33,6 +33,28 @@ describe('per-chat settings (#33, #25)', () => {
 		expect(startValues(undefined, CLAUDE.defaults, lastSeen, CLAUDE)).toEqual({ mode: 'acceptEdits' });
 		expect(startValues({ settings: { mode: 'default', model: 'haiku' } }, CLAUDE.defaults, options, CLAUDE)).toEqual({ mode: 'default', model: 'haiku' });
 		expect(startValues({}, CLAUDE.defaults, options, CLAUDE)).toEqual({ mode: 'default' });
+	});
+
+	it('a chat never opens in Bypass permissions: not new, not reopened, not from a user default', () => {
+		const withBypass = structuredClone(options);
+		(withBypass[0] as acp.SessionConfigOption & { options: acp.SessionConfigSelectOption[] }).options.push({ value: 'bypassPermissions', name: 'Bypass permissions' });
+		const lastSeen = withValues(withBypass, { mode: 'bypassPermissions' });
+		expect(startValues(undefined, CLAUDE.defaults, lastSeen, CLAUDE)).toEqual({ mode: 'acceptEdits' });
+		expect(startValues(undefined, { mode: 'bypassPermissions' }, lastSeen, CLAUDE)).toEqual({ mode: 'acceptEdits' });
+		// Chats are saved without it (AcpSession.keptValues); one that has it anyway gets the default.
+		expect(startValues({ settings: { mode: 'bypassPermissions', model: 'haiku' } }, CLAUDE.defaults, lastSeen, CLAUDE)).toEqual({ mode: 'acceptEdits', model: 'haiku' });
+		// A user's Manual stays Manual.
+		expect(startValues({ settings: { mode: 'default' } }, CLAUDE.defaults, lastSeen, CLAUDE)).toEqual({ mode: 'default' });
+	});
+
+	it('choosing a dangerous mode asks in a modal, which says what it does and that a restart leaves Bypass', () => {
+		const bypass = dangerousConfirmation('Claude Code', 'Bypass permissions', true);
+		expect(bypass.message).toBe('Claude Code: switch to Bypass permissions?');
+		expect(bypass.yes).toBe('Use Bypass permissions');
+		expect(bypass.detail).toMatch(/without asking/);
+		expect(bypass.detail).toMatch(/Keep\/Undo/);
+		expect(bypass.detail).toMatch(/after a reload or restart it's back in the mode it had before/);
+		expect(dangerousConfirmation('Codex', 'Full access', false).detail).not.toMatch(/restart/);
 	});
 
 	it('a turn\'s model as the identifier core gives the model picker (vendor/id; request.model.id is the id) (#25)', () => {

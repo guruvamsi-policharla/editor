@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ReviewEngine } from '@editor/engine';
-import { AgentConnection, type acp } from '../../src/index.js';
+import { AgentConnection, CLAUDE, CLIENT_CAPABILITIES, type acp } from '../../src/index.js';
 import { RUN_CONTRACT, adapterLaunch, tempWorkspace } from './harness.js';
 
 const TURN_TIMEOUT = 180_000;
@@ -37,7 +37,8 @@ describe.skipIf(!RUN_CONTRACT)('claude-agent-acp contract', () => {
 		const session = await agent.newSession({
 			cwd,
 			mcpServers: [],
-			_meta: { claudeCode: { options: { allowDangerouslySkipPermissions: false } } },
+			// As the editor launches it: Bypass allowed (the adapter's --allow-dangerously-skip-permissions).
+			_meta: { ...CLAUDE.sessionMeta },
 		});
 		sessionId = session.sessionId;
 		configOptions = session.configOptions ?? undefined;
@@ -56,12 +57,17 @@ describe.skipIf(!RUN_CONTRACT)('claude-agent-acp contract', () => {
 		}
 	});
 
-	it('(c) lists mode, model and effort; Bypass is hidden; setting options works', async () => {
+	it('(c) lists mode, model and effort; Bypass is offered but not the start mode; setting options works', async () => {
 		expect(configOptions?.map(o => o.id)).toEqual(expect.arrayContaining(['mode', 'model', 'effort']));
 		expect(option(configOptions, 'mode')?.category).toBe('mode');
 		expect(option(configOptions, 'model')?.category).toBe('model');
 		expect(option(configOptions, 'effort')?.category).toBe('thought_level');
-		expect(values(option(configOptions, 'mode'))).not.toContain('bypassPermissions');
+		// Offered (not as root outside a sandbox: the adapter and Claude Code refuse it there), never the start mode.
+		if ((process.geteuid?.() ?? 1) !== 0 || process.env.IS_SANDBOX) {
+			expect(values(option(configOptions, 'mode'))).toContain('bypassPermissions');
+		}
+		expect(option(configOptions, 'mode')?.currentValue).not.toBe('bypassPermissions');
+		expect(CLIENT_CAPABILITIES).toEqual({});
 
 		trace.initialOptions = configOptions;
 		const effort = await agent.setConfigOption(sessionId, 'effort', 'low');
@@ -108,6 +114,25 @@ describe.skipIf(!RUN_CONTRACT)('claude-agent-acp contract', () => {
 		expect(asked!.options.map(o => o.kind)).toEqual(expect.arrayContaining(['allow_once', 'reject_once']));
 		expect(existsSync(join(cwd, 'ran.txt'))).toBe(true);
 		expect(agent.forbiddenInbound()).toEqual([]);
+	}, TURN_TIMEOUT);
+
+	it('(f) in Bypass permissions a command runs without a prompt; its edits are still on disk for review', async () => {
+		const asked: acp.RequestPermissionRequest[] = [];
+		agent.setPermissionHandler(async request => {
+			asked.push(request);
+			return { outcome: { outcome: 'cancelled' } };
+		});
+		const bypass = await agent.setConfigOption(sessionId, 'mode', 'bypassPermissions');
+		expect(option(bypass.configOptions, 'mode')?.currentValue).toBe('bypassPermissions');
+		const result = await agent.prompt(sessionId, 'Run exactly this shell command with your Bash tool: python3 -c "open(\'bypass.txt\',\'w\').write(\'y\')" . Do nothing else and reply with just "done".');
+		expect(result.stopReason).toBe('end_turn');
+		expect(asked).toEqual([]);
+		expect(existsSync(join(cwd, 'bypass.txt'))).toBe(true);
+		expect(agent.forbiddenInbound()).toEqual([]);
+		await engine.handleFsEvents([join(cwd, 'bypass.txt')]);
+		expect(engine.listChanges().map(c => c.path)).toContain('bypass.txt');
+		const back = await agent.setConfigOption(sessionId, 'mode', 'acceptEdits');
+		expect(option(back.configOptions, 'mode')?.currentValue).toBe('acceptEdits');
 	}, TURN_TIMEOUT);
 
 	it('(e) cancel while a permission prompt is pending ends the turn as cancelled', async () => {
