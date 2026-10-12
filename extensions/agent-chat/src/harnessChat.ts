@@ -30,7 +30,7 @@ import type { ChatEntry, ChatHistory } from './history.js';
 import { loginCommand, resolveLaunch } from './launch.js';
 import { HarnessModels } from './models.js';
 import { promptBlocks, type PromptReference } from './prompt.js';
-import { footer, permissionButtons, runningCommands, stoppedCommandsNote, TurnRenderer } from './render.js';
+import { footer, isServerToolHiccup, permissionButtons, retryText, runningCommands, stoppedCommandsNote, turnFailureText, TurnRenderer } from './render.js';
 import type { Lease, TurnScheduler } from './scheduler.js';
 import { attributeChanges, dangerousConfirmation, ECHO_MS, modelIdentifier, shownSettings, startValues, type PickerEvent, type PickerPush } from './settings.js';
 import { historyTurns, StreamWriter } from './stream.js';
@@ -945,7 +945,7 @@ export class HarnessChat implements vscode.Disposable {
 			if (token.isCancellationRequested) {
 				return { metadata: { stopReason: 'cancelled' }, ...this.details(session, true) };
 			}
-			return await this.turnError(e, stream);
+			return await this.turnError(e, stream, { resource, text: retryText(request) });
 		} finally {
 			this.reconciling.delete(key);
 			this.running.delete(key);
@@ -1081,7 +1081,8 @@ export class HarnessChat implements vscode.Disposable {
 		return { metadata: { error: 'start' } };
 	}
 
-	private async turnError(e: unknown, stream: vscode.ChatResponseStream): Promise<vscode.ChatResult> {
+	/** A failed turn's card. `retry` is the chat and the text to send again for a Claude-side hiccup's Retry button. */
+	private async turnError(e: unknown, stream: vscode.ChatResponseStream, retry?: { resource: vscode.Uri | undefined; text: string }): Promise<vscode.ChatResult> {
 		if (isAuthRequired(e)) {
 			return this.startError(e, stream);
 		}
@@ -1101,7 +1102,10 @@ export class HarnessChat implements vscode.Disposable {
 			const how = status?.state === 'exited' ? ` (${status.signal ?? `exit code ${status.code}`})` : '';
 			stream.warning(`${this.label} stopped unexpectedly${how}. Your next message restarts it and resumes this chat.`);
 		} else {
-			stream.warning(`${this.label}: ${firstLine(message)}`);
+			stream.warning(turnFailureText(this.label, message));
+		}
+		if (!crashed && retry && isServerToolHiccup(message)) {
+			stream.button({ command: 'agentChat.retry', title: 'Retry', arguments: [retry.resource?.toString(), retry.text] });
 		}
 		stream.button({ command: 'agentChat.showLog', title: 'Show Log' });
 		return { metadata: { error: crashed ? 'crashed' : 'failed' } };

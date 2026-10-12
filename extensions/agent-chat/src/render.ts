@@ -312,3 +312,26 @@ export function stoppedCommandsNote(commands: readonly string[]): string {
 export function runningCommands(closing: readonly RenderOp[], notApproved: ReadonlySet<string>): string[] {
 	return closing.flatMap(o => (o.op === 'tool' && o.card.terminal && !notApproved.has(o.card.id) ? [o.card.terminal.command] : []));
 }
+
+/**
+ * Claude ended a turn without the results of its own server-side tool calls (`srvtoolu_…` ids: tools Anthropic runs,
+ * such as the advisor or web search). The adapter reports it as "Internal error: Claude ended the turn without
+ * returning results for tool calls: srvtoolu_…". It's a hiccup on Claude's side, not the editor's or the user's, and
+ * sending the message again usually works.
+ */
+export function isServerToolHiccup(message: string): boolean {
+	return /\bsrvtoolu_[A-Za-z0-9]/.test(message);
+}
+
+/** The warning of a failed turn: a Claude-side hiccup in plain words, anything else as the agent reported it. */
+export function turnFailureText(label: string, message: string): string {
+	if (isServerToolHiccup(message)) {
+		return `${label} hit a hiccup on Claude's side: the turn ended before one of Claude's own server tools (such as the advisor) returned. Nothing went wrong on your end; sending the message again usually works.`;
+	}
+	return `${label}: ${message.split('\n')[0]!.slice(0, 300)}`;
+}
+
+/** The text that sends a request again as the user typed it: a slash command keeps its slash. */
+export function retryText(request: { command?: string; prompt: string }): string {
+	return request.command ? `/${request.command}${request.prompt ? ` ${request.prompt}` : ''}` : request.prompt;
+}

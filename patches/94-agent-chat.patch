@@ -1,9 +1,9 @@
 diff --git a/src/vs/workbench/contrib/agentChat/browser/agentChat.contribution.ts b/src/vs/workbench/contrib/agentChat/browser/agentChat.contribution.ts
 new file mode 100644
-index 00000000..1f71226c
+index 00000000..59a0794a
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentChat/browser/agentChat.contribution.ts
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,112 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -12,6 +12,7 @@ index 00000000..1f71226c
 +// Agent chat (the built-in agent-chat extension), through internal commands:
 +// - `_agentChat.openChat(uri, where)` opens a chat session (from the extension's chat search) in the chat view in
 +//   the side bar, or in an editor tab.
++// - `_agentChat.resend(uri, text)` sends a message again in a chat session (Retry on a failed turn's card).
 +// - Cmd/Ctrl+L inserts a reference to the selection at the cursor
 +// of the last focused chat input, as an inline pill (core's dynamic variable, the same as `#selection`), so a
 +// message can say "in this part <ref>, fold in this argument <ref>". The request then carries the text with the
@@ -32,6 +33,27 @@ index 00000000..1f71226c
 +	const widget = await accessor.get(IChatWidgetService).openSession(URI.revive(uri), where === 'editor' ? ACTIVE_GROUP : ChatViewPaneTarget);
 +	widget?.focusInput();
 +	return !!widget;
++});
++
++/**
++ * `_agentChat.resend(uri, text)`: sends `text` again in the chat session `uri` (its open widget, in the side bar or an
++ * editor tab; opened in the side bar when it isn't open), as if the user typed it: Retry on a failed turn's card.
++ * Without `uri` (a chat that has no resource yet), the last focused chat. Returns whether it was sent.
++ */
++CommandsRegistry.registerCommand('_agentChat.resend', async (accessor, uri: UriComponents | undefined, text: unknown) => {
++	if (typeof text !== 'string' || !text) {
++		return false;
++	}
++	const widgetService = accessor.get(IChatWidgetService);
++	const resource = uri ? URI.revive(uri) : undefined;
++	const widget = resource
++		? widgetService.getWidgetBySessionResource(resource) ?? await widgetService.openSession(resource, ChatViewPaneTarget)
++		: widgetService.lastFocusedWidget;
++	if (!widget) {
++		return false;
++	}
++	await widgetService.reveal(widget);
++	return !!await widget.acceptInput(text);
 +});
 +
 +/**
@@ -591,3 +613,128 @@ index 0ed06f43..dc0604d8 100644
  				invocationMessage: part.invocationMessage ? MarkdownString.from(part.invocationMessage) : undefined,
  				pastTenseMessage: part.pastTenseMessage ? MarkdownString.from(part.pastTenseMessage) : undefined,
  				toolSpecificData,
+diff --git a/src/vs/workbench/contrib/chat/browser/widget/chatListWidget.ts b/src/vs/workbench/contrib/chat/browser/widget/chatListWidget.ts
+index 2ad258ef..5423b499 100644
+--- a/src/vs/workbench/contrib/chat/browser/widget/chatListWidget.ts
++++ b/src/vs/workbench/contrib/chat/browser/widget/chatListWidget.ts
+@@ -141,6 +141,16 @@ export function computeScrollDownState(isScrolledToBottom: boolean, scrollLock:
+ 	};
+ }
+ 
++/**
++ * Whether a list is at its bottom. Anywhere inside the bottom padding counts: a list a few pixels
++ * short of its end (fractional row heights rounded on a scaled display, a reveal that stopped at the
++ * last row's edge) must keep following streamed output, or the last line stays half hidden behind
++ * the input until the user scrolls.
++ */
++export function isScrolledToBottom(scrollTop: number, renderHeight: number, scrollHeight: number, paddingBottom: number): boolean {
++	return scrollTop + renderHeight >= scrollHeight - Math.max(2, paddingBottom);
++}
++
+ class UserToggleResizeTracker extends Disposable {
+ 
+ 	private readonly state = new UserToggleResizeState(2);
+@@ -399,7 +409,7 @@ export class ChatListWidget extends Disposable {
+ 	 * Whether the list is scrolled to the bottom.
+ 	 */
+ 	get isScrolledToBottom(): boolean {
+-		return this._tree.scrollTop + this._tree.renderHeight >= this._tree.scrollHeight - 2;
++		return isScrolledToBottom(this._tree.scrollTop, this._tree.renderHeight, this._tree.scrollHeight, this._paddingBottom);
+ 	}
+ 
+ 	/**
+diff --git a/src/vs/workbench/contrib/chat/browser/widget/chatWidget.ts b/src/vs/workbench/contrib/chat/browser/widget/chatWidget.ts
+index 5f4aa0c1..5f6bfc93 100644
+--- a/src/vs/workbench/contrib/chat/browser/widget/chatWidget.ts
++++ b/src/vs/workbench/contrib/chat/browser/widget/chatWidget.ts
+@@ -296,6 +296,12 @@ const DISCLAIMER = localize('chatDisclaimer', "AI responses may be inaccurate");
+ /** Set on the container when {@link IChatWidgetViewOptions.persistentContentHeight} is, floating the persistent content. */
+ export const chatFloatingPersistentContentClass = 'chat-floating-persistent-content';
+ 
++/**
++ * Space kept under the last row of a chat (panel or editor), so the conversation's last line (a
++ * streaming reply's "Working…" line too) sits clear of the input instead of against its edge.
++ */
++export const CHAT_LIST_BOTTOM_GAP = 12;
++
+ /** Carries {@link IChatWidgetViewOptions.persistentContentHeight} to `chat.css`. */
+ export const chatPersistentContentHeightVariable = '--vscode-chat-persistent-content-height';
+ 
+@@ -2039,7 +2045,7 @@ export class ChatWidget extends Disposable implements IChatWidget {
+ 				getSelectedModelRequestOptions: () => this.getSelectedModelRequestOptions(),
+ 				getCurrentModeInfo: () => this.input.currentModeInfo,
+ 				getEditingValue: () => this.input.inputEditor.getValue(),
+-				paddingBottom: this.viewOptions.persistentContentHeight,
++				paddingBottom: (this.viewOptions.persistentContentHeight ?? 0) + (this.location === ChatAgentLocation.Chat ? CHAT_LIST_BOTTOM_GAP : 0),
+ 			}
+ 		));
+ 
+diff --git a/src/vs/workbench/contrib/chat/test/browser/widget/chatListWidget.test.ts b/src/vs/workbench/contrib/chat/test/browser/widget/chatListWidget.test.ts
+index 0037844f..b86c1241 100644
+--- a/src/vs/workbench/contrib/chat/test/browser/widget/chatListWidget.test.ts
++++ b/src/vs/workbench/contrib/chat/test/browser/widget/chatListWidget.test.ts
+@@ -19,7 +19,7 @@ import { scrollbarShadow } from '../../../../../../platform/theme/common/colorRe
+ import { IWorkbenchEnvironmentService } from '../../../../../services/environment/common/environmentService.js';
+ import { workbenchInstantiationService } from '../../../../../test/browser/workbenchTestServices.js';
+ import { IChatAccessibilityService } from '../../../browser/chat.js';
+-import { computeScrollDownState, getAnchoredScrollTop, AutoScrollHolds, UserToggleResizeState, ChatListWidget, IChatListWidgetOptions } from '../../../browser/widget/chatListWidget.js';
++import { computeScrollDownState, getAnchoredScrollTop, isScrolledToBottom, AutoScrollHolds, UserToggleResizeState, ChatListWidget, IChatListWidgetOptions } from '../../../browser/widget/chatListWidget.js';
+ import { ChatEditorOptions } from '../../../browser/widget/chatOptions.js';
+ import { IChatService } from '../../../common/chatService/chatService.js';
+ import { IChatSideChatService } from '../../../common/chatSideChatService.js';
+@@ -308,6 +308,55 @@ suite('ChatListWidget', () => {
+ 		disposables.dispose();
+ 	});
+ 
++	// A list a few pixels short of its end (rounded fractional heights on a scaled display) still
++	// counts as at the bottom, anywhere inside its bottom padding, so streamed output keeps it pinned.
++	test('counts a list inside its bottom padding as at the bottom', () => {
++		assert.deepStrictEqual([
++			isScrolledToBottom(/*scrollTop*/ 700, /*renderHeight*/ 300, /*scrollHeight*/ 1000, /*paddingBottom*/ 12),
++			isScrolledToBottom(690, 300, 1000, 12),
++			isScrolledToBottom(687, 300, 1000, 12),
++			isScrolledToBottom(698, 300, 1000, 0),
++			isScrolledToBottom(697, 300, 1000, 0),
++		], [true, true, false, true, false]);
++	});
++
++	// The streamed reply's last line (here a new paragraph) must end up fully above the list's bottom
++	// edge, also when the list was a few pixels short of the end when the line arrived.
++	test('keeps following a streamed reply from a few pixels short of the end', async function () {
++		this.timeout(30000);
++		const { disposables, model, widget } = createWidget({ paddingBottom: 12 });
++		let last;
++		for (let i = 0; i < 10; i++) {
++			const text = `question ${i}`;
++			last = model.addRequest({
++				text,
++				parts: [new ChatRequestTextPart(new OffsetRange(0, text.length), new Range(1, 1, 1, text.length + 1), text)]
++			}, { variables: [] }, 0);
++			model.acceptResponseProgress(last, { kind: 'markdownContent', content: new MarkdownString(`response ${i}`) });
++		}
++
++		widget.refresh();
++		widget.layout(300, 500);
++		await waitForStableLayout(widget);
++		widget.scrollToEnd();
++		await waitForStableLayout(widget);
++		widget.scrollTop = widget.scrollTop - 6;
++
++		model.acceptResponseProgress(last!, { kind: 'markdownContent', content: new MarkdownString('\n\nA new paragraph.\n\nAnd another one, the last line of the reply.') });
++		widget.refresh();
++		await waitForStableLayout(widget);
++
++		assert.deepStrictEqual({
++			overflows: widget.scrollHeight > widget.renderHeight,
++			endVisible: widget.scrollTop + widget.renderHeight >= widget.scrollHeight - 12,
++		}, {
++			overflows: true,
++			endVisible: true,
++		});
++
++		disposables.dispose();
++	});
++
+ 	test('keeps responses visible when a filter excludes their requests', async () => {
+ 		const { disposables, model, viewModel, widget } = createWidget({
+ 			filter: { filter: item => isResponseVM(item) },

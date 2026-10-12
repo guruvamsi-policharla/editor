@@ -85,6 +85,16 @@ export function activate(context: vscode.ExtensionContext): void {
 				await vscode.commands.executeCommand('vscode.open', uri);
 			}
 		}),
+		// Retry on a Claude-side hiccup's card: sends the failed message again in its chat.
+		vscode.commands.registerCommand('agentChat.retry', async (resource?: string, text?: string) => {
+			if (typeof text !== 'string' || !text) {
+				return;
+			}
+			const uri = resource ? vscode.Uri.parse(resource) : undefined;
+			if (!await Promise.resolve(vscode.commands.executeCommand<boolean>('_agentChat.resend', uri, text)).catch(() => false)) {
+				void vscode.window.showWarningMessage('Couldn\'t send the message again. Send it from the chat input.');
+			}
+		}),
 		vscode.commands.registerCommand('agentChat.lastUsed', () => lastUsed),
 		// Cmd/Ctrl+L to chat: insert the reference at the cursor of the last focused chat input, as an inline pill,
 		// without sending it. Without the core command (an older core), the reference replaces the input.

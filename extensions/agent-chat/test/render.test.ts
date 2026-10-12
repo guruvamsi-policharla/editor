@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { SessionView, type acp } from '@editor/acp-client';
-import { fileLink, footer, permissionButtons, runningCommands, STOPPED, stoppedCommandsNote, toolCard, TurnRenderer, type RenderOp } from '../src/render.js';
+import { fileLink, footer, isServerToolHiccup, permissionButtons, retryText, runningCommands, STOPPED, stoppedCommandsNote, toolCard, turnFailureText, TurnRenderer, type RenderOp } from '../src/render.js';
 
 const turns = JSON.parse(readFileSync(new URL('../../../packages/acp-client/test/fixtures/claude-0.87.0-turns.json', import.meta.url), 'utf8')) as { updates: acp.SessionUpdate[] };
 
@@ -170,5 +170,26 @@ describe('permission buttons', () => {
 		expect(buttons[2]).toMatch(/^Yes, and don't ask again for python3 -c .{1,40}… \(saved to \.claude\/settings\.local\.json\)$/);
 		expect(buttons[2]!.length).toBeLessThan(100);
 		expect(new Set(buttons).size).toBe(4);
+	});
+});
+
+describe('a failed turn\'s card', () => {
+	const hiccup = 'Internal error: Claude ended the turn without returning results for tool calls: srvtoolu_01AbCdEf';
+
+	it('says a missing server-tool result is a hiccup on Claude\'s side', () => {
+		expect(isServerToolHiccup(hiccup)).toBe(true);
+		expect(turnFailureText('Claude Code', hiccup)).toBe('Claude Code hit a hiccup on Claude\'s side: the turn ended before one of Claude\'s own server tools (such as the advisor) returned. Nothing went wrong on your end; sending the message again usually works.');
+	});
+
+	it('shows any other error as the agent reported it', () => {
+		const other = 'Internal error: tool call toolu_01AbCdEf failed\nstack…';
+		expect(isServerToolHiccup(other)).toBe(false);
+		expect(turnFailureText('Claude Code', other)).toBe('Claude Code: Internal error: tool call toolu_01AbCdEf failed');
+	});
+
+	it('retries the message as it was typed, a slash command with its slash', () => {
+		expect(retryText({ prompt: 'fix the intro' })).toBe('fix the intro');
+		expect(retryText({ command: 'review', prompt: 'main.tex' })).toBe('/review main.tex');
+		expect(retryText({ command: 'compact', prompt: '' })).toBe('/compact');
 	});
 });

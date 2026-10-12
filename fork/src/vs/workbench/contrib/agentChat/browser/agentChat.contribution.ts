@@ -6,6 +6,7 @@
 // Agent chat (the built-in agent-chat extension), through internal commands:
 // - `_agentChat.openChat(uri, where)` opens a chat session (from the extension's chat search) in the chat view in
 //   the side bar, or in an editor tab.
+// - `_agentChat.resend(uri, text)` sends a message again in a chat session (Retry on a failed turn's card).
 // - Cmd/Ctrl+L inserts a reference to the selection at the cursor
 // of the last focused chat input, as an inline pill (core's dynamic variable, the same as `#selection`), so a
 // message can say "in this part <ref>, fold in this argument <ref>". The request then carries the text with the
@@ -26,6 +27,27 @@ CommandsRegistry.registerCommand('_agentChat.openChat', async (accessor, uri: Ur
 	const widget = await accessor.get(IChatWidgetService).openSession(URI.revive(uri), where === 'editor' ? ACTIVE_GROUP : ChatViewPaneTarget);
 	widget?.focusInput();
 	return !!widget;
+});
+
+/**
+ * `_agentChat.resend(uri, text)`: sends `text` again in the chat session `uri` (its open widget, in the side bar or an
+ * editor tab; opened in the side bar when it isn't open), as if the user typed it: Retry on a failed turn's card.
+ * Without `uri` (a chat that has no resource yet), the last focused chat. Returns whether it was sent.
+ */
+CommandsRegistry.registerCommand('_agentChat.resend', async (accessor, uri: UriComponents | undefined, text: unknown) => {
+	if (typeof text !== 'string' || !text) {
+		return false;
+	}
+	const widgetService = accessor.get(IChatWidgetService);
+	const resource = uri ? URI.revive(uri) : undefined;
+	const widget = resource
+		? widgetService.getWidgetBySessionResource(resource) ?? await widgetService.openSession(resource, ChatViewPaneTarget)
+		: widgetService.lastFocusedWidget;
+	if (!widget) {
+		return false;
+	}
+	await widgetService.reveal(widget);
+	return !!await widget.acceptInput(text);
 });
 
 /**

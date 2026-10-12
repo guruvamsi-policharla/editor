@@ -222,6 +222,11 @@
         "category": "Agent Chat"
       },
       {
+        "command": "agentChat.retry",
+        "title": "Retry the Last Message",
+        "category": "Agent Chat"
+      },
+      {
         "command": "agentChat.removeChat",
         "title": "Remove from Chat History",
         "category": "Agent Chat"
@@ -289,6 +294,10 @@
         },
         {
           "command": "agentChat.runNow",
+          "when": "false"
+        },
+        {
+          "command": "agentChat.retry",
           "when": "false"
         },
         {
