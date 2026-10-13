@@ -36,6 +36,8 @@ import { ServiceCollection } from '../../../../../platform/instantiation/common/
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
 import { ITextFileEditorModel, ITextFileSaveOptions, ITextFileService } from '../../../../services/textfile/common/textfiles.js';
 import { workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
+import { TestStorageService } from '../../../../test/common/workbenchTestServices.js';
+import { IStorageService, WillSaveStateReason } from '../../../../../platform/storage/common/storage.js';
 import { INotification, INotificationHandle, INotificationService, Severity } from '../../../../../platform/notification/common/notification.js';
 import { IChatWidgetService } from '../../../chat/browser/chat.js';
 import { IChatEditingExplanationModelManager } from '../../../chat/browser/chatEditing/chatEditingExplanationModelManager.js';
@@ -1018,6 +1020,25 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		return row;
 	}
 
+	test('#46: in light themes a change\'s Undo is not dimmed and has a border, so it doesn\'t look disabled next to Keep', () => {
+		const style = (theme: string) => {
+			const host = document.createElement('div');
+			host.className = `monaco-editor ${theme}`;
+			host.innerHTML = '<div class="chat-diff-change-content-widget agent-review-hunk-toolbar"><div class="monaco-action-bar"><ul class="actions-container"><li class="action-item primary"><a class="action-label">Keep</a></li><li class="action-item"><a class="action-label">Undo</a></li></ul></div></div>';
+			document.body.appendChild(host);
+			try {
+				const toolbar = host.querySelector<HTMLElement>('.agent-review-hunk-toolbar')!;
+				const undo = host.querySelector<HTMLElement>('.action-item:not(.primary) .action-label')!;
+				const keep = host.querySelector<HTMLElement>('.action-item.primary .action-label')!;
+				return { opacity: mainWindow.getComputedStyle(toolbar).opacity, undoBorder: mainWindow.getComputedStyle(undo).boxShadow !== 'none', keepBorder: mainWindow.getComputedStyle(keep).boxShadow !== 'none' };
+			} finally {
+				host.remove();
+			}
+		};
+		assert.deepStrictEqual(style('vs'), { opacity: '1', undoBorder: true, keepBorder: false });
+		assert.deepStrictEqual(style('vs-dark'), { opacity: '0.85', undoBorder: false, keepBorder: false }, 'dark themes as before');
+	});
+
 	test('strikethrough: deleted text is struck through in every theme (whole deleted lines, deleted words of a rewrite, track changes)', async () => {
 		const paragraph = 'We present a batched scheme in which the committee never runs a key generation protocol $\\mathcal{O}(n^2)$.';
 		model.setValue(`\\section{Intro}\n${paragraph.replace('never runs', 'does not run')}\nMiddle.\nA completely different closing sentence.\nEnd.\n`);
@@ -1053,6 +1074,86 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 			const { struck } = strikes(deleted[0].domNode, theme);
 			const all = struck.join('').replace(/\s+/g, ' ');
 			assert.ok(all.includes('This long paragraph') && all.includes('stay readable'), `${theme}: every wrapped row's deleted words are struck (words shared with the inserted line are not deleted): ${all}`);
+		}
+	});
+
+	test('#43: Undo of a change the user typed in still asks after a window reload or restart, and takes back exactly the change', async () => {
+		// The tester's intro.tex: the agent rewrote two lines (one hunk), the user typed " ZZ" at the end of the second and saved.
+		const BASE = 'Intro.\nKeeps the most important pairs.\nThe proxy is cheap to compute, and it lets the user pick a budget.\n';
+		model.setValue('Intro.\nKeeps the top-scoring pairs.\nThe proxy lets the user pick a budget.\n');
+		const first = await showPending(BASE);
+		typeAtEndOf(3, ' ZZ');
+		await waitForState(first.entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(3).endsWith('ZZ') ? d : undefined));
+		// The save: the extension pushes the engine's baseline, which is the review's own.
+		await service.setBaseline(uri, first.entry.originalModel.getValue());
+		await first.entry.getDiffInfo();
+		await timeout(0);
+		first.integration.dispose();
+
+		// Reload: the workbench saves its state, and a new service (new entries, no decorations) reads it back.
+		const storage = insta.get(IStorageService) as TestStorageService;
+		storage.testEmitWillSaveState(WillSaveStateReason.SHUTDOWN);
+		service.dispose();
+		service = store.add(insta.createInstance(AgentReviewService));
+		store.add(service.onDidHunkAction(e => hunkEvents.push(e)));
+		const { entry, integration } = await showPending(BASE);
+		await timeout(0);
+		assert.strictEqual(entry.changesCount.get(), 1);
+
+		confirmAnswer = false;
+		await integration.rejectNearestChange(hunkWidgets()[0]);
+		assert.strictEqual(confirms.length, 1, 'Undo asks first: the typing goes with the change');
+		assert.ok(String(confirms[0].detail).includes('"ZZ"'), String(confirms[0].detail));
+		assert.ok(model.getValue().includes('ZZ'), 'cancelled: nothing changed');
+
+		confirmAnswer = true;
+		await integration.rejectNearestChange(hunkWidgets()[0]);
+		assert.strictEqual(confirms.length, 2);
+		assert.strictEqual(model.getValue(), BASE, 'the accepted text, with no copy of the typed line');
+	});
+
+	test('#43: typed text is remembered for a file whose entry goes and comes back (extension restart), not for text that was kept', async () => {
+		model.setValue('One.\nTwo agent.\nThree.\n');
+		const { entry, integration } = await showPending('One.\nTwo.\nThree.\n');
+		typeAtEndOf(2, ' MINE');
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(2).endsWith('MINE') ? d : undefined));
+		await entry.getDiffInfo();
+		integration.dispose();
+		service.clear();
+		const again = await showPending('One.\nTwo.\nThree.\n');
+		confirmAnswer = false;
+		await again.integration.rejectNearestChange(hunkWidgets()[0]);
+		assert.strictEqual(confirms.length, 1);
+		assert.ok(String(confirms[0].detail).includes('MINE'));
+
+		// Kept: the typing is in the baseline now, so a later change on that line doesn't ask about it.
+		await again.integration.acceptNearestChange(hunkWidgets()[0]);
+		await again.entry.getDiffInfo();
+		again.integration.dispose();
+		service.clear();
+		model.setValue('One.\nTwo agent MINE again.\nThree.\n');
+		const later = await showPending('One.\nTwo agent MINE.\nThree.\n');
+		await later.integration.rejectNearestChange(hunkWidgets()[0]);
+		assert.strictEqual(confirms.length, 1, 'no question about text the baseline has');
+	});
+
+	test('#44: saving with typed text in a change keeps its track changes (struck and tinted words in the line, no red row)', async () => {
+		const BASE = 'Intro.\nThe proxy is cheap to compute, and it lets the user pick a budget that matches their hardware, which is the main practical contribution of this work.\n';
+		model.setValue('Intro.\nThe proxy lets the user pick a budget that matches their hardware, which is the main practical contribution of this work.\n');
+		const { entry } = await showPending(BASE);
+		const trackChanges = () => ({
+			struck: model.getAllDecorations().filter(d => d.options.before?.inlineClassName?.includes('agent-review-deleted-text')).map(d => d.options.before!.content),
+			redRows: [...zones.values()].filter(z => z.domNode.classList.contains('line-delete')).length,
+			tinted: model.getAllDecorations().some(d => d.range.startLineNumber === 2 && d.options.className?.includes('agent-review-track-changes-line')),
+		});
+		const before = trackChanges();
+		assert.deepStrictEqual(before, { struck: [' is cheap to compute, and it'], redRows: 0, tinted: true });
+		typeAtEndOf(2, ' ZZ');
+		for (let i = 0; i < 3; i++) {
+			await service.setBaseline(uri, entry.originalModel.getValue());
+			await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(2).endsWith('ZZ') ? d : undefined));
+			await timeout(0);
+			assert.deepStrictEqual(trackChanges(), before, `after save ${i + 1}`);
 		}
 	});
 
