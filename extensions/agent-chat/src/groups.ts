@@ -80,17 +80,61 @@ export function changedSelections(groups: readonly vscode.ChatSessionProviderOpt
 	return out;
 }
 
+type Choice = { id: string; name: string; description?: string };
+
 /**
- * The harness's model choices as the picker shows them. A "Default (recommended)" choice whose description is the
- * model it stands for (Claude Code: "Opus 5.5") is shown as that model, "Opus 5.5 (default)": the picker's label is
- * the selected choice's name, and "Default" didn't say which model a chat would use.
+ * The harness's model choices as the picker shows them, and the current one among them.
+ * - A "Default (recommended)" choice whose description is the model it stands for (Claude Code: "Opus 5.5") is shown
+ *   as that model, "Opus 5.5 (default)": the picker's label is the selected choice's name, and "Default" didn't say
+ *   which model a chat would use. The harness also lists that model on its own; it's one row here, with that model's
+ *   description (#48), and a chat running on it shows the default row as selected.
+ * - Claude Code gives every version of a model the same line ("Best for everyday, complex tasks" on Opus 4.6 to 5):
+ *   only the newest version of each family keeps it, the older ones say they are older.
  */
-export function modelChoices(choices: readonly { id: string; name: string; description?: string }[]): { id: string; name: string; description?: string }[] {
-	return choices.map(c => {
+export function modelChoices(choices: readonly Choice[], current?: string): { items: Choice[]; current: string | undefined } {
+	const items: Choice[] = [];
+	const twins = new Map<string, string>();
+	for (const c of choices) {
 		const model = c.description?.trim();
 		if (!/^default\b/i.test(c.name) || !model || model.split(/\s+/).length > 3 || /^default\b/i.test(model)) {
-			return { ...c };
+			items.push({ ...c });
+			continue;
 		}
-		return { id: c.id, name: `${model} (default)`, description: `${c.name}: ${model}` };
-	});
+		const twin = choices.find(o => o !== c && o.name.trim() === model);
+		if (twin) {
+			twins.set(twin.id, c.id);
+		}
+		items.push({ id: c.id, name: `${model} (default)`, description: twin?.description ?? `${c.name}: ${model}` });
+	}
+	const shown = items.filter(c => !twins.has(c.id));
+	const newest = new Map<string, number[]>();
+	for (const c of shown) {
+		const v = familyVersion(c.name);
+		if (v && compareVersions(v.version, newest.get(v.family) ?? []) > 0) {
+			newest.set(v.family, v.version);
+		}
+	}
+	for (const c of shown) {
+		const v = familyVersion(c.name);
+		if (v && compareVersions(v.version, newest.get(v.family)!) < 0) {
+			c.description = 'Older version';
+		}
+	}
+	return { items: shown, current: current === undefined ? undefined : twins.get(current) ?? current };
+}
+
+/** "Opus 4.6" → Opus, [4, 6]; "Opus 5.5 (default)" → Opus, [5, 5]. */
+function familyVersion(name: string): { family: string; version: number[] } | undefined {
+	const m = /^(.*?\S)\s+(\d+(?:\.\d+)*)(?:\s+\(default\))?$/.exec(name.trim());
+	return m ? { family: m[1]!, version: m[2]!.split('.').map(Number) } : undefined;
+}
+
+function compareVersions(a: readonly number[], b: readonly number[]): number {
+	for (let i = 0; i < Math.max(a.length, b.length); i++) {
+		const d = (a[i] ?? 0) - (b[i] ?? 0);
+		if (d !== 0) {
+			return d;
+		}
+	}
+	return 0;
 }

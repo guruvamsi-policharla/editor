@@ -71,11 +71,37 @@ describe('pickers from config controls', () => {
 
 	it('the model picker names the model a "Default (recommended)" choice stands for', () => {
 		const model = claude.find(o => o.id === 'model')! as acp.SessionConfigOption & { options: { value: string; name: string; description?: string }[] };
-		const choices = modelChoices(model.options.map(o => ({ id: o.value, name: o.name, ...(o.description ? { description: o.description } : {}) })));
-		expect(choices[0]).toEqual({ id: 'default', name: 'Opus 5.5 (default)', description: 'Default (recommended): Opus 5.5' });
+		const { items: choices } = modelChoices(model.options.map(o => ({ id: o.value, name: o.name, ...(o.description ? { description: o.description } : {}) })));
+		expect(choices[0]).toEqual({ id: 'default', name: 'Opus 5.5 (default)', description: 'For complex work and everyday tasks' });
 		expect(choices.find(c => c.id === 'haiku')!.name).toBe('Haiku 5.5');
 		// A "Default" whose description isn't a model name stays as it is.
-		expect(modelChoices([{ id: 'default', name: 'Default', description: 'Uses the model from your config file' }])[0]!.name).toBe('Default');
+		expect(modelChoices([{ id: 'default', name: 'Default', description: 'Uses the model from your config file' }]).items[0]!.name).toBe('Default');
+	});
+
+	it('the model picker lists each model once, and no two versions of a model share a description (#48)', () => {
+		const model = claude.find(o => o.id === 'model')! as acp.SessionConfigOption & { options: { value: string; name: string; description?: string }[] };
+		const all = model.options.map(o => ({ id: o.value, name: o.name, ...(o.description ? { description: o.description } : {}) }));
+		const { items, current } = modelChoices(all, 'default');
+		// "Opus 5.5" (the default's model) is the default row, not a second one.
+		expect(items.filter(c => c.name.startsWith('Opus 5.5'))).toEqual([{ id: 'default', name: 'Opus 5.5 (default)', description: 'For complex work and everyday tasks' }]);
+		expect(current).toBe('default');
+		// A chat running on that model shows the default row selected.
+		expect(modelChoices(all, 'opus').current).toBe('default');
+		expect(modelChoices(all, 'haiku').current).toBe('haiku');
+		// The newest of each family keeps its description, the older ones say they are older.
+		const described = (name: string) => items.find(c => c.name === name)?.description;
+		expect(described('Haiku 5.5')).toBe('Fastest for quick answers');
+		expect(described('Haiku 4.5')).toBe('Older version');
+		expect(described('Sonnet 5.5')).toBe('Most efficient for simpler tasks');
+		expect(described('Sonnet 5')).toBe('Older version');
+		expect(described('Fable 5.1')).toBe('For your toughest challenges');
+		expect(described('Fable 5')).toBe('Older version');
+		expect(['Opus 5', 'Opus 4.8', 'Opus 4.7', 'Opus 4.6'].map(described)).toEqual(Array(4).fill('Older version'));
+		const descriptions = items.map(c => c.description).filter(d => d !== 'Older version');
+		expect(new Set(descriptions).size).toBe(descriptions.length);
+		expect(new Set(items.map(c => c.name)).size).toBe(items.length);
+		// Names without a version (Codex's) are left as they are.
+		expect(modelChoices([{ id: 'a', name: 'GPT', description: 'x' }, { id: 'b', name: 'GPT mini', description: 'x' }]).items.map(c => c.description)).toEqual(['x', 'x']);
 	});
 
 	it('the sign-in picker runs the login and offers a retry', () => {
