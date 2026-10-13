@@ -77,21 +77,19 @@ describe('entries → updates', () => {
 });
 
 describe('process helpers', () => {
-	it('runs tact under script(1) with a sized pty, script\'s stdin a FIFO', () => {
+	it('runs tact under script(1) with a sized pty; script\'s stdin a FIFO on Linux, a real pipe (bash) on macOS', () => {
 		expect(ptyCommand(['tact', '--workspace', '/a b'], 'linux', '/usr/bin/fish')).toEqual({
 			command: 'script',
 			args: ['-qfec', `stty rows 48 columns 160 2>/dev/null; SHELL=/usr/bin/fish exec tact --workspace '/a b'`, '/dev/null'],
 			env: { SHELL: '/bin/sh' },
 			stdin: 'fifo',
-			fallback: 'pipe',
 		});
 		expect(ptyCommand(['tact'], 'linux', undefined).args[1]).toBe('stty rows 48 columns 160 2>/dev/null; unset SHELL; exec tact');
 		expect(ptyCommand(['tact', '--workspace', '/a b'], 'darwin')).toEqual({
-			command: 'script',
-			args: ['-q', '/dev/null', '/bin/sh', '-c', 'stty rows 48 columns 160 2>/dev/null; exec "$@"', 'sh', 'tact', '--workspace', '/a b'],
+			command: '/bin/bash',
+			args: ['-c', 'exec script -q /dev/null /bin/sh -c "$0" sh "$@" < <(exec cat 2>/dev/null)', 'stty rows 48 columns 160 2>/dev/null; exec "$@"', 'tact', '--workspace', '/a b'],
 			env: {},
-			stdin: 'fifo',
-			fallback: 'ignore',
+			stdin: 'pipe',
 		});
 	});
 
@@ -106,7 +104,7 @@ describe('process helpers', () => {
 	});
 
 	it('watches the adapter: a watcher in the pty\'s shell ends tact once the adapter is gone', () => {
-		expect(ptyCommand(['tact'], 'darwin', undefined, 42).args[4]).toBe('stty rows 48 columns 160 2>/dev/null; (while kill -0 42 2>/dev/null && kill -0 $$ 2>/dev/null; do sleep 2; done; kill -TERM $$ 2>/dev/null) </dev/null >/dev/null 2>&1 & exec "$@"');
+		expect(ptyCommand(['tact'], 'darwin', undefined, 42).args[2]).toBe('stty rows 48 columns 160 2>/dev/null; (while kill -0 42 2>/dev/null && kill -0 $$ 2>/dev/null; do sleep 2; done; kill -TERM $$ 2>/dev/null) </dev/null >/dev/null 2>&1 & exec "$@"');
 	});
 
 	it('recognizes tact\'s "not signed in" exit, from its terminal output', () => {
@@ -199,6 +197,19 @@ describe('starting tact in the hidden pty', () => {
 			await tact.exited;
 		}
 	});
+
+	it.skipIf(process.platform !== 'linux')('the macOS launch (BSD script refuses a socket stdin), run through a shim: answered, and up at once', async () => {
+		const shim = fileURLToPath(new URL('./fixtures/bsd-script', import.meta.url));
+		chmodSync(join(shim, 'script'), 0o755);
+		const tact = await launchTact({ tact: FAKE_TACT, cwd: ws, env: { TACT_HOME: home, PATH: `${shim}:${process.env.PATH}` }, timeoutMs: 10_000, platform: 'darwin' });
+		try {
+			const registration = JSON.parse(readFileSync(join(home, 'web', 'instances', `${tact.pid}.json`), 'utf8')) as { fake: { rows: number; cols: number } };
+			expect(registration.fake).toMatchObject({ rows: 48, cols: 160 });
+		} finally {
+			tact.kill();
+			expect(await Promise.race([tact.exited.then(() => 'exited'), new Promise(r => setTimeout(() => r('hung'), 8_000))])).toBe('exited');
+		}
+	}, 15_000);
 
 	it('a tact whose adapter died (kill -9) doesn\'t stay behind', async () => {
 		const adapter = spawn('sleep', ['60']);

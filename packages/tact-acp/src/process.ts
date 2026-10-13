@@ -24,6 +24,8 @@ export interface TactLaunch {
 	timeoutMs?: number;
 	/** tact is ended when this process is gone (default: the adapter's). */
 	watch?: number;
+	/** Which `script` to drive (default: this platform's; tests run the macOS one through a shim). */
+	platform?: NodeJS.Platform;
 }
 
 export interface TactInstance {
@@ -61,23 +63,30 @@ function quote(arg: string): string {
  * sets the pty's size (a pty `script` creates without a terminal of its own is 0×0), starts a watcher that ends
  * tact once the adapter (`watch`, a pid) is gone, so a killed adapter never leaves a tact behind, and execs tact.
  *
- * `script`'s own stdin is the read end of a FIFO whose only writer is the adapter (`stdin: 'fifo'`); what's written
- * to it reaches tact as typed input, which is how the adapter answers tact's terminal queries (terminal.ts). Not a
- * Node pipe: that's a socket, and BSD `script` calls tcgetattr on its stdin and only tolerates ENOTTY
- * ("tcgetattr/ioctl: Operation not supported on socket"). Not /dev/null: BSD `script` then sends the pty an EOF
- * (`^D`) and nobody can answer tact. util-linux `script` runs the command with `$SHELL -c`, so it gets SHELL=/bin/sh
- * (`env`) and the command puts the user's SHELL back for tact. `fallback` is for when no FIFO can be made: a pipe on
- * Linux, /dev/null on macOS.
+ * What's written to `script`'s stdin reaches tact as typed input: that's how the adapter answers tact's terminal
+ * queries (terminal.ts). So it must be something the adapter writes to and `script` accepts:
+ * - Linux (`stdin: 'fifo'`): the read end of a FIFO whose only writer is the adapter (when the adapter goes,
+ *   `script` reads EOF). util-linux `script` runs the command with `$SHELL -c`, so it gets SHELL=/bin/sh (`env`) and
+ *   the command puts the user's SHELL back for tact.
+ * - macOS (`stdin: 'pipe'`): BSD `script` calls tcgetattr on its stdin and only tolerates ENOTTY. A Node pipe is a
+ *   socket and a macOS FIFO is socket-backed ("tcgetattr/ioctl: Operation not supported on socket"); /dev/null makes
+ *   it send the pty an EOF (`^D`) and forward nothing. So bash gives it a real pipe, a process substitution fed by
+ *   `cat` from the adapter's stdin pipe, and execs it (`script` stays the adapter's child).
  */
-export function ptyCommand(argv: readonly string[], platform = process.platform, shell?: string, watch?: number): { command: string; args: string[]; env: Record<string, string | undefined>; stdin: 'fifo'; fallback: 'pipe' | 'ignore' } {
+export function ptyCommand(argv: readonly string[], platform = process.platform, shell?: string, watch?: number): { command: string; args: string[]; env: Record<string, string | undefined>; stdin: 'fifo' | 'pipe' } {
 	const size = `stty rows ${PTY_SIZE.rows} columns ${PTY_SIZE.cols} 2>/dev/null; `;
 	// In the subshell `$$` is still the shell that becomes tact.
 	const watcher = watch ? `(while kill -0 ${watch} 2>/dev/null && kill -0 $$ 2>/dev/null; do sleep 2; done; kill -TERM $$ 2>/dev/null) </dev/null >/dev/null 2>&1 & ` : '';
 	if (platform === 'darwin') {
-		return { command: 'script', args: ['-q', '/dev/null', '/bin/sh', '-c', `${size}${watcher}exec "$@"`, 'sh', ...argv], env: {}, stdin: 'fifo', fallback: 'ignore' };
+		return {
+			command: '/bin/bash',
+			args: ['-c', 'exec script -q /dev/null /bin/sh -c "$0" sh "$@" < <(exec cat 2>/dev/null)', `${size}${watcher}exec "$@"`, ...argv],
+			env: {},
+			stdin: 'pipe',
+		};
 	}
 	const restore = shell ? `SHELL=${quote(shell)} ` : 'unset SHELL; ';
-	return { command: 'script', args: ['-qfec', `${size}${watcher}${restore}exec ${argv.map(quote).join(' ')}`, '/dev/null'], env: { SHELL: '/bin/sh' }, stdin: 'fifo', fallback: 'pipe' };
+	return { command: 'script', args: ['-qfec', `${size}${watcher}${restore}exec ${argv.map(quote).join(' ')}`, '/dev/null'], env: { SHELL: '/bin/sh' }, stdin: 'fifo' };
 }
 
 /**
@@ -160,13 +169,14 @@ async function start(o: TactLaunch): Promise<TactInstance> {
 	const home = tactHome(env);
 	const workspace = real(o.cwd);
 	const before = new Set(registrations(home).map(r => r.pid));
-	const pty = ptyCommand([o.tact, '--workspace', o.cwd, ...(o.args ?? [])], process.platform, env.SHELL, o.watch ?? process.pid);
-	const fifo = openFifo();
+	const pty = ptyCommand([o.tact, '--workspace', o.cwd, ...(o.args ?? [])], o.platform ?? process.platform, env.SHELL, o.watch ?? process.pid);
+	// Without a FIFO (no mkfifo), a pipe: util-linux `script` accepts a socket.
+	const fifo = pty.stdin === 'fifo' ? openFifo() : undefined;
 	let child: ChildProcess;
 	try {
 		// In the adapter's process group: when the editor ends the adapter's group, `script` goes too, and tact exits
 		// on the pty's hangup.
-		child = spawn(pty.command, pty.args, { cwd: o.cwd, env: { ...env, ...pty.env }, stdio: [fifo?.read ?? pty.fallback, 'pipe', 'pipe'] });
+		child = spawn(pty.command, pty.args, { cwd: o.cwd, env: { ...env, ...pty.env }, stdio: [fifo?.read ?? 'pipe', 'pipe', 'pipe'] });
 	} catch (e) {
 		if (fifo) {
 			closeSync(fifo.write);
@@ -178,7 +188,7 @@ async function start(o: TactLaunch): Promise<TactInstance> {
 			closeSync(fifo.read);
 		}
 	}
-	// tact's input: the FIFO, else the stdin pipe on Linux.
+	// tact's input: the FIFO, else the stdin pipe.
 	let input: ((data: string) => void) | undefined = fifo
 		? data => writeSync(fifo.write, data)
 		: child.stdin ? data => child.stdin!.write(data) : undefined;
@@ -214,6 +224,8 @@ async function start(o: TactLaunch): Promise<TactInstance> {
 		};
 		// `close`, not `exit`: by then all of tact's output is in (the sign-in check reads it).
 		child.on('close', code => done(code));
+		// On macOS `cat` feeds `script` from the stdin pipe: it ends when the pipe does.
+		child.on('exit', () => child.stdin?.end());
 		child.on('error', err => { output += `\n${err.message}`; done(null); });
 	});
 	const kill = () => {

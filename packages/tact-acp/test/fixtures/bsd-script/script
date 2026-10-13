@@ -1,0 +1,14 @@
+#!/bin/bash
+# BSD script(1) as the adapter sees it, for running the macOS launch on Linux: `script -q /dev/null CMD ARGS...`, and
+# like BSD script it refuses a socket stdin ("tcgetattr/ioctl: Operation not supported on socket": a Node pipe, or a
+# macOS FIFO). Runs the command under util-linux script.
+if [ -S /dev/stdin ]; then
+	echo "script: tcgetattr/ioctl: Operation not supported on socket" >&2
+	exit 1
+fi
+if [ "$1" != -q ] || [ "$2" != /dev/null ]; then
+	echo "usage: script -q /dev/null command ..." >&2
+	exit 64
+fi
+shift 2
+SHELL=/bin/bash exec /usr/bin/script -qfec "$(printf '%q ' "$@")" /dev/null
