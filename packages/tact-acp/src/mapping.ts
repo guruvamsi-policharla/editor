@@ -5,6 +5,7 @@
  * already sent. Tool entries become tool calls; tact never asks for permission (Nanocodex runs with approval
  * "never" and full access), so there is no permission mapping.
  */
+import { isAbsolute, join } from 'node:path';
 import type * as acp from '@agentclientprotocol/sdk';
 import type { Effort, ModelCatalog, SessionSnapshot, WireEntry } from './web.js';
 
@@ -18,6 +19,7 @@ const TOOL_KIND: Record<string, acp.ToolKind> = {
 	grep: 'search',
 	search: 'search',
 	web_search: 'fetch',
+	web__run: 'fetch',
 	fetch: 'fetch',
 };
 
@@ -27,10 +29,13 @@ export type TurnEnd = { kind: 'completed' } | { kind: 'interrupted' } | { kind: 
 
 export class EntryMapper {
 	/** entry id → what was sent: text so far, or the tool's last state/title */
-	private readonly sent = new Map<number, { text?: string; state?: string; title?: string }>();
+	private readonly sent = new Map<number, { text?: string; state?: string; title?: string; name?: string }>();
 
 	/** Entries before this id belong to earlier turns (set at each prompt). */
 	baseline = -1;
+
+	/** `cwd`: the workspace, to make the paths of edits absolute (ACP locations are absolute paths). */
+	constructor(private readonly cwd?: string) { }
 
 	/** The highest entry id seen. */
 	get lastId(): number {
@@ -64,24 +69,36 @@ export class EntryMapper {
 			}
 			case 'tool': {
 				const name = String(entry.name);
-				const title = String(entry.summary || name);
+				const kind = TOOL_KIND[name] ?? 'other';
+				const summary = String(entry.summary || name);
+				const stats = (entry as { stats?: { additions: number; deletions: number } | null }).stats;
+				const title = kind === 'edit' ? `Edit ${summary}${stats ? ` (+${stats.additions} −${stats.deletions})` : ''}` : summary;
 				const state = String(entry.state);
-				if (prev && prev.state === state && prev.title === title) {
+				if (prev && prev.state === state && prev.title === title && prev.name === name) {
 					return [];
 				}
-				this.sent.set(entry.id, { state, title });
-				const kind = TOOL_KIND[name] ?? 'other';
+				this.sent.set(entry.id, { state, title, name });
+				// A Code Mode cell (`exec`) becomes the tool it ran (`apply_patch`) in a later revision of the same entry.
+				const renamed = prev && prev.name !== name ? { kind, name } : {};
 				const status = TOOL_STATUS[state] ?? 'in_progress';
-				const rawInput = kind === 'execute' ? { command: title } : {};
-				const locations = kind === 'edit' ? pathsIn(title).map(path => ({ path })) : undefined;
+				const rawInput = kind === 'execute' ? { command: summary } : {};
+				const paths = kind === 'edit' ? pathsIn(summary) : [];
+				const locations = paths.length ? paths.map(path => ({ path: this.absolute(path) })) : undefined;
+				// A finished command's last lines, until (or instead of) its detail.
+				const tail = (entry as { outcome?: { tail?: string[] } | null }).outcome?.tail;
+				const content: acp.ToolCallContent[] | undefined = tail?.length ? [{ type: 'content', content: { type: 'text', text: tail.join('\n') } }] : undefined;
 				return [prev
-					? { sessionUpdate: 'tool_call_update', toolCallId: `t${entry.id}`, title, status, ...(locations ? { locations } : {}) }
-					: { sessionUpdate: 'tool_call', toolCallId: `t${entry.id}`, title, kind, status, name, rawInput, ...(locations ? { locations } : {}) }];
+					? { sessionUpdate: 'tool_call_update', toolCallId: `t${entry.id}`, title, status, ...renamed, ...(locations ? { locations } : {}), ...(content ? { content } : {}) }
+					: { sessionUpdate: 'tool_call', toolCallId: `t${entry.id}`, title, kind, status, name, rawInput, ...(locations ? { locations } : {}), ...(content ? { content } : {}) }];
 			}
 			default:
 				this.sent.set(entry.id, {});
 				return [];
 		}
+	}
+
+	absolute(path: string): string {
+		return this.cwd && !isAbsolute(path) ? join(this.cwd, path) : path;
 	}
 
 	/** Whether this entry ends the current turn. */
@@ -102,13 +119,17 @@ export class EntryMapper {
 	}
 }
 
-/** Paths in a patch summary or text (`*** Update File: a.tex`, or a bare path). */
+/**
+ * Paths in a patch (`*** Update File: a.tex`, `*** Move to: b.tex`) or in tact's summary of an `apply_patch` call
+ * (its files, comma-separated: `src/a.rs, b.rs`).
+ */
 export function pathsIn(text: string): string[] {
-	const fromPatch = [...text.matchAll(/\*\*\* (?:Update|Add|Delete) File: (.+)/g)].map(m => m[1]!.trim());
+	const fromPatch = [...text.matchAll(/\*\*\* (?:(?:Update|Add|Delete) File|Move to): (.+)/g)].map(m => m[1]!.trim());
 	if (fromPatch.length) {
-		return fromPatch;
+		return [...new Set(fromPatch)];
 	}
-	return /^[\w./-]+\.\w+$/.test(text.trim()) ? [text.trim()] : [];
+	const parts = text.split(', ').map(p => p.trim());
+	return parts.every(p => /^[^\s,]+$/.test(p) && /[./]/.test(p)) ? parts : [];
 }
 
 /** A tool's detail (`GET /api/sessions/{id}/entries/{n}`) → ACP content and locations, best effort. */
@@ -145,7 +166,7 @@ export function settingsOf(s: SessionSnapshot): TactSettings {
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
-/** tact's pickers as ACP config options, in tact's order: model, effort, reasoning mode, speed, approvals. */
+/** tact's pickers as ACP config options, in tact's order: model, effort, reasoning mode (Pro), speed. Only those. */
 export function configOptions(s: TactSettings, catalog: ModelCatalog | undefined): acp.SessionConfigOption[] {
 	const models = catalog?.models ?? [];
 	const model = models.find(m => m.id === s.model || s.model.endsWith(`-${m.id}`));
@@ -165,8 +186,7 @@ export function configOptions(s: TactSettings, catalog: ModelCatalog | undefined
 	if (speeds.length > 1) {
 		options.push({ id: 'speed', name: 'Speed', category: 'model_config', type: 'select', currentValue: s.speed, options: speeds.map(v => ({ value: v, name: v === 'standard' ? 'Standard speed' : cap(v) })) });
 	}
-	// Shown so the user knows: Nanocodex runs every command and edit without asking (approval "never", full access).
-	options.push({ id: 'approvals', name: 'Approvals', category: 'mode', type: 'select', currentValue: 'never', options: [{ value: 'never', name: 'Never asks', description: 'tact runs commands and edits files without asking (it has no approval mode). Edits in the workspace still show up for review.' }] });
+	// No approvals picker: tact has no approval mode (Nanocodex runs every command and edit without asking).
 	return options;
 }
 
@@ -183,6 +203,14 @@ export function promptText(blocks: readonly acp.ContentBlock[]): string {
 	const text = blocks.flatMap(b => (b.type === 'text' ? [b.text] : [])).join('\n');
 	const links = blocks.flatMap(b => (b.type === 'resource_link' && !text.includes(b.name) ? [`@${b.name}`] : []));
 	return links.length ? `${text}\n\n${links.join(' ')}` : text;
+}
+
+/**
+ * Whether tact's error says its credentials were refused: an expired or revoked ChatGPT login, or a wrong API key,
+ * only show at the first request (tact checks only that some credential exists when it starts).
+ */
+export function isAuthError(message: string): boolean {
+	return /\bHTTP 401\b|\b401 Unauthorized\b|invalid_api_key|Incorrect API key|token (?:has )?expired|refresh token|no ChatGPT credentials|run `?tact auth login`?/i.test(message);
 }
 
 /** tact's error without the raw response body it sometimes appends (`…rejected with HTTP 401: { "error": …`). */

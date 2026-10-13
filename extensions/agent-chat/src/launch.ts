@@ -37,6 +37,13 @@ export function findHarness(profile: HarnessProfile, override: ProfileOverride |
 	return which(profile.harness.binary) ?? profile.harness.fallbackPaths?.map(expandHome).find(executable);
 }
 
+/** The harness's CLI isn't installed: the chat says how to install it (and offers the profile's install command). */
+export class HarnessMissingError extends Error {
+	constructor(readonly profile: HarnessProfile) {
+		super(`${profile.harness.binary} isn't installed (not on PATH). ${profile.install ?? ''}`.trim());
+	}
+}
+
 /** The editor's node: Electron run as node (the extension host's own binary). */
 export const EDITOR_NODE = { path: process.execPath, env: { ELECTRON_RUN_AS_NODE: '1' } };
 
@@ -51,7 +58,7 @@ export async function resolveLaunch(profile: HarnessProfile, override: ProfileOv
 	}
 	if ('bundled' in profile.adapter) {
 		if (!harnessPath) {
-			throw new Error(`${profile.harness.binary} isn't installed (not on PATH). ${profile.install ?? ''}`.trim());
+			throw new HarnessMissingError(profile);
 		}
 		return launchFor(profile, { adapter: { kind: 'script', path: join(bundledDir, profile.adapter.bundled) }, node: EDITOR_NODE, harnessPath, cwd });
 	}

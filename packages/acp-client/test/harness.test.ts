@@ -365,4 +365,14 @@ describe('HarnessClient on a fake agent', () => {
 		await expect(supervisor.get()).rejects.toThrow(/ENOENT|closed|exited/);
 		expect(supervisor.status.state).toBe('failed');
 	});
+
+	it('a launch that throws (the harness isn\'t installed) passes its error up as is, and isn\'t a crash', async () => {
+		class Missing extends Error { }
+		const missing = new Missing('tact isn\'t installed');
+		const supervisor = new AgentSupervisor({ launch: async () => { throw missing; }, sleep: async () => { }, maxCrashes: 2 });
+		for (let i = 0; i < 4; i++) {
+			await expect(supervisor.get()).rejects.toBe(missing);
+		}
+		expect(supervisor.status).toMatchObject({ state: 'failed', message: 'tact isn\'t installed', crashes: 0 });
+	});
 });

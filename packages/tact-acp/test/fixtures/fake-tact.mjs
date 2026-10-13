@@ -5,8 +5,13 @@
 //   "edit <path>"  a tool entry (apply_patch) that writes "edited\n" to <path>, then an answer
 //   "wait"         a running turn that only ends on interrupt
 //   "fail"         an error entry (like a rejected API key)
+//   "crash"        an error entry that isn't about credentials
+//   "slow start"   the turn starts 300 ms after submit (interrupt says nothing_running until then)
 //   anything else  reasoning, a streamed answer ("echo: <text>") in two revisions, an exec_command tool
 // Env: FAKE_TACT_NOCREDS=1 → exits like tact without credentials. Sessions persist in $TACT_HOME/fake-sessions.
+// At start it asks its terminal what it supports, as tact does (kitty keyboard, kitty graphics, cell size, device
+// status, then DA1), and like tact on macOS it waits for the DA1 reply with no timeout before serving anything.
+// The registration also records the pty's size and SHELL as tact saw them.
 import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
@@ -37,6 +42,22 @@ if (!existsSync(tokenFile)) {
 }
 const token = readFileSync(tokenFile, 'utf8').trim();
 
+// tact's start-up queries (crossterm, ratatui-image), and no web server until the terminal answered DA1.
+await new Promise(resolve => {
+	process.stdin.setRawMode(true);
+	let answer = '';
+	const onData = chunk => {
+		answer += chunk.toString('latin1');
+		if (/\x1b\[\?[\d;]*c/.test(answer)) {
+			process.stdin.off('data', onData);
+			process.stdin.pause();
+			resolve();
+		}
+	};
+	process.stdin.on('data', onData);
+	process.stdout.write('\x1b[?1049h\x1b[?2004h\x1b[?25l\x1b[>7u\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c\x1b[16t\x1b[5n\x1b]7;file://localhost/w\x1b\\');
+});
+
 const resume = arg('--resume');
 const id = resume ?? randomUUID();
 const saved = resume && existsSync(join(store, `${id}.json`)) ? JSON.parse(readFileSync(join(store, `${id}.json`), 'utf8')) : undefined;
@@ -64,7 +85,13 @@ async function turn(text) {
 		session.title = text.slice(0, 30);
 		send('live', { active: id, sessions: [{ id, title: session.title, model: session.model, workspace, state: 'running' }] });
 	}
-	if (text === 'fail') {
+	if (text === 'crash') {
+		upsert({ id: nextId++, revision: 1, parent: null, kind: 'error', message: 'stream disconnected before completion' });
+	} else if (text === 'slow start') {
+		upsert({ id: nextId++, revision: 1, parent: null, kind: 'assistant', text: 'starting', complete: false, commentary: false });
+		await new Promise(r => { wake = r; });
+		upsert({ id: nextId++, revision: 1, parent: null, kind: 'interrupted', count: 1 });
+	} else if (text === 'fail') {
 		upsert({ id: nextId++, revision: 1, parent: null, kind: 'error', message: 'Responses WebSocket handshake was rejected with HTTP 401' });
 	} else if (text === 'wait') {
 		upsert({ id: nextId++, revision: 1, parent: null, kind: 'assistant', text: 'working', complete: false, commentary: false });
@@ -148,7 +175,11 @@ const server = createServer(async (req, res) => {
 					return reply(res, 409, { code: 'draft_changed', message: 'draft changed' });
 				}
 				reply(res, 200, {});
-				void turn(session.draft.text);
+				if (session.draft.text === 'slow start') {
+					setTimeout(() => void turn(session.draft.text), 300);
+				} else {
+					void turn(session.draft.text);
+				}
 				return;
 			case 'interrupt':
 				if (!session.running) {
@@ -172,7 +203,7 @@ const server = createServer(async (req, res) => {
 
 server.listen(0, '127.0.0.1', () => {
 	const registration = join(home, 'web', 'instances', `${process.pid}.json`);
-	writeFileSync(registration, JSON.stringify({ pid: process.pid, port: server.address().port, workspace, started_at: Math.floor(Date.now() / 1000) }));
+	writeFileSync(registration, JSON.stringify({ pid: process.pid, port: server.address().port, workspace, started_at: Math.floor(Date.now() / 1000), fake: { rows: process.stdout.rows, cols: process.stdout.columns, shell: process.env.SHELL ?? null } }));
 	const bye = () => { rmSync(registration, { force: true }); process.exit(0); };
 	process.on('SIGTERM', bye);
 	process.on('SIGHUP', bye);

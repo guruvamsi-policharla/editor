@@ -27,7 +27,7 @@ import {
 } from '@editor/acp-client';
 import { changedSelections, groupsFromControls, modelChoices, signInGroup, SIGN_IN_GROUP } from './groups.js';
 import type { ChatEntry, ChatHistory } from './history.js';
-import { loginCommand, resolveLaunch } from './launch.js';
+import { HarnessMissingError, loginCommand, resolveLaunch } from './launch.js';
 import { HarnessModels } from './models.js';
 import { promptBlocks, type PromptReference } from './prompt.js';
 import { footer, isServerToolHiccup, permissionButtons, retryText, runningCommands, stoppedCommandsNote, turnFailureText, TurnRenderer } from './render.js';
@@ -279,6 +279,29 @@ export class HarnessChat implements vscode.Disposable {
 		} catch (e) {
 			void vscode.window.showErrorMessage(`Couldn't start the ${this.label} sign-in: ${errorMessage(e)}`);
 		}
+	}
+
+	/** Run the profile's install command in a terminal; when it's closed, start the harness again. */
+	install(): void {
+		const command = this.profile.installCommand;
+		if (!command) {
+			return;
+		}
+		const terminal = vscode.window.createTerminal({
+			name: `Install ${this.label}`,
+			iconPath: new vscode.ThemeIcon('cloud-download'),
+			shellPath: '/bin/sh',
+			shellArgs: ['-c', `${command}; echo; echo 'Close this terminal (press Enter) to go back to the chat.'; read _`],
+			cwd: this.cwd(),
+		});
+		terminal.show();
+		const sub = vscode.window.onDidCloseTerminal(t => {
+			if (t === terminal) {
+				sub.dispose();
+				void this.restart();
+			}
+		});
+		this.disposables.push(sub);
 	}
 
 	// ---------------------------------------------------------------------------------------------------------
@@ -1068,10 +1091,28 @@ export class HarnessChat implements vscode.Disposable {
 	private startError(e: unknown, stream: vscode.ChatResponseStream): vscode.ChatResult {
 		if (isAuthRequired(e)) {
 			this.needsLogin();
-			stream.warning(`You're not signed in to ${this.label}. Sign in once, in a terminal; then send your message again.`);
+			// The harness's own reason when it says more than "auth required" (tact: its sign-in was refused).
+			const reason = firstLine(errorMessage(e));
+			const said = reason && !/^(internal error: )?auth(entication)? required\.?$/i.test(reason) ? `\n\n${reason}` : '';
+			stream.warning(`You're not signed in to ${this.label}. Sign in once, in a terminal; then send your message again.${said}`);
 			stream.button({ command: 'agentChat.login', title: `Sign in to ${this.label}`, arguments: [this.profile.id] });
 			stream.button({ command: 'agentChat.restart', title: 'I\'ve signed in: try again', arguments: [this.profile.id] });
 			return { metadata: { error: 'auth' } };
+		}
+		if (e instanceof HarnessMissingError) {
+			const elsewhere = (this.profile.harness.fallbackPaths ?? []).map(p => `\`${p}\``).join(' or ');
+			this.env.log.warn(`[${this.profile.id}] not installed`);
+			stream.warning(`${this.label} isn't installed: \`${this.profile.harness.binary}\` isn't on PATH${elsewhere ? ` or at ${elsewhere}` : ''}.`);
+			if (this.profile.installCommand) {
+				stream.markdown(`Install it with\n\n\`\`\`sh\n${this.profile.installCommand}\n\`\`\`\n\nthen sign in with \`${this.profile.harness.binary} ${this.profile.login.args.join(' ')}\`. Or set \`agentChat.harnesses.${this.profile.id}.harnessPath\` to the one you have.`);
+			} else if (this.profile.install) {
+				stream.markdown(this.profile.install);
+			}
+			if (this.profile.installCommand) {
+				stream.button({ command: 'agentChat.install', title: `Install ${this.label} in a terminal`, arguments: [this.profile.id] });
+			}
+			stream.button({ command: 'agentChat.restart', title: 'I\'ve installed it: try again', arguments: [this.profile.id] });
+			return { metadata: { error: 'missing' } };
 		}
 		const message = errorMessage(e);
 		this.env.log.error(`[${this.profile.id}] start failed: ${message}`);
