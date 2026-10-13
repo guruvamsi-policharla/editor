@@ -1,4 +1,5 @@
-import { chmodSync, closeSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, mkdtempSync, readSync, writeSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,6 +32,10 @@ describe('entries → updates', () => {
 		const w = new EntryMapper('/w');
 		expect(w.map({ id: 1, revision: 1, parent: null, kind: 'tool', name: 'apply_patch', summary: 'src/a.rs, b.rs', state: 'succeeded', stats: { files: 2, additions: 3, deletions: 1 } }))
 			.toMatchObject([{ title: 'Edit src/a.rs, b.rs (+3 −1)', locations: [{ path: '/w/src/a.rs' }, { path: '/w/b.rs' }] }]);
+		// A Code Mode cell that turns out to be an apply_patch: the update carries the new kind and name.
+		expect(w.map({ id: 9, revision: 1, parent: null, kind: 'tool', name: 'exec', summary: '0 emitted items', state: 'running' })).toMatchObject([{ sessionUpdate: 'tool_call', kind: 'other', name: 'exec' }]);
+		expect(w.map({ id: 9, revision: 2, parent: null, kind: 'tool', name: 'apply_patch', summary: 'notes.txt', state: 'succeeded', stats: { files: 1, additions: 1, deletions: 0 } }))
+			.toEqual([{ sessionUpdate: 'tool_call_update', toolCallId: 't9', title: 'Edit notes.txt (+1 −0)', status: 'completed', kind: 'edit', name: 'apply_patch', locations: [{ path: '/w/notes.txt' }] }]);
 		expect(w.map({ id: 2, revision: 1, parent: null, kind: 'tool', name: 'exec_command', summary: 'make', state: 'failed', outcome: { exit_code: 2, tail: ['error: x'], summary: null } }))
 			.toMatchObject([{ title: 'make', content: [{ type: 'content', content: { type: 'text', text: 'error: x' } }] }]);
 		expect(new EntryMapper().map({ id: 0, revision: 1, parent: null, kind: 'user', text: 'hi' }, true)).toMatchObject([{ sessionUpdate: 'user_message_chunk', content: { text: 'hi' } }]);
@@ -90,10 +95,18 @@ describe('process helpers', () => {
 		});
 	});
 
-	it('opens a FIFO that never blocks and never ends', () => {
-		const fd = openFifo();
-		expect(fd).toBeTypeOf('number');
-		closeSync(fd!);
+	it('opens a FIFO without blocking; the read end ends when the adapter\'s write end closes', () => {
+		const fifo = openFifo()!;
+		writeSync(fifo.write, 'x');
+		closeSync(fifo.write);
+		const buf = Buffer.alloc(4);
+		expect(readSync(fifo.read, buf)).toBe(1);
+		expect(readSync(fifo.read, buf)).toBe(0); // EOF
+		closeSync(fifo.read);
+	});
+
+	it('watches the adapter: a watcher in the pty\'s shell ends tact once the adapter is gone', () => {
+		expect(ptyCommand(['tact'], 'darwin', undefined, 42).args[4]).toBe('stty rows 48 columns 160 2>/dev/null; (while kill -0 42 2>/dev/null && kill -0 $$ 2>/dev/null; do sleep 2; done; kill -TERM $$ 2>/dev/null) </dev/null >/dev/null 2>&1 & exec "$@"');
 	});
 
 	it('recognizes tact\'s "not signed in" exit, from its terminal output', () => {
@@ -186,6 +199,18 @@ describe('starting tact in the hidden pty', () => {
 			await tact.exited;
 		}
 	});
+
+	it('a tact whose adapter died (kill -9) doesn\'t stay behind', async () => {
+		const adapter = spawn('sleep', ['60']);
+		const tact = await launchTact({ tact: FAKE_TACT, cwd: ws, env: { TACT_HOME: home }, timeoutMs: 10_000, watch: adapter.pid });
+		adapter.kill('SIGKILL');
+		const exited = await Promise.race([tact.exited.then(() => true), new Promise(r => setTimeout(() => r(false), 8_000))]);
+		if (!exited) {
+			tact.kill();
+		}
+		expect(exited).toBe(true);
+		expect(() => process.kill(tact.pid, 0)).toThrow();
+	}, 15_000);
 });
 
 describe('TactAgent on a fake tact (hidden pty, web API)', () => {

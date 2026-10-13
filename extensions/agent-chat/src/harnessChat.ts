@@ -1091,16 +1091,21 @@ export class HarnessChat implements vscode.Disposable {
 	private startError(e: unknown, stream: vscode.ChatResponseStream): vscode.ChatResult {
 		if (isAuthRequired(e)) {
 			this.needsLogin();
-			stream.warning(`You're not signed in to ${this.label}. Sign in once, in a terminal; then send your message again.`);
+			// The harness's own reason when it says more than "auth required" (tact: its sign-in was refused).
+			const reason = firstLine(errorMessage(e));
+			const said = reason && !/^(internal error: )?auth(entication)? required\.?$/i.test(reason) ? `\n\n${reason}` : '';
+			stream.warning(`You're not signed in to ${this.label}. Sign in once, in a terminal; then send your message again.${said}`);
 			stream.button({ command: 'agentChat.login', title: `Sign in to ${this.label}`, arguments: [this.profile.id] });
 			stream.button({ command: 'agentChat.restart', title: 'I\'ve signed in: try again', arguments: [this.profile.id] });
 			return { metadata: { error: 'auth' } };
 		}
 		if (e instanceof HarnessMissingError) {
-			const where = [this.profile.harness.binary, ...(this.profile.harness.fallbackPaths ?? [])].map(p => `\`${p}\``).join(', ');
+			const elsewhere = (this.profile.harness.fallbackPaths ?? []).map(p => `\`${p}\``).join(' or ');
 			this.env.log.warn(`[${this.profile.id}] not installed`);
-			stream.warning(`${this.label} isn't installed: there's no ${where} on this machine.`);
-			if (this.profile.install) {
+			stream.warning(`${this.label} isn't installed: \`${this.profile.harness.binary}\` isn't on PATH${elsewhere ? ` or at ${elsewhere}` : ''}.`);
+			if (this.profile.installCommand) {
+				stream.markdown(`Install it with\n\n\`\`\`sh\n${this.profile.installCommand}\n\`\`\`\n\nthen sign in with \`${this.profile.harness.binary} ${this.profile.login.args.join(' ')}\`. Or set \`agentChat.harnesses.${this.profile.id}.harnessPath\` to the one you have.`);
+			} else if (this.profile.install) {
 				stream.markdown(this.profile.install);
 			}
 			if (this.profile.installCommand) {

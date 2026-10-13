@@ -22,6 +22,8 @@ export interface TactLaunch {
 	env?: Record<string, string | undefined>;
 	/** How long to wait for the web server (default 30 s). */
 	timeoutMs?: number;
+	/** tact is ended when this process is gone (default: the adapter's). */
+	watch?: number;
 }
 
 export interface TactInstance {
@@ -56,29 +58,34 @@ function quote(arg: string): string {
 
 /**
  * `script` with a pty for the command and no transcript file (util-linux on Linux, BSD on macOS). Inside, `/bin/sh`
- * sets the pty's size (a pty `script` creates without a terminal of its own is 0×0) and execs tact.
+ * sets the pty's size (a pty `script` creates without a terminal of its own is 0×0), starts a watcher that ends
+ * tact once the adapter (`watch`, a pid) is gone, so a killed adapter never leaves a tact behind, and execs tact.
  *
- * `script`'s own stdin is a FIFO the adapter holds open (`stdin: 'fifo'`); what's written to it reaches tact as
- * typed input, which is how the adapter answers tact's terminal queries (terminal.ts). Not a Node pipe: that's a
- * socket, and BSD `script` calls tcgetattr on its stdin and only tolerates ENOTTY ("tcgetattr/ioctl: Operation not
- * supported on socket"). Not /dev/null: BSD `script` then sends the pty an EOF (`^D`) and nobody can answer tact.
- * util-linux `script` runs the command with `$SHELL -c`, so it gets SHELL=/bin/sh (`env`) and the command puts the
- * user's SHELL back for tact. `fallback` is for when no FIFO can be made: a pipe on Linux, /dev/null on macOS.
+ * `script`'s own stdin is the read end of a FIFO whose only writer is the adapter (`stdin: 'fifo'`); what's written
+ * to it reaches tact as typed input, which is how the adapter answers tact's terminal queries (terminal.ts). Not a
+ * Node pipe: that's a socket, and BSD `script` calls tcgetattr on its stdin and only tolerates ENOTTY
+ * ("tcgetattr/ioctl: Operation not supported on socket"). Not /dev/null: BSD `script` then sends the pty an EOF
+ * (`^D`) and nobody can answer tact. util-linux `script` runs the command with `$SHELL -c`, so it gets SHELL=/bin/sh
+ * (`env`) and the command puts the user's SHELL back for tact. `fallback` is for when no FIFO can be made: a pipe on
+ * Linux, /dev/null on macOS.
  */
-export function ptyCommand(argv: readonly string[], platform = process.platform, shell?: string): { command: string; args: string[]; env: Record<string, string | undefined>; stdin: 'fifo'; fallback: 'pipe' | 'ignore' } {
+export function ptyCommand(argv: readonly string[], platform = process.platform, shell?: string, watch?: number): { command: string; args: string[]; env: Record<string, string | undefined>; stdin: 'fifo'; fallback: 'pipe' | 'ignore' } {
 	const size = `stty rows ${PTY_SIZE.rows} columns ${PTY_SIZE.cols} 2>/dev/null; `;
+	// In the subshell `$$` is still the shell that becomes tact.
+	const watcher = watch ? `(while kill -0 ${watch} 2>/dev/null && kill -0 $$ 2>/dev/null; do sleep 2; done; kill -TERM $$ 2>/dev/null) </dev/null >/dev/null 2>&1 & ` : '';
 	if (platform === 'darwin') {
-		return { command: 'script', args: ['-q', '/dev/null', '/bin/sh', '-c', `${size}exec "$@"`, 'sh', ...argv], env: {}, stdin: 'fifo', fallback: 'ignore' };
+		return { command: 'script', args: ['-q', '/dev/null', '/bin/sh', '-c', `${size}${watcher}exec "$@"`, 'sh', ...argv], env: {}, stdin: 'fifo', fallback: 'ignore' };
 	}
 	const restore = shell ? `SHELL=${quote(shell)} ` : 'unset SHELL; ';
-	return { command: 'script', args: ['-qfec', `${size}${restore}exec ${argv.map(quote).join(' ')}`, '/dev/null'], env: { SHELL: '/bin/sh' }, stdin: 'fifo', fallback: 'pipe' };
+	return { command: 'script', args: ['-qfec', `${size}${watcher}${restore}exec ${argv.map(quote).join(' ')}`, '/dev/null'], env: { SHELL: '/bin/sh' }, stdin: 'fifo', fallback: 'pipe' };
 }
 
 /**
- * A FIFO opened read-write (so opening never blocks and `script` never sees an EOF), for `script`'s stdin. Its path
- * is unlinked at once: the open descriptors keep it. Undefined where `mkfifo` isn't available.
+ * A FIFO for `script`'s stdin: its read end (for the child) and its write end (the adapter's, the only writer: when
+ * the adapter goes, `script` reads EOF). Opening read-write first means neither open blocks. The path is unlinked
+ * at once: the open descriptors keep the FIFO. Undefined where `mkfifo` isn't available.
  */
-export function openFifo(): number | undefined {
+export function openFifo(): { read: number; write: number } | undefined {
 	let dir: string | undefined;
 	try {
 		dir = mkdtempSync(join(tmpdir(), 'tact-acp-'));
@@ -86,7 +93,12 @@ export function openFifo(): number | undefined {
 		if (spawnSync('mkfifo', ['-m', '600', path]).status !== 0) {
 			return undefined;
 		}
-		return openSync(path, constants.O_RDWR);
+		const both = openSync(path, constants.O_RDWR);
+		try {
+			return { read: openSync(path, constants.O_RDONLY), write: openSync(path, constants.O_WRONLY) };
+		} finally {
+			closeSync(both);
+		}
 	} catch {
 		return undefined;
 	} finally {
@@ -148,22 +160,27 @@ async function start(o: TactLaunch): Promise<TactInstance> {
 	const home = tactHome(env);
 	const workspace = real(o.cwd);
 	const before = new Set(registrations(home).map(r => r.pid));
-	const pty = ptyCommand([o.tact, '--workspace', o.cwd, ...(o.args ?? [])], process.platform, env.SHELL);
+	const pty = ptyCommand([o.tact, '--workspace', o.cwd, ...(o.args ?? [])], process.platform, env.SHELL, o.watch ?? process.pid);
 	const fifo = openFifo();
 	let child: ChildProcess;
 	try {
 		// In the adapter's process group: when the editor ends the adapter's group, `script` goes too, and tact exits
 		// on the pty's hangup.
-		child = spawn(pty.command, pty.args, { cwd: o.cwd, env: { ...env, ...pty.env }, stdio: [fifo ?? pty.fallback, 'pipe', 'pipe'] });
+		child = spawn(pty.command, pty.args, { cwd: o.cwd, env: { ...env, ...pty.env }, stdio: [fifo?.read ?? pty.fallback, 'pipe', 'pipe'] });
 	} catch (e) {
-		if (fifo !== undefined) {
-			closeSync(fifo);
+		if (fifo) {
+			closeSync(fifo.write);
 		}
 		throw new TactStartError(`couldn't start tact: ${e instanceof Error ? e.message : String(e)}`, 'spawn');
+	} finally {
+		// The child has its own copy of the read end.
+		if (fifo) {
+			closeSync(fifo.read);
+		}
 	}
-	// tact's input: the FIFO (the child has its own copy of the descriptor), else the stdin pipe on Linux.
-	let input: ((data: string) => void) | undefined = fifo !== undefined
-		? data => writeSync(fifo, data)
+	// tact's input: the FIFO, else the stdin pipe on Linux.
+	let input: ((data: string) => void) | undefined = fifo
+		? data => writeSync(fifo.write, data)
 		: child.stdin ? data => child.stdin!.write(data) : undefined;
 	const responder = new TerminalResponder(data => {
 		try {
@@ -190,8 +207,8 @@ async function start(o: TactLaunch): Promise<TactInstance> {
 			}
 			exitCode = code;
 			input = undefined;
-			if (fifo !== undefined) {
-				closeSync(fifo);
+			if (fifo) {
+				closeSync(fifo.write);
 			}
 			resolve(code);
 		};

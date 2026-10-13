@@ -29,7 +29,7 @@ export type TurnEnd = { kind: 'completed' } | { kind: 'interrupted' } | { kind: 
 
 export class EntryMapper {
 	/** entry id → what was sent: text so far, or the tool's last state/title */
-	private readonly sent = new Map<number, { text?: string; state?: string; title?: string }>();
+	private readonly sent = new Map<number, { text?: string; state?: string; title?: string; name?: string }>();
 
 	/** Entries before this id belong to earlier turns (set at each prompt). */
 	baseline = -1;
@@ -74,10 +74,12 @@ export class EntryMapper {
 				const stats = (entry as { stats?: { additions: number; deletions: number } | null }).stats;
 				const title = kind === 'edit' ? `Edit ${summary}${stats ? ` (+${stats.additions} −${stats.deletions})` : ''}` : summary;
 				const state = String(entry.state);
-				if (prev && prev.state === state && prev.title === title) {
+				if (prev && prev.state === state && prev.title === title && prev.name === name) {
 					return [];
 				}
-				this.sent.set(entry.id, { state, title });
+				this.sent.set(entry.id, { state, title, name });
+				// A Code Mode cell (`exec`) becomes the tool it ran (`apply_patch`) in a later revision of the same entry.
+				const renamed = prev && prev.name !== name ? { kind, name } : {};
 				const status = TOOL_STATUS[state] ?? 'in_progress';
 				const rawInput = kind === 'execute' ? { command: summary } : {};
 				const paths = kind === 'edit' ? pathsIn(summary) : [];
@@ -86,7 +88,7 @@ export class EntryMapper {
 				const tail = (entry as { outcome?: { tail?: string[] } | null }).outcome?.tail;
 				const content: acp.ToolCallContent[] | undefined = tail?.length ? [{ type: 'content', content: { type: 'text', text: tail.join('\n') } }] : undefined;
 				return [prev
-					? { sessionUpdate: 'tool_call_update', toolCallId: `t${entry.id}`, title, status, ...(locations ? { locations } : {}), ...(content ? { content } : {}) }
+					? { sessionUpdate: 'tool_call_update', toolCallId: `t${entry.id}`, title, status, ...renamed, ...(locations ? { locations } : {}), ...(content ? { content } : {}) }
 					: { sessionUpdate: 'tool_call', toolCallId: `t${entry.id}`, title, kind, status, name, rawInput, ...(locations ? { locations } : {}), ...(content ? { content } : {}) }];
 			}
 			default:
