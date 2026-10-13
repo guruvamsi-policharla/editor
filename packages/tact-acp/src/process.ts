@@ -5,9 +5,10 @@
  * (`$TACT_HOME/web/instances/<pid>.json`: pid, port, workspace) plus the machine token (`$TACT_HOME/web/token`).
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { closeSync, constants, existsSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, writeSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PTY_SIZE, stripAnsi, TerminalResponder } from './terminal.js';
 
 export interface TactLaunch {
 	/** The tact binary. */
@@ -54,22 +55,48 @@ function quote(arg: string): string {
 }
 
 /**
- * `script` with a pty for the command and no transcript file (util-linux on Linux, BSD on macOS).
- * `stdin` is what `script` itself gets: BSD `script` calls tcgetattr on its stdin and only tolerates ENOTTY, so a
- * Node pipe (a socket) makes it exit with "tcgetattr/ioctl: Operation not supported on socket"; /dev/null is fine.
- * tact is driven through its web API, so nothing is ever typed into the pty.
+ * `script` with a pty for the command and no transcript file (util-linux on Linux, BSD on macOS). Inside, `/bin/sh`
+ * sets the pty's size (a pty `script` creates without a terminal of its own is 0×0) and execs tact.
+ *
+ * `script`'s own stdin is a FIFO the adapter holds open (`stdin: 'fifo'`); what's written to it reaches tact as
+ * typed input, which is how the adapter answers tact's terminal queries (terminal.ts). Not a Node pipe: that's a
+ * socket, and BSD `script` calls tcgetattr on its stdin and only tolerates ENOTTY ("tcgetattr/ioctl: Operation not
+ * supported on socket"). Not /dev/null: BSD `script` then sends the pty an EOF (`^D`) and nobody can answer tact.
+ * util-linux `script` runs the command with `$SHELL -c`, so it gets SHELL=/bin/sh (`env`) and the command puts the
+ * user's SHELL back for tact. `fallback` is for when no FIFO can be made: a pipe on Linux, /dev/null on macOS.
  */
-export function ptyCommand(argv: readonly string[], platform = process.platform): { command: string; args: string[]; stdin: 'ignore' | 'pipe' } {
-	return platform === 'darwin'
-		? { command: 'script', args: ['-q', '/dev/null', ...argv], stdin: 'ignore' }
-		: { command: 'script', args: ['-qfec', argv.map(quote).join(' '), '/dev/null'], stdin: 'pipe' };
+export function ptyCommand(argv: readonly string[], platform = process.platform, shell?: string): { command: string; args: string[]; env: Record<string, string | undefined>; stdin: 'fifo'; fallback: 'pipe' | 'ignore' } {
+	const size = `stty rows ${PTY_SIZE.rows} columns ${PTY_SIZE.cols} 2>/dev/null; `;
+	if (platform === 'darwin') {
+		return { command: 'script', args: ['-q', '/dev/null', '/bin/sh', '-c', `${size}exec "$@"`, 'sh', ...argv], env: {}, stdin: 'fifo', fallback: 'ignore' };
+	}
+	const restore = shell ? `SHELL=${quote(shell)} ` : 'unset SHELL; ';
+	return { command: 'script', args: ['-qfec', `${size}${restore}exec ${argv.map(quote).join(' ')}`, '/dev/null'], env: { SHELL: '/bin/sh' }, stdin: 'fifo', fallback: 'pipe' };
 }
 
-const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][\w]|\x1b[=>78]|[\x00-\x08\x0b-\x1f]/g;
-
-export function stripAnsi(text: string): string {
-	return text.replace(ANSI, '');
+/**
+ * A FIFO opened read-write (so opening never blocks and `script` never sees an EOF), for `script`'s stdin. Its path
+ * is unlinked at once: the open descriptors keep it. Undefined where `mkfifo` isn't available.
+ */
+export function openFifo(): number | undefined {
+	let dir: string | undefined;
+	try {
+		dir = mkdtempSync(join(tmpdir(), 'tact-acp-'));
+		const path = join(dir, 'stdin');
+		if (spawnSync('mkfifo', ['-m', '600', path]).status !== 0) {
+			return undefined;
+		}
+		return openSync(path, constants.O_RDWR);
+	} catch {
+		return undefined;
+	} finally {
+		if (dir) {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}
 }
+
+export { stripAnsi };
 
 interface Registration {
 	pid: number;
@@ -117,29 +144,60 @@ export function launchTact(o: TactLaunch): Promise<TactInstance> {
 }
 
 async function start(o: TactLaunch): Promise<TactInstance> {
-	const env = { ...process.env, ...o.env, TACT_WEB: 'true', TERM: process.env.TERM && process.env.TERM !== 'dumb' ? process.env.TERM : 'xterm-256color' };
+	const env: Record<string, string | undefined> = { ...process.env, ...o.env, TACT_WEB: 'true', TERM: process.env.TERM && process.env.TERM !== 'dumb' ? process.env.TERM : 'xterm-256color' };
 	const home = tactHome(env);
 	const workspace = real(o.cwd);
 	const before = new Set(registrations(home).map(r => r.pid));
-	const pty = ptyCommand([o.tact, '--workspace', o.cwd, ...(o.args ?? [])]);
+	const pty = ptyCommand([o.tact, '--workspace', o.cwd, ...(o.args ?? [])], process.platform, env.SHELL);
+	const fifo = openFifo();
 	let child: ChildProcess;
 	try {
 		// In the adapter's process group: when the editor ends the adapter's group, `script` goes too, and tact exits
 		// on the pty's hangup.
-		child = spawn(pty.command, pty.args, { cwd: o.cwd, env, stdio: [pty.stdin, 'pipe', 'pipe'] });
+		child = spawn(pty.command, pty.args, { cwd: o.cwd, env: { ...env, ...pty.env }, stdio: [fifo ?? pty.fallback, 'pipe', 'pipe'] });
 	} catch (e) {
+		if (fifo !== undefined) {
+			closeSync(fifo);
+		}
 		throw new TactStartError(`couldn't start tact: ${e instanceof Error ? e.message : String(e)}`, 'spawn');
 	}
+	// tact's input: the FIFO (the child has its own copy of the descriptor), else the stdin pipe on Linux.
+	let input: ((data: string) => void) | undefined = fifo !== undefined
+		? data => writeSync(fifo, data)
+		: child.stdin ? data => child.stdin!.write(data) : undefined;
+	const responder = new TerminalResponder(data => {
+		try {
+			input?.(data);
+		} catch {
+			// tact is gone
+		}
+	});
 	let output = '';
-	const keep = (chunk: Buffer) => {
-		output = (output + chunk.toString('utf8')).slice(-16_000);
-	};
-	child.stdout?.on('data', keep);
-	child.stderr?.on('data', keep);
+	child.stdout?.setEncoding('utf8');
+	child.stderr?.setEncoding('utf8');
+	child.stdout?.on('data', (chunk: string) => {
+		responder.feed(chunk);
+		output = (output + chunk).slice(-16_000);
+	});
+	child.stderr?.on('data', (chunk: string) => {
+		output = (output + chunk).slice(-16_000);
+	});
 	let exitCode: number | null | undefined;
 	const exited = new Promise<number | null>(resolve => {
-		child.on('exit', code => { exitCode = code; resolve(code); });
-		child.on('error', err => { output += `\n${err.message}`; exitCode = null; resolve(null); });
+		const done = (code: number | null) => {
+			if (exitCode !== undefined) {
+				return;
+			}
+			exitCode = code;
+			input = undefined;
+			if (fifo !== undefined) {
+				closeSync(fifo);
+			}
+			resolve(code);
+		};
+		// `close`, not `exit`: by then all of tact's output is in (the sign-in check reads it).
+		child.on('close', code => done(code));
+		child.on('error', err => { output += `\n${err.message}`; done(null); });
 	});
 	const kill = () => {
 		if (exitCode === undefined) {

@@ -1,12 +1,13 @@
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type * as acp from '@agentclientprotocol/sdk';
 import { TactAgent } from '../src/agent.js';
-import { configOptions, EntryMapper, pathsIn, promptText, toolDetail } from '../src/mapping.js';
-import { hasWebApi, ptyCommand, startFailure, stripAnsi } from '../src/process.js';
+import { configOptions, EntryMapper, isAuthError, pathsIn, promptText, toolDetail } from '../src/mapping.js';
+import { hasWebApi, launchTact, openFifo, ptyCommand, startFailure, stripAnsi } from '../src/process.js';
+import { reply, TerminalResponder } from '../src/terminal.js';
 import { parseEvent } from '../src/web.js';
 
 const FAKE_TACT = fileURLToPath(new URL('./fixtures/fake-tact.mjs', import.meta.url));
@@ -25,7 +26,13 @@ describe('entries → updates', () => {
 		expect(m.map({ id: 3, revision: 2, parent: null, kind: 'tool', name: 'exec_command', summary: 'make', state: 'failed' }))
 			.toMatchObject([{ sessionUpdate: 'tool_call_update', toolCallId: 't3', status: 'failed' }]);
 		expect(m.map({ id: 4, revision: 1, parent: null, kind: 'tool', name: 'apply_patch', summary: 'main.tex', state: 'succeeded' }))
-			.toMatchObject([{ kind: 'edit', status: 'completed', locations: [{ path: 'main.tex' }] }]);
+			.toMatchObject([{ kind: 'edit', status: 'completed', title: 'Edit main.tex', locations: [{ path: 'main.tex' }] }]);
+		// With the workspace: absolute paths; tact's patch stats in the title; a command's output tail as content.
+		const w = new EntryMapper('/w');
+		expect(w.map({ id: 1, revision: 1, parent: null, kind: 'tool', name: 'apply_patch', summary: 'src/a.rs, b.rs', state: 'succeeded', stats: { files: 2, additions: 3, deletions: 1 } }))
+			.toMatchObject([{ title: 'Edit src/a.rs, b.rs (+3 −1)', locations: [{ path: '/w/src/a.rs' }, { path: '/w/b.rs' }] }]);
+		expect(w.map({ id: 2, revision: 1, parent: null, kind: 'tool', name: 'exec_command', summary: 'make', state: 'failed', outcome: { exit_code: 2, tail: ['error: x'], summary: null } }))
+			.toMatchObject([{ title: 'make', content: [{ type: 'content', content: { type: 'text', text: 'error: x' } }] }]);
 		expect(new EntryMapper().map({ id: 0, revision: 1, parent: null, kind: 'user', text: 'hi' }, true)).toMatchObject([{ sessionUpdate: 'user_message_chunk', content: { text: 'hi' } }]);
 	});
 
@@ -41,17 +48,20 @@ describe('entries → updates', () => {
 
 	it('tool details: patch paths, command output', () => {
 		expect(pathsIn('*** Begin Patch\n*** Update File: a.tex\n*** Add File: b.tex\n*** End Patch')).toEqual(['a.tex', 'b.tex']);
+		expect(pathsIn('src/a.rs, b.rs')).toEqual(['src/a.rs', 'b.rs']);
+		expect(pathsIn('3 arguments')).toEqual([]);
 		expect(toolDetail({ arguments: { input: '*** Begin Patch\n*** Update File: a.tex\n' }, result: 'ok' })).toMatchObject({ locations: [{ path: 'a.tex' }] });
 		expect(toolDetail({ arguments: { cmd: 'ls' }, result: { output: 'x' } }).content).toEqual([{ type: 'content', content: { type: 'text', text: 'x' } }]);
 	});
 
-	it('settings → pickers: model only before the first turn, effort, Pro where offered, speed, and a "never asks" approvals row', () => {
+	it('settings → pickers: model only before the first turn, effort, Pro where offered, speed; no approvals (tact has none)', () => {
 		const catalog = { models: [{ id: 'sol', label: 'Sol', provider: 'openai', reasoning_modes: ['standard', 'pro'], effective_speeds: [], effort_fixed_after_start: false }], efforts: ['low' as const, 'high' as const], speeds: ['standard', 'fast'] };
 		const fresh = configOptions({ model: 'gpt-6.1-sol', effort: 'high', reasoning_mode: 'standard', speed: 'standard', started: false }, catalog);
-		expect(fresh.map(o => o.id)).toEqual(['model', 'effort', 'reasoning_mode', 'speed', 'approvals']);
+		expect(fresh.map(o => o.id)).toEqual(['model', 'effort', 'reasoning_mode', 'speed']);
 		expect(fresh[0]).toMatchObject({ category: 'model', currentValue: 'sol' });
 		const started = configOptions({ model: 'gpt-6.1-sol', effort: 'high', reasoning_mode: 'standard', speed: 'standard', started: true }, catalog);
-		expect(started.map(o => o.id)).toEqual(['model', 'effort', 'speed', 'approvals']);
+		expect(started.map(o => o.id)).toEqual(['model', 'effort', 'speed']);
+		expect(fresh.some(o => o.category === 'mode')).toBe(false);
 		expect((started[0] as { options: unknown[] }).options).toHaveLength(1);
 	});
 
@@ -62,15 +72,79 @@ describe('entries → updates', () => {
 });
 
 describe('process helpers', () => {
-	it('runs tact under script(1) with a pty', () => {
-		expect(ptyCommand(['tact', '--workspace', '/a b'], 'linux')).toEqual({ command: 'script', args: ['-qfec', `tact --workspace '/a b'`, '/dev/null'], stdin: 'pipe' });
-		expect(ptyCommand(['tact'], 'darwin')).toEqual({ command: 'script', args: ['-q', '/dev/null', 'tact'], stdin: 'ignore' });
+	it('runs tact under script(1) with a sized pty, script\'s stdin a FIFO', () => {
+		expect(ptyCommand(['tact', '--workspace', '/a b'], 'linux', '/usr/bin/fish')).toEqual({
+			command: 'script',
+			args: ['-qfec', `stty rows 48 columns 160 2>/dev/null; SHELL=/usr/bin/fish exec tact --workspace '/a b'`, '/dev/null'],
+			env: { SHELL: '/bin/sh' },
+			stdin: 'fifo',
+			fallback: 'pipe',
+		});
+		expect(ptyCommand(['tact'], 'linux', undefined).args[1]).toBe('stty rows 48 columns 160 2>/dev/null; unset SHELL; exec tact');
+		expect(ptyCommand(['tact', '--workspace', '/a b'], 'darwin')).toEqual({
+			command: 'script',
+			args: ['-q', '/dev/null', '/bin/sh', '-c', 'stty rows 48 columns 160 2>/dev/null; exec "$@"', 'sh', 'tact', '--workspace', '/a b'],
+			env: {},
+			stdin: 'fifo',
+			fallback: 'ignore',
+		});
+	});
+
+	it('opens a FIFO that never blocks and never ends', () => {
+		const fd = openFifo();
+		expect(fd).toBeTypeOf('number');
+		closeSync(fd!);
 	});
 
 	it('recognizes tact\'s "not signed in" exit, from its terminal output', () => {
 		const out = stripAnsi('\x1b[31mError:   × no ChatGPT credentials found at /x/auth.json and\n  │ OPENAI_API_KEY is not set; run `tact auth login` or set OPENAI_API_KEY\x1b[0m');
 		expect(startFailure(out, 1).kind).toBe('auth');
 		expect(startFailure('boom', 2).kind).toBe('exited');
+	});
+
+	it('strips every escape sequence from tact\'s output (CSI with private parameters, OSC, APC, DCS), and BSD script\'s ^D', () => {
+		// What tact printed on Guru's Mac: kitty keyboard push and kitty graphics query leaked through.
+		const mac = '^D\x1b[?1049h\x1b[?2004h\x1b[?25l\x1b[>7u\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c\x1b[16t\x1b[5n\x1b]7;file://localhost/w\x1b\\\x1b[?2026hError: boom\r\n\x1b[?2026l';
+		expect(stripAnsi(mac)).toBe('Error: boom\n');
+		expect(stripAnsi('a\x1bP>|x\x1b\\b\x1b(Bc\x1b=d\x1b]8;;http://x\x07e\x1b[38;2;1;2;3mf\x1b[<0;1;2M')).toBe('abcdef');
+		// A sequence cut off at the end of the kept output.
+		expect(stripAnsi('ok\x1b_Gi=31,s=1')).toBe('ok');
+		expect(stripAnsi('ok\x1b[>7')).toBe('ok');
+	});
+
+	it('answers tact\'s terminal queries as a terminal without kitty support would', () => {
+		expect(reply('\x1b[c')).toBe('\x1b[?62;22c');
+		expect(reply('\x1b[>c')).toBe('\x1b[>1;10;0c');
+		expect(reply('\x1b[5n')).toBe('\x1b[0n');
+		expect(reply('\x1b[6n')).toBe('\x1b[1;1R');
+		expect(reply('\x1b[16t')).toBe('\x1b[6;16;8t');
+		expect(reply('\x1b[18t')).toBe('\x1b[8;48;160t');
+		expect(reply('\x1b[14t')).toBe('\x1b[4;768;1280t');
+		expect(reply('\x1b[?2026$p')).toBe('\x1b[?2026;0$y');
+		expect(reply('\x1b]11;?\x1b\\')).toBe('\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\');
+		// Unanswered: the DA1 reply that follows tells tact these aren't supported.
+		expect(reply('\x1b[?u')).toBeUndefined();
+		expect(reply('\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\')).toBeUndefined();
+		// Not queries.
+		expect(reply('\x1b[>7u')).toBeUndefined();
+		expect(reply('\x1b[?1049h')).toBeUndefined();
+		expect(reply('\x1b[2J')).toBeUndefined();
+	});
+
+	it('finds queries across output chunks, in order', () => {
+		const out: string[] = [];
+		const r = new TerminalResponder(d => out.push(d));
+		r.feed('\x1b[?1049h\x1b[>7u\x1b_Gi=31,s=1,v=1,a=q');
+		r.feed(',t=d,f=24;AAAA\x1b\\\x1b');
+		r.feed('[c\x1b[16');
+		r.feed('t\x1b[5nhello');
+		expect(out.join('')).toBe('\x1b[?62;22c\x1b[6;16;8t\x1b[0n');
+	});
+
+	it('the auth errors tact reports at the first request', () => {
+		expect(isAuthError('Responses WebSocket handshake was rejected with HTTP 401')).toBe(true);
+		expect(isAuthError('access token has expired; refresh token was revoked')).toBe(true);
+		expect(isAuthError('HTTP 500 from the Responses API')).toBe(false);
 	});
 
 	it('parses SSE blocks, ignoring comments', () => {
@@ -81,6 +155,36 @@ describe('process helpers', () => {
 	it('checks for the web API in --help', () => {
 		expect(hasWebApi(FAKE_TACT)).toBe(true);
 		expect(hasWebApi('/bin/true')).toBe(false);
+	});
+});
+
+describe('starting tact in the hidden pty', () => {
+	let home: string;
+	let ws: string;
+	beforeEach(() => {
+		home = mkdtempSync(join(tmpdir(), 'tact-home-'));
+		ws = mkdtempSync(join(tmpdir(), 'tact-ws-'));
+	});
+	afterEach(() => {
+		rmSync(home, { recursive: true, force: true });
+		rmSync(ws, { recursive: true, force: true });
+	});
+
+	it('answers tact\'s start-up queries, so a tact that waits for them comes up at once (the macOS 30 s timeout)', async () => {
+		const started = Date.now();
+		const tact = await launchTact({ tact: FAKE_TACT, cwd: ws, env: { TACT_HOME: home, SHELL: '/bin/bash' }, timeoutMs: 10_000 });
+		try {
+			expect(Date.now() - started).toBeLessThan(5_000);
+			const registration = JSON.parse(readFileSync(join(home, 'web', 'instances', `${tact.pid}.json`), 'utf8')) as { fake: { rows: number; cols: number; shell: string } };
+			// A real terminal size, and the user's SHELL for tact (not the /bin/sh script(1) got).
+			expect(registration.fake).toEqual({ rows: 48, cols: 160, shell: '/bin/bash' });
+			// The output log has none of the escape sequences tact wrote.
+			expect(tact.output()).not.toMatch(/\x1b|\[>7u|_Gi=31|\^D/);
+			expect(tact.output()).toContain('fake tact TUI');
+		} finally {
+			tact.kill();
+			await tact.exited;
+		}
 	});
 });
 
@@ -114,7 +218,7 @@ describe('TactAgent on a fake tact (hidden pty, web API)', () => {
 		const a = agent();
 		const { sessionId, configOptions: options } = await a.newSession({ cwd: ws, mcpServers: [] });
 		expect(sessionId).toMatch(/[0-9a-f-]{36}/);
-		expect(options?.map(o => o.id)).toEqual(['model', 'effort', 'reasoning_mode', 'speed', 'approvals']);
+		expect(options?.map(o => o.id)).toEqual(['model', 'effort', 'reasoning_mode', 'speed']);
 		expect(options?.[0]).toMatchObject({ currentValue: 'gpt-6.1-sol', options: [{ value: 'gpt-6.1-sol', name: 'Sol' }, { value: 'gpt-6-luna', name: 'Luna' }] });
 		const res = await a.prompt({ sessionId, prompt: [{ type: 'text', text: 'hello' }] });
 		expect(res.stopReason).toBe('end_turn');
@@ -132,7 +236,7 @@ describe('TactAgent on a fake tact (hidden pty, web API)', () => {
 		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
 		await a.prompt({ sessionId, prompt: [{ type: 'text', text: 'edit main.tex' }] });
 		expect(readFileSync(join(ws, 'main.tex'), 'utf8')).toBe('edited\n');
-		expect(updates.find(u => u.update.sessionUpdate === 'tool_call')!.update).toMatchObject({ kind: 'edit', locations: [{ path: 'main.tex' }] });
+		expect(updates.find(u => u.update.sessionUpdate === 'tool_call')!.update).toMatchObject({ kind: 'edit', locations: [{ path: join(ws, 'main.tex') }] });
 	});
 
 	it('set_config_option → tact\'s set_* command; tact\'s settings event updates the options', async () => {
@@ -153,10 +257,26 @@ describe('TactAgent on a fake tact (hidden pty, web API)', () => {
 		expect((await turn).stopReason).toBe('cancelled');
 	});
 
-	it('an error entry (rejected API key) fails the prompt with tact\'s message', async () => {
+	it('a rejected sign-in at the first request (HTTP 401) is auth required, with tact\'s message', async () => {
 		const a = agent();
 		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
-		await expect(a.prompt({ sessionId, prompt: [{ type: 'text', text: 'fail' }] })).rejects.toMatchObject({ message: expect.stringContaining('HTTP 401') });
+		await expect(a.prompt({ sessionId, prompt: [{ type: 'text', text: 'fail' }] })).rejects.toMatchObject({ code: -32000, message: expect.stringContaining('HTTP 401') });
+	});
+
+	it('another error entry fails the prompt with tact\'s own message', async () => {
+		const a = agent();
+		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
+		await expect(a.prompt({ sessionId, prompt: [{ type: 'text', text: 'crash' }] })).rejects.toMatchObject({ code: -32603, message: 'stream disconnected before completion' });
+	});
+
+	it('Stop before tact started the turn still stops it', async () => {
+		const a = agent();
+		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
+		// "slow start": tact takes a moment before the turn runs (interrupt answers nothing_running until then).
+		const turn = a.prompt({ sessionId, prompt: [{ type: 'text', text: 'slow start' }] });
+		await new Promise(r => setTimeout(r, 30));
+		await a.cancel({ sessionId });
+		expect((await turn).stopReason).toBe('cancelled');
 	});
 
 	it('a tact that exited is started again (--resume) on the next prompt', async () => {

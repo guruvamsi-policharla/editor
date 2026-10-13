@@ -11,9 +11,9 @@
  *   fs/terminal methods are never called: tact edits files and runs commands itself.
  */
 import * as acp from '@agentclientprotocol/sdk';
-import { configOptions, EntryMapper, promptText, SET_COMMAND, settingsOf, toolDetail, type TactSettings, type TurnEnd } from './mapping.js';
+import { configOptions, EntryMapper, isAuthError, promptText, SET_COMMAND, settingsOf, toolDetail, type TactSettings, type TurnEnd } from './mapping.js';
 import { hasWebApi, launchTact, TactStartError, type TactInstance, type TactLaunch } from './process.js';
-import { TactWeb, type ModelCatalog, type SessionSnapshot, type StreamEvent, type WireEntry } from './web.js';
+import { TactApiError, TactWeb, type ModelCatalog, type SessionSnapshot, type StreamEvent, type WireEntry } from './web.js';
 
 export interface TactAgentOptions {
 	/** The tact binary (`TACT_BIN`, else `tact` on PATH). */
@@ -27,7 +27,7 @@ export interface TactAgentOptions {
 type Notify = (update: acp.SessionUpdate) => Promise<void>;
 
 class TactSession {
-	readonly mapper = new EntryMapper();
+	readonly mapper: EntryMapper;
 	settings!: TactSettings;
 	catalog: ModelCatalog | undefined;
 	private turn: { resolve: (end: TurnEnd) => void } | undefined;
@@ -38,7 +38,9 @@ class TactSession {
 	/** Set once the first snapshot is in: updates before it belong to the replay. */
 	private live = false;
 
-	constructor(readonly instance: TactInstance, readonly web: TactWeb, private readonly notify: Notify) { }
+	constructor(readonly instance: TactInstance, readonly web: TactWeb, private readonly notify: Notify, cwd: string) {
+		this.mapper = new EntryMapper(cwd);
+	}
 
 	start(): void {
 		void this.web.stream(e => this.onEvent(e), () => this.onEnd());
@@ -103,6 +105,11 @@ class TactSession {
 	}
 
 	private onEntry(entry: WireEntry): void {
+		if (this.stopping && this.turn && entry.id > this.mapper.baseline && entry.kind !== 'user') {
+			// Stop came before tact started the turn (`nothing_running`): now there's something to interrupt.
+			this.stopping = false;
+			void this.web.command('interrupt', { session: this.sessionId }).catch(() => undefined);
+		}
 		if (entry.kind === 'user' && !this.settings.started) {
 			this.settings = { ...this.settings, started: true };
 			void this.notify({ sessionUpdate: 'config_option_update', configOptions: this.options() });
@@ -124,6 +131,7 @@ class TactSession {
 			const res = await fetch(`${this.web.url}/api/sessions/${encodeURIComponent(this.sessionId!)}/entries/${id}`, { headers: { cookie: `tact=${this.instance.token}` } });
 			if (res.ok) {
 				const extra = toolDetail(await res.json() as { arguments?: unknown; result?: unknown });
+				extra.locations = extra.locations?.map(l => ({ ...l, path: this.mapper.absolute(l.path) }));
 				if (extra.content || extra.locations || extra.rawInput) {
 					await this.notify({ sessionUpdate: 'tool_call_update', toolCallId: `t${id}`, ...extra });
 				}
@@ -143,18 +151,35 @@ class TactSession {
 		}
 		this.mapper.baseline = this.mapper.lastId;
 		const rev = new Promise<number>(resolve => this.drafts.push({ text, resolve }));
-		await this.web.command('set_draft', { session: this.sessionId, text });
 		const end = new Promise<TurnEnd>(resolve => { this.turn = { resolve }; });
-		await this.web.command('submit', { session: this.sessionId, rev: await withTimeout(rev, 10_000, 'tact did not acknowledge the message') });
+		this.stopping = false;
 		try {
+			await this.web.command('set_draft', { session: this.sessionId, text });
+			const draft = await withTimeout(rev, 10_000, 'tact did not acknowledge the message');
+			if (this.stopping) {
+				// Stopped before it was sent: don't send it, and leave tact's composer empty.
+				await this.web.command('set_draft', { session: this.sessionId, text: '' }).catch(() => undefined);
+				return { kind: 'interrupted' };
+			}
+			await this.web.command('submit', { session: this.sessionId, rev: draft });
 			return await end;
 		} finally {
 			this.turn = undefined;
+			this.stopping = false;
 		}
 	}
 
+	/** Stop was asked for a turn tact hadn't started yet: interrupt it as soon as it has. */
+	private stopping = false;
+
 	async cancel(): Promise<void> {
-		await this.web.command('interrupt', { session: this.sessionId }).catch(() => undefined);
+		try {
+			await this.web.command('interrupt', { session: this.sessionId });
+		} catch (e) {
+			if (e instanceof TactApiError && e.code === 'nothing_running' && this.turn) {
+				this.stopping = true;
+			}
+		}
 	}
 
 	close(): void {
@@ -184,7 +209,7 @@ export class TactAgent {
 	private async start(cwd: string, resume: string | undefined, replay: boolean): Promise<TactSession> {
 		if (!this.checked && !this.options.skipCheck) {
 			if (!hasWebApi(this.options.tact)) {
-				throw failure(`This tact (${this.options.tact}) has no web API, which the editor talks to. It's on tact's main branch after v0.8.3: install it with \`cargo install --locked --git https://github.com/clabby/tact tact\`, or \`tact update\` once a release has it.`);
+				throw failure(`This tact (${this.options.tact}) has no web API, which the editor talks to. It's on tact's main branch after v0.8.3: update to a pre-release build with \`curl -fsSL https://tact.clab.by/install.sh | TACT_CHANNEL=pre-release sh\` (or \`tact update <commit>\` with a commit of tact's main branch), then restart tact from the chat.`);
 			}
 			this.checked = true;
 		}
@@ -206,7 +231,7 @@ export class TactAgent {
 			} else {
 				pending.push(u);
 			}
-		});
+		}, cwd);
 		session.start();
 		const snapshot = await withTimeout(session.ready, 20_000, 'tact did not send its session');
 		sessionId = snapshot.session;
@@ -258,6 +283,10 @@ export class TactAgent {
 		}
 		const end = await s.prompt(promptText(p.prompt));
 		if (end.kind === 'error') {
+			if (isAuthError(end.message)) {
+				// The chat then offers "Sign in to tact" (runs `tact auth login` in a terminal) and restarts tact after.
+				throw acp.RequestError.authRequired(undefined, `tact's sign-in was refused (${end.message}). Sign in again with \`tact auth login\`, or check OPENAI_API_KEY.`);
+			}
 			throw failure(end.message);
 		}
 		return { stopReason: end.kind === 'interrupted' ? 'cancelled' : 'end_turn' };

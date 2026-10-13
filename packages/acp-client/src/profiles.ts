@@ -68,6 +68,8 @@ export interface HarnessProfile {
 	readonly placeholderModel: { readonly id: string; readonly name: string };
 	/** How to install the harness, shown when its CLI isn't found. */
 	readonly install?: string;
+	/** A shell command line that installs it, offered to run in a terminal when its CLI isn't found. */
+	readonly installCommand?: string;
 	/** Standing permission rules (phase C rules editor). */
 	readonly rules?: { readonly format: 'claude-settings' | 'codex-execpolicy'; readonly files: readonly string[] };
 }
@@ -149,7 +151,8 @@ export const TACT: HarnessProfile = {
 	icon: 'rocket',
 	login: { args: ['auth', 'login'] },
 	placeholderModel: { id: 'gpt-6.1-sol', name: 'Sol' },
-	install: 'Install tact with `cargo install --locked --git https://github.com/clabby/tact tact` (the web API the editor uses is on tact\'s main branch, after v0.8.3), then sign in with `tact auth login`.',
+	installCommand: 'curl -fsSL https://tact.clab.by/install.sh | TACT_CHANNEL=pre-release sh',
+	install: 'Install tact with `curl -fsSL https://tact.clab.by/install.sh | TACT_CHANNEL=pre-release sh` (the editor needs tact\'s web API, which is on its main branch after v0.8.3: the pre-release channel has it), then sign in with `tact auth login`.',
 };
 
 export const BUILTIN_PROFILES: readonly HarnessProfile[] = [CLAUDE, CODEX, TACT];

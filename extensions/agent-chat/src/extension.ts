@@ -76,6 +76,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('agentChat.newCodex', () => open('codex', 'sidebar')),
 		vscode.commands.registerCommand('agentChat.newTact', () => open('tact', 'sidebar')),
 		vscode.commands.registerCommand('agentChat.login', async (id?: string) => chatFor(id ?? await pickHarness())?.login()),
+		vscode.commands.registerCommand('agentChat.install', async (id?: string) => chatFor(id ?? await pickHarness())?.install()),
 		vscode.commands.registerCommand('agentChat.restart', async (id?: string) => chatFor(id ?? await pickHarness())?.restart()),
 		vscode.commands.registerCommand('agentChat.showLog', () => log.show()),
 		// The status bar's Bypass permissions item: shows the chat that's in it.

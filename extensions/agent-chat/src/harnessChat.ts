@@ -27,7 +27,7 @@ import {
 } from '@editor/acp-client';
 import { changedSelections, groupsFromControls, modelChoices, signInGroup, SIGN_IN_GROUP } from './groups.js';
 import type { ChatEntry, ChatHistory } from './history.js';
-import { loginCommand, resolveLaunch } from './launch.js';
+import { HarnessMissingError, loginCommand, resolveLaunch } from './launch.js';
 import { HarnessModels } from './models.js';
 import { promptBlocks, type PromptReference } from './prompt.js';
 import { footer, isServerToolHiccup, permissionButtons, retryText, runningCommands, stoppedCommandsNote, turnFailureText, TurnRenderer } from './render.js';
@@ -279,6 +279,29 @@ export class HarnessChat implements vscode.Disposable {
 		} catch (e) {
 			void vscode.window.showErrorMessage(`Couldn't start the ${this.label} sign-in: ${errorMessage(e)}`);
 		}
+	}
+
+	/** Run the profile's install command in a terminal; when it's closed, start the harness again. */
+	install(): void {
+		const command = this.profile.installCommand;
+		if (!command) {
+			return;
+		}
+		const terminal = vscode.window.createTerminal({
+			name: `Install ${this.label}`,
+			iconPath: new vscode.ThemeIcon('cloud-download'),
+			shellPath: '/bin/sh',
+			shellArgs: ['-c', `${command}; echo; echo 'Close this terminal (press Enter) to go back to the chat.'; read _`],
+			cwd: this.cwd(),
+		});
+		terminal.show();
+		const sub = vscode.window.onDidCloseTerminal(t => {
+			if (t === terminal) {
+				sub.dispose();
+				void this.restart();
+			}
+		});
+		this.disposables.push(sub);
 	}
 
 	// ---------------------------------------------------------------------------------------------------------
@@ -1072,6 +1095,19 @@ export class HarnessChat implements vscode.Disposable {
 			stream.button({ command: 'agentChat.login', title: `Sign in to ${this.label}`, arguments: [this.profile.id] });
 			stream.button({ command: 'agentChat.restart', title: 'I\'ve signed in: try again', arguments: [this.profile.id] });
 			return { metadata: { error: 'auth' } };
+		}
+		if (e instanceof HarnessMissingError) {
+			const where = [this.profile.harness.binary, ...(this.profile.harness.fallbackPaths ?? [])].map(p => `\`${p}\``).join(', ');
+			this.env.log.warn(`[${this.profile.id}] not installed`);
+			stream.warning(`${this.label} isn't installed: there's no ${where} on this machine.`);
+			if (this.profile.install) {
+				stream.markdown(this.profile.install);
+			}
+			if (this.profile.installCommand) {
+				stream.button({ command: 'agentChat.install', title: `Install ${this.label} in a terminal`, arguments: [this.profile.id] });
+			}
+			stream.button({ command: 'agentChat.restart', title: 'I\'ve installed it: try again', arguments: [this.profile.id] });
+			return { metadata: { error: 'missing' } };
 		}
 		const message = errorMessage(e);
 		this.env.log.error(`[${this.profile.id}] start failed: ${message}`);

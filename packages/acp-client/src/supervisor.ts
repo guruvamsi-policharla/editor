@@ -135,9 +135,17 @@ export class AgentSupervisor {
 			}
 		}
 		this.setStatus({ state: 'starting' });
+		let launch: Awaited<ReturnType<SupervisorOptions['launch']>>;
+		try {
+			launch = await this.options.launch(message => this.setStatus({ state: 'starting', message }));
+		} catch (e) {
+			// Nothing ran (the harness isn't installed, say): not a crash, and the error goes up as it is, so the chat
+			// can tell what's missing.
+			this.setStatus({ state: 'failed', message: e instanceof Error ? e.message : String(e), stderr: '', crashes: this.crashes });
+			throw e;
+		}
 		let connection: AgentConnection | undefined;
 		try {
-			const launch = await this.options.launch(message => this.setStatus({ state: 'starting', message }));
 			if (this.disposed) {
 				throw new Error('disposed');
 			}
