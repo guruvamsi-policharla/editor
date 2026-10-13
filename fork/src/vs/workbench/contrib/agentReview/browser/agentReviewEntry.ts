@@ -358,6 +358,15 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 		}
 	}
 
+	/** Text the user typed inside the changes (see `userTextIn`), kept by the service across a reload or restart. */
+	userTextSpans(): { start: number; text: string }[] {
+		return this._changeService.userTextSpans();
+	}
+
+	restoreUserText(spans: readonly { start: number; text: string }[]): void {
+		this._changeService.restoreUserText(spans);
+	}
+
 	readonly changesCount: IObservable<number> = derived(r => this._changeService.diffInfo.read(r).changes.length);
 	readonly linesAdded: IObservable<number> = derived(r => this._changeService.diffInfo.read(r).changes.reduce((n, c) => n + c.modified.length, 0));
 	readonly linesRemoved: IObservable<number> = derived(r => this._changeService.diffInfo.read(r).changes.reduce((n, c) => n + c.original.length, 0));

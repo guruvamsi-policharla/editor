@@ -49,6 +49,18 @@
 	background-color: var(--vscode-button-secondaryHoverBackground);
 }
 
+/*
+ * Light themes: the dimming washed the secondary Undo (dark gray on light gray, 11px) out next to the solid Keep, so it
+ * looked disabled (#46). No dimming there, and Undo gets the theme's button border.
+ */
+.monaco-editor.vs .chat-diff-change-content-widget.agent-review-hunk-toolbar {
+	opacity: 1;
+}
+
+.monaco-editor.vs .chat-diff-change-content-widget.agent-review-hunk-toolbar .monaco-action-bar .action-item:not(.primary) .action-label:not(.codicon) {
+	box-shadow: inset 0 0 0 1px var(--vscode-button-border, rgba(0, 0, 0, 0.18));
+}
+
 .chat-diff-change-content-widget.agent-review-hunk-toolbar .monaco-action-bar .action-item.primary .action-label {
 	background-color: var(--vscode-button-background);
 	color: var(--vscode-button-foreground);
@@ -152,6 +164,13 @@
 .monaco-editor.hc-light .char-insert.agent-review-inserted-text {
 	border: none;
 	background-color: color-mix(in srgb, var(--vscode-diffEditor-insertedTextBorder) 35%, transparent);
+}
+
+/* Deleted words in a red row: struck (below) and tinted like inserted words, not a dashed box (#45). */
+.monaco-editor.hc-black .chat-editing-original-zone.agent-review-deleted-lines .view-line .char-delete,
+.monaco-editor.hc-light .chat-editing-original-zone.agent-review-deleted-lines .view-line .char-delete {
+	border: none;
+	background-color: color-mix(in srgb, var(--vscode-diffEditor-removedTextBorder) 35%, transparent);
 }
 
 .monaco-editor.hc-black .chat-editing-original-zone.agent-review-deleted-lines,

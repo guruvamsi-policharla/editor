@@ -850,7 +850,7 @@ index c0b57e5f..ccf58dbe 100644
  			};
  		}
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
-index 309562ec..12fb9489 100644
+index 309562ec..f1dafaae 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
 +++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
 @@ -20,7 +20,7 @@ import { LineRange } from '../../../../../editor/common/core/ranges/lineRange.js
@@ -916,7 +916,7 @@ index 309562ec..12fb9489 100644
  		@IEditorWorkerService private readonly _editorWorkerService: IEditorWorkerService,
  		@IAccessibilitySignalService private readonly _accessibilitySignalService: IAccessibilitySignalService,
  	) {
-@@ -334,13 +363,53 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -334,13 +363,93 @@ export class ChatEditingTextModelChangeService extends Disposable {
  	private _reset() {
  		this._originalToModifiedEdit = StringEdit.empty;
  		this._diffInfo.set(nullDocumentDiff, undefined);
@@ -959,6 +959,46 @@ index 309562ec..12fb9489 100644
 +			}
 +		}
 +		return parts.join(' ');
++	}
++
++	/**
++	 * The text tracked for `userTextIn` (offset in the modified model, text), so that it can outlive this service: a
++	 * window reload or restart builds a new one, and Undo of a change the user typed in stopped asking first (#43).
++	 */
++	public userTextSpans(): { start: number; text: string }[] {
++		if (this.modifiedModel.isDisposed()) {
++			return [];
++		}
++		return this._userTextDecorations
++			.map(id => this.modifiedModel.getDecorationRange(id))
++			.filter((r): r is Range => !!r && !r.isEmpty())
++			.map(r => ({ start: this.modifiedModel.getOffsetAt(r.getStartPosition()), text: this.modifiedModel.getValueInRange(r) }))
++			.filter(s => s.text.trim().length > 0);
++	}
++
++	/**
++	 * Track `spans` (from `userTextSpans`) again. A span is found at its offset, or, if the text moved since (an agent
++	 * write while the window was closed), at its nearest occurrence; text of a character or two only at its offset.
++	 */
++	public restoreUserText(spans: readonly { start: number; text: string }[]): void {
++		const value = this.modifiedModel.getValue();
++		const ranges: IModelDeltaDecoration[] = [];
++		for (const { start, text } of spans) {
++			let at = value.startsWith(text, start) ? start : -1;
++			if (at < 0 && text.trim().length >= 3) {
++				for (let i = value.indexOf(text); i !== -1; i = value.indexOf(text, i + 1)) {
++					if (at < 0 || Math.abs(i - start) < Math.abs(at - start)) {
++						at = i;
++					}
++				}
++			}
++			if (at >= 0) {
++				ranges.push({ range: Range.fromPositions(this.modifiedModel.getPositionAt(at), this.modifiedModel.getPositionAt(at + text.length)), options: ChatEditingTextModelChangeService._userTextDecorationOptions });
++			}
++		}
++		if (ranges.length) {
++			this._userTextDecorations.push(...this.modifiedModel.deltaDecorations([], ranges));
++		}
  	}
  
  	public async resetDocumentValues(newOriginal: string | ITextSnapshot | undefined, newModified: string | undefined): Promise<void> {
@@ -970,7 +1010,7 @@ index 309562ec..12fb9489 100644
  			didChange = true;
  		}
  		if (newModified !== undefined && this.modifiedModel.getValue() !== newModified) {
-@@ -357,7 +426,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -357,7 +466,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
  
  	private _mirrorEdits(event: IModelContentChangedEvent) {
  		const edit = offsetEditFromContentChanges(event.changes);
@@ -979,7 +1019,7 @@ index 309562ec..12fb9489 100644
  
  		if (this._isEditFromUs || isExternalEdit) {
  			const e_sum = this._originalToModifiedEdit;
-@@ -386,15 +455,21 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -386,15 +495,21 @@ export class ChatEditingTextModelChangeService extends Disposable {
  			const e_ai = this._originalToModifiedEdit;
  			const e_user = edit;
  
@@ -1003,7 +1043,7 @@ index 309562ec..12fb9489 100644
  			}
  
  			this._allEditsAreFromUs = false;
-@@ -406,11 +481,91 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -406,11 +521,91 @@ export class ChatEditingTextModelChangeService extends Disposable {
  		}
  	}
  
@@ -1097,7 +1137,7 @@ index 309562ec..12fb9489 100644
  		const edits: ISingleEditOperation[] = [];
  		for (const edit of change.innerChanges ?? []) {
  			const newText = this.modifiedModel.getValueInRange(edit.modifiedRange);
-@@ -426,9 +581,11 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -426,9 +621,11 @@ export class ChatEditingTextModelChangeService extends Disposable {
  	}
  
  	private async _undoHunk(change: DetailedLineRangeMapping): Promise<boolean> {
@@ -1110,7 +1150,7 @@ index 309562ec..12fb9489 100644
  		const edits: ISingleEditOperation[] = [];
  		for (const edit of change.innerChanges ?? []) {
  			const newText = this.originalModel.getValueInRange(edit.originalRange);
-@@ -487,6 +644,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -487,6 +684,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
  		}
  
  		if (this.state.get() !== ModifiedFileEntryState.Modified) {
@@ -1118,7 +1158,7 @@ index 309562ec..12fb9489 100644
  			this._diffInfo.set(nullDocumentDiff, undefined);
  			this._originalToModifiedEdit = StringEdit.empty;
  			return nullDocumentDiff;
-@@ -501,7 +659,10 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -501,7 +699,10 @@ export class ChatEditingTextModelChangeService extends Disposable {
  			{
  				ignoreTrimWhitespace: false, // NEVER ignore whitespace so that undo/accept edits are correct and so that all changes (1 of 2) are spelled out
  				computeMoves: false,
@@ -1130,7 +1170,7 @@ index 309562ec..12fb9489 100644
  			},
  			'advanced'
  		);
-@@ -513,6 +674,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -513,6 +714,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
  		// only update the diff if the documents didn't change in the meantime
  		if (this.modifiedModel.getVersionId() === docVersionNow && this.originalModel.getVersionId() === snapshotVersionNow) {
  			const diff2 = diff ?? nullDocumentDiff;

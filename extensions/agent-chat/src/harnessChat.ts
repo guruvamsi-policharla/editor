@@ -515,7 +515,8 @@ export class HarnessChat implements vscode.Disposable {
 	private publishModels(session?: AcpSession): void {
 		const model = this.controlsFor(session).find(c => c.placement === 'model');
 		if (model) {
-			this.env.models.set(this.type, modelChoices(model.choices.map(c => ({ id: c.id, name: c.name, ...(c.description ? { description: c.description } : {}) }))), model.current);
+			const { items, current } = modelChoices(model.choices.map(c => ({ id: c.id, name: c.name, ...(c.description ? { description: c.description } : {}) })), model.current);
+			this.env.models.set(this.type, items, current ?? model.current);
 		} else {
 			this.env.models.set(this.type, [{ ...this.profile.placeholderModel }], this.profile.placeholderModel.id);
 		}

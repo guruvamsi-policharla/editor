@@ -21,6 +21,7 @@ import { IModelService } from '../../../../editor/common/services/model.js';
 import { ITextModelContentProvider, ITextModelService } from '../../../../editor/common/services/resolverService.js';
 import { createDecorator, IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IUndoRedoService, UndoRedoElementType } from '../../../../platform/undoRedo/common/undoRedo.js';
 import { IChatEditReviewSession, IChatEditingService, IModifiedFileEntry } from '../../chat/common/editing/chatEditingService.js';
 import { SaveReason } from '../../../common/editor.js';
@@ -60,6 +61,14 @@ export interface IAgentReviewService {
 
 /** `code` of every undo element agent review pushes. */
 const UNDO_CODE_PREFIX = 'agentReview.';
+
+/** Workspace storage: per file, the text the user typed inside pending changes (see `AgentReviewEntry.userTextSpans`). */
+const USER_TEXT_KEY = 'agentReview.userText';
+/** Typed-text records of files with no entry are dropped after this long, and beyond this many. */
+const USER_TEXT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const USER_TEXT_MAX_FILES = 200;
+
+type UserTextRecord = { readonly spans: readonly { start: number; text: string }[]; readonly at: number };
 
 class AgentReviewSession extends Disposable implements IChatEditReviewSession {
 
@@ -123,6 +132,12 @@ export class AgentReviewService extends Disposable implements IAgentReviewServic
 	/** Files with review actions on their undo stacks, most recent last (for Ctrl+Z outside the editors). */
 	private readonly _undoUris: URI[] = [];
 	private readonly _undoHistoryListeners = this._register(new DisposableMap<string>());
+	/**
+	 * Text the user typed inside the changes of files that have no entry right now: read from the last window, or
+	 * kept when an entry went (the extension restarted, the last change was undone and may come back with Ctrl+Z).
+	 * A new entry for the file takes it back, so Undo of a change the user typed in still asks first (#43).
+	 */
+	private readonly _userText = new ResourceMap<UserTextRecord>();
 
 	constructor(
 		@IChatEditingService chatEditingService: IChatEditingService,
@@ -132,8 +147,11 @@ export class AgentReviewService extends Disposable implements IAgentReviewServic
 		@IUndoRedoService private readonly _undoRedoService: IUndoRedoService,
 		@ITextFileService private readonly _textFileService: ITextFileService,
 		@ILogService private readonly _logService: ILogService,
+		@IStorageService private readonly _storageService: IStorageService,
 	) {
 		super();
+		this._readUserText();
+		this._register(this._storageService.onWillSaveState(() => this._writeUserText()));
 		this._register(this._undoHistory);
 		this._register(this._undoHistory.onDidRemember(model => this._watchUndoOfUndo(model)));
 		this._register(chatEditingService.registerEditReviewSession(this._session));
@@ -196,6 +214,11 @@ export class AgentReviewService extends Disposable implements IAgentReviewServic
 			entry.originalModel.onWillDispose(() => this._recreateEntry(uri, entry)),
 		);
 		this._entries.set(uri, { entry, listener });
+		const typed = this._userText.get(uri);
+		if (typed) {
+			this._userText.delete(uri);
+			entry.restoreUserText(typed.spans);
+		}
 		this._session.entriesObs.set([...this._session.entriesObs.get(), entry], undefined);
 		return entry;
 	}
@@ -319,9 +342,42 @@ export class AgentReviewService extends Disposable implements IAgentReviewServic
 			return;
 		}
 		this._entries.delete(uri);
+		const spans = item.entry.userTextSpans();
+		if (spans.length) {
+			this._userText.set(uri, { spans, at: Date.now() });
+		}
 		this._session.entriesObs.set(this._session.entriesObs.get().filter(e => e !== item.entry), undefined);
 		item.listener.dispose();
 		item.entry.dispose();
+	}
+
+	private _readUserText(): void {
+		try {
+			const stored: Record<string, UserTextRecord> = JSON.parse(this._storageService.get(USER_TEXT_KEY, StorageScope.WORKSPACE, '{}'));
+			for (const [uri, record] of Object.entries(stored)) {
+				if (Array.isArray(record?.spans) && Date.now() - record.at < USER_TEXT_MAX_AGE_MS) {
+					this._userText.set(URI.parse(uri), record);
+				}
+			}
+		} catch (err) {
+			this._logService.warn('[agentReview] could not read the text typed inside changes', err);
+		}
+	}
+
+	private _writeUserText(): void {
+		const all: [URI, UserTextRecord][] = [...this._userText];
+		for (const [uri, { entry }] of this._entries) {
+			const spans = entry.userTextSpans();
+			if (spans.length) {
+				all.push([uri, { spans, at: Date.now() }]);
+			}
+		}
+		const kept = all.filter(([, r]) => Date.now() - r.at < USER_TEXT_MAX_AGE_MS).sort((a, b) => b[1].at - a[1].at).slice(0, USER_TEXT_MAX_FILES);
+		if (kept.length) {
+			this._storageService.store(USER_TEXT_KEY, JSON.stringify(Object.fromEntries(kept.map(([uri, r]) => [uri.toString(), r]))), StorageScope.WORKSPACE, StorageTarget.MACHINE);
+		} else {
+			this._storageService.remove(USER_TEXT_KEY, StorageScope.WORKSPACE);
+		}
 	}
 
 	clear(): void {

@@ -738,3 +738,197 @@ index 0037844f..b86c1241 100644
  	test('keeps responses visible when a filter excludes their requests', async () => {
  		const { disposables, model, viewModel, widget } = createWidget({
  			filter: { filter: item => isResponseVM(item) },
+diff --git a/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/toolInvocationParts/chatTerminalToolProgressPart.ts b/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/toolInvocationParts/chatTerminalToolProgressPart.ts
+index ceed10c8..e5c51ea5 100644
+--- a/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/toolInvocationParts/chatTerminalToolProgressPart.ts
++++ b/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/toolInvocationParts/chatTerminalToolProgressPart.ts
+@@ -73,9 +73,11 @@ const MIN_OUTPUT_ROWS = 1;
+ const MAX_OUTPUT_ROWS = 10;
+ 
+ /**
+- * Maximum number of characters to display in the command title before truncating.
++ * Maximum number of characters to display in the command title before truncating. The title is one line that ends in
++ * an ellipsis where the row is too narrow (CSS), so this only bounds what goes into the DOM: cutting at 50 characters
++ * ended a command mid-operator ("… | head -40 &...") and the pill wrapped that tail onto a second line (#49).
+  */
+-const MAX_COMMAND_TITLE_LENGTH = 50;
++const MAX_COMMAND_TITLE_LENGTH = 500;
+ 
+ /**
+  * Maximum number of retries when waiting for terminal output to appear.
+@@ -578,7 +580,7 @@ export class ChatTerminalToolProgressPart extends BaseChatToolInvocationSubPart
+ 	private _createCollapsibleWrapper(contentElement: HTMLElement, commandText: string, toolInvocation: IChatToolInvocation | IChatToolInvocationSerialized, context: IChatContentPartRenderContext): HTMLElement {
+ 		// truncate header when it's too long
+ 		const truncatedCommand = commandText.length > MAX_COMMAND_TITLE_LENGTH
+-			? commandText.substring(0, MAX_COMMAND_TITLE_LENGTH) + '...'
++			? commandText.substring(0, MAX_COMMAND_TITLE_LENGTH) + '…'
+ 			: commandText;
+ 
+ 		// A background terminal may have its tool invocation marked complete (the
+@@ -1955,13 +1957,24 @@ export class ChatTerminalThinkingCollapsibleWrapper extends ChatCollapsibleConte
+ 				: this._isComplete
+ 					? localize('chat.terminal.ran.prefix', "Ran ")
+ 					: localize('chat.terminal.running.prefix', "Running ");
+-		labelElement.appendChild(document.createTextNode(prefixText));
++		// Same one-line layout: "Ran" stays whole and the command ends in an ellipsis where the row is too narrow,
++		// instead of the pill wrapping mid-command (#49). The full command is the row's hover.
++		this.domNode.classList.add('chat-terminal-single-line');
++		const row = dom.$('span.chat-terminal-label-flex');
++		const prefixElement = dom.$('span.chat-terminal-label-prefix');
++		prefixElement.textContent = prefixText.trimEnd();
++		const commandElement = dom.$('span.chat-terminal-command');
+ 		const codeElement = document.createElement('code');
+ 		codeElement.textContent = this._commandText;
+-		labelElement.appendChild(codeElement);
++		commandElement.appendChild(codeElement);
++		row.appendChild(prefixElement);
++		row.appendChild(commandElement);
+ 		if (suffixText) {
+-			labelElement.appendChild(document.createTextNode(suffixText));
++			const suffixElement = dom.$('span.chat-terminal-label-suffix');
++			suffixElement.textContent = suffixText;
++			row.appendChild(suffixElement);
+ 		}
++		labelElement.appendChild(row);
+ 	}
+ 
+ 	private _updateShowLink(): void {
+diff --git a/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/media/chatTerminalToolProgressPart.css b/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/media/chatTerminalToolProgressPart.css
+index e39285f0..c85928e3 100644
+--- a/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/media/chatTerminalToolProgressPart.css
++++ b/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/media/chatTerminalToolProgressPart.css
+@@ -12,20 +12,22 @@
+  * Intention label layout: when the model supplies an intention, the collapsed
+  * terminal-row header shows "<intention> <command>" as two flex cells on a
+  * single non-wrapping line. Each cell ellipsis-truncates and they split the
+- * available width equally when the content overflows the row.
++ * available width equally when the content overflows the row. Without an
++ * intention ("Ran <command>", chat-terminal-single-line) the verb stays whole
++ * and the command cell truncates.
+  */
+-.chat-terminal-thinking-collapsible.chat-terminal-has-intention .chat-used-context-label {
++.chat-terminal-thinking-collapsible:is(.chat-terminal-has-intention, .chat-terminal-single-line) .chat-used-context-label {
+ 	width: 100%;
+ 	max-width: 100%;
+ }
+ 
+-.chat-terminal-thinking-collapsible.chat-terminal-has-intention .monaco-button.monaco-icon-button {
++.chat-terminal-thinking-collapsible:is(.chat-terminal-has-intention, .chat-terminal-single-line) .monaco-button.monaco-icon-button {
+ 	width: fit-content;
+ 	max-width: 100%;
+ 	justify-content: flex-start;
+ }
+ 
+-.chat-terminal-thinking-collapsible.chat-terminal-has-intention .monaco-button-mdlabel {
++.chat-terminal-thinking-collapsible:is(.chat-terminal-has-intention, .chat-terminal-single-line) .monaco-button-mdlabel {
+ 	flex: 1 1 auto;
+ 	min-width: 0;
+ }
+@@ -55,6 +57,7 @@
+ 	white-space: nowrap;
+ }
+ 
++.chat-terminal-label-flex > .chat-terminal-label-prefix,
+ .chat-terminal-label-flex > .chat-terminal-label-suffix {
+ 	flex: 0 0 auto;
+ 	white-space: nowrap;
+diff --git a/src/vs/workbench/contrib/chat/test/browser/widget/chatContentParts/chatTerminalToolProgressPart.test.ts b/src/vs/workbench/contrib/chat/test/browser/widget/chatContentParts/chatTerminalToolProgressPart.test.ts
+index 03fedbf6..0e814484 100644
+--- a/src/vs/workbench/contrib/chat/test/browser/widget/chatContentParts/chatTerminalToolProgressPart.test.ts
++++ b/src/vs/workbench/contrib/chat/test/browser/widget/chatContentParts/chatTerminalToolProgressPart.test.ts
+@@ -134,6 +134,69 @@ suite('ChatTerminalToolProgressPart Auto-Expand Logic', () => {
+ 				hasShowLink: false,
+ 			});
+ 		});
++
++		test('a long command is one line that ends in an ellipsis, not cut mid-command and wrapped (#49)', () => {
++			const container = mainWindow.document.createElement('div');
++			container.style.width = '260px';
++			const context: IChatContentPartRenderContext = {
++				element: Object.assign(Object.create(null) as IChatResponseViewModel, {
++					id: 'response',
++					sessionResource: URI.parse('chat-session://test/session'),
++				}),
++				elementIndex: 0,
++				container,
++				content: [],
++				contentIndex: 0,
++				inlineTextModels: Object.create(InlineTextModelCollection.prototype) as InlineTextModelCollection,
++				editorPool: Object.create(EditorPool.prototype) as EditorPool,
++				codeBlockStartIndex: 0,
++				treeStartIndex: 0,
++				diffEditorPool: Object.create(DiffEditorPool.prototype) as DiffEditorPool,
++				currentWidth: observableValue('testWidth', 260),
++				onDidChangeVisibility: Event.None,
++			};
++			const command = 'ls sections && cat sections/intro.tex | head -40 && wc -w sections/*.tex';
++			const instantiationService = workbenchInstantiationService(undefined, store);
++			const part = store.add(instantiationService.createInstance(
++				ChatTerminalThinkingCollapsibleWrapper,
++				command,
++				undefined,
++				false,
++				mainWindow.document.createElement('div'),
++				context,
++				false,
++				true,
++				false,
++				false,
++				undefined,
++			));
++			container.appendChild(part.domNode);
++			mainWindow.document.body.appendChild(container);
++			store.add(toDisposable(() => container.remove()));
++
++			const prefix = part.domNode.querySelector<HTMLElement>('.chat-terminal-label-flex > .chat-terminal-label-prefix');
++			const cell = part.domNode.querySelector<HTMLElement>('.chat-terminal-label-flex > .chat-terminal-command');
++			const code = cell?.querySelector('code');
++			assert.ok(prefix && cell && code);
++			const style = mainWindow.getComputedStyle(cell);
++			assert.deepStrictEqual({
++				prefix: prefix.textContent,
++				code: code.textContent,
++				whiteSpace: style.whiteSpace,
++				textOverflow: style.textOverflow,
++				truncated: cell.scrollWidth > cell.clientWidth,
++				oneLine: cell.getBoundingClientRect().height < 2 * parseFloat(mainWindow.getComputedStyle(code).lineHeight || '20') || cell.getBoundingClientRect().height < 30,
++				prefixOnSameLine: Math.abs(prefix.getBoundingClientRect().top - cell.getBoundingClientRect().top) < 8,
++			}, {
++				prefix: 'Ran',
++				code: command,
++				whiteSpace: 'nowrap',
++				textOverflow: 'ellipsis',
++				truncated: true,
++				oneLine: true,
++				prefixOnSameLine: true,
++			});
++		});
+ 	});
+ 
+ 	test('fast command without data should not auto-expand (finishes before timeout)', () => runWithFakedTimers({ useFakeTimers: true }, async () => {
+diff --git a/src/vs/workbench/contrib/chat/browser/widget/input/modelPicker/modelPickerWidget.ts b/src/vs/workbench/contrib/chat/browser/widget/input/modelPicker/modelPickerWidget.ts
+index ac63192d..8b90f952 100644
+--- a/src/vs/workbench/contrib/chat/browser/widget/input/modelPicker/modelPickerWidget.ts
++++ b/src/vs/workbench/contrib/chat/browser/widget/input/modelPicker/modelPickerWidget.ts
+@@ -589,7 +589,9 @@ export class ModelPickerWidget extends Disposable {
+ 			? (this._selectedModel.metadata.statusIcon ?? (this._delegate.getPresentationOptions().showModelIcon ? getModelPickerIcon(this._selectedModel) : undefined))
+ 			: undefined;
+ 		const compact = this._compact?.get() ?? false;
+-		if (modelIcon && !noModelsAvailable) {
++		// A narrow input drops the icon, not the name: the icon alone (the same sparkle for every model) didn't say
++		// which model a chat would use (#47). The name ends in an ellipsis only if it still doesn't fit.
++		if (modelIcon && !noModelsAvailable && !compact) {
+ 			nameChildren.push(renderIcon(modelIcon));
+ 		}
+ 		// A "Models" placeholder (no badge) beats a dead-end label while unavailable — the hover and
+@@ -603,9 +605,7 @@ export class ModelPickerWidget extends Disposable {
+ 				: genericNoModels
+ 					? localize('chat.modelPicker.noModels', "No models available")
+ 					: (name ?? localize('chat.modelPicker.auto', "Auto"));
+-		if (!compact || !modelIcon || noModelsAvailable) {
+-			nameChildren.push(dom.$('span.chat-input-picker-label', undefined, modelLabel));
+-		}
++		nameChildren.push(dom.$('span.chat-input-picker-label', undefined, modelLabel));
+ 		if (this._badgeIcon) {
+ 			nameChildren.push(this._badgeIcon);
+ 		}
