@@ -34,6 +34,8 @@ export interface TactInstance {
 	token: string;
 	/** What tact printed to its terminal (ANSI stripped), the last few KB. */
 	output(): string;
+	/** Calls `listener` with each chunk tact writes to its terminal (raw, with escapes), until the returned function. */
+	onOutput(listener: (chunk: string) => void): () => void;
 	readonly exited: Promise<number | null>;
 	kill(): void;
 }
@@ -200,11 +202,13 @@ async function start(o: TactLaunch): Promise<TactInstance> {
 		}
 	});
 	let output = '';
+	const listeners = new Set<(chunk: string) => void>();
 	child.stdout?.setEncoding('utf8');
 	child.stderr?.setEncoding('utf8');
 	child.stdout?.on('data', (chunk: string) => {
 		responder.feed(chunk);
 		output = (output + chunk).slice(-16_000);
+		listeners.forEach(l => l(chunk));
 	});
 	child.stderr?.on('data', (chunk: string) => {
 		output = (output + chunk).slice(-16_000);
@@ -234,6 +238,10 @@ async function start(o: TactLaunch): Promise<TactInstance> {
 		}
 	};
 	const text = () => stripAnsi(output);
+	const onOutput = (listener: (chunk: string) => void) => {
+		listeners.add(listener);
+		return () => { listeners.delete(listener); };
+	};
 
 	const deadline = Date.now() + (o.timeoutMs ?? 30_000);
 	while (Date.now() < deadline) {
@@ -245,7 +253,7 @@ async function start(o: TactLaunch): Promise<TactInstance> {
 		if (found && existsSync(tokenFile)) {
 			claimed.add(found.pid);
 			void exited.then(() => claimed.delete(found.pid));
-			return { pid: found.pid, port: found.port, token: readFileSync(tokenFile, 'utf8').trim(), output: text, exited, kill };
+			return { pid: found.pid, port: found.port, token: readFileSync(tokenFile, 'utf8').trim(), output: text, onOutput, exited, kill };
 		}
 		await new Promise(resolve => setTimeout(resolve, 100));
 	}

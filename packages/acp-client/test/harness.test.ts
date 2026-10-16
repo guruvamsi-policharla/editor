@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-	AgentSupervisor, CLAUDE, HarnessClient, isAuthRequired, optionValues, PermissionBroker, PermissionNotRestoredError, textOf, withValues,
+	AgentSupervisor, CLAUDE, errorMessage, HarnessClient, isAuthRequired, optionValues, PermissionBroker, PermissionNotRestoredError, textOf, withValues,
 	type AgentStatus, type Change, type HarnessProfile, type PermissionPrompt,
 } from '../src/index.js';
 
@@ -374,5 +374,14 @@ describe('HarnessClient on a fake agent', () => {
 			await expect(supervisor.get()).rejects.toBe(missing);
 		}
 		expect(supervisor.status).toMatchObject({ state: 'failed', message: 'tact isn\'t installed', crashes: 0 });
+	});
+});
+
+describe('errorMessage', () => {
+	it('an adapter\'s uncaught error ("Internal error" with details) shows the details', () => {
+		expect(errorMessage({ code: -32603, message: 'Internal error', data: { details: 'unknown session' } })).toBe('Internal error: unknown session');
+		expect(errorMessage({ code: -32603, message: 'refused the request: unknown session (set_draft: HTTP 404 unknown_session)' })).toBe('refused the request: unknown session (set_draft: HTTP 404 unknown_session)');
+		expect(errorMessage({ code: -32603, message: 'Internal error', data: { message: 'boom' } })).toBe('Internal error: boom');
+		expect(errorMessage({ code: -32603, message: 'Internal error', data: {} })).toBe('Internal error');
 	});
 });

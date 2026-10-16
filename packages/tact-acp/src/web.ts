@@ -42,8 +42,13 @@ export interface StreamEvent {
 }
 
 export class TactApiError extends Error {
-	constructor(readonly status: number, readonly code: string, message: string) {
+	constructor(readonly status: number, readonly code: string, message: string, readonly request?: string) {
 		super(message);
+	}
+
+	/** tact's message with what was asked and how it answered: `unknown session (set_draft: HTTP 404 unknown_session)`. */
+	describe(): string {
+		return `${this.message} (${this.request ? `${this.request}: ` : ''}HTTP ${this.status}${this.code && this.code !== 'failed' ? ` ${this.code}` : ''})`;
 	}
 }
 
@@ -64,24 +69,34 @@ export class TactWeb {
 		return { cookie: `tact=${this.token}`, ...(post ? { 'x-tact': '1', 'content-type': 'application/json' } : {}) };
 	}
 
-	private async post<T>(path: string, body: unknown): Promise<T> {
+	/** `request`: the command or query, for errors. A refusal is a `TactApiError` with tact's code and message. */
+	private async post<T>(path: string, body: unknown, request: string): Promise<T> {
 		const res = await fetch(`${this.base}${path}`, { method: 'POST', headers: this.headers(true), body: JSON.stringify(body), signal: this.abort.signal });
 		const text = await res.text();
-		const json = text ? JSON.parse(text) as unknown : {};
+		let json: unknown = {};
+		try {
+			json = text ? JSON.parse(text) : {};
+		} catch {
+			// not JSON (a proxy's page, a crash): its text is the message
+			json = { message: text.trim().slice(0, 500) || undefined };
+			if (res.ok) {
+				throw new TactApiError(res.status, 'invalid_response', `tact's answer isn't JSON: ${text.trim().slice(0, 200)}`, request);
+			}
+		}
 		if (!res.ok) {
-			const err = json as { code?: string; message?: string };
-			throw new TactApiError(res.status, err.code ?? 'failed', err.message ?? `HTTP ${res.status}`);
+			const err = json as { code?: string; message?: string; error?: string };
+			throw new TactApiError(res.status, err.code ?? 'failed', err.message ?? err.error ?? `HTTP ${res.status}`, request);
 		}
 		return json as T;
 	}
 
 	command<T = Record<string, never>>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-		return this.post<T>('/api/cmd', { client: this.client, cmd, ...(args ? { args } : {}) });
+		return this.post<T>('/api/cmd', { client: this.client, cmd, ...(args ? { args } : {}) }, cmd);
 	}
 
 	/** Queries without arguments (`models`) are unit variants: no `args` at all. */
 	query<T>(query: string, args?: Record<string, unknown>): Promise<T> {
-		return this.post<T>('/api/query', { query, ...(args ? { args } : {}) });
+		return this.post<T>('/api/query', { query, ...(args ? { args } : {}) }, query);
 	}
 
 	async instance(): Promise<{ protocol_version: number; workspace: string }> {
