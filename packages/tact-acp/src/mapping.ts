@@ -217,3 +217,27 @@ export function isAuthError(message: string): boolean {
 export function errorText(message: string): string {
 	return message.replace(/:\s*\{[\s\S]*$/, '').trim() || message;
 }
+
+const START_FAILED = 'Could not start a new session: ';
+
+/**
+ * The last "Could not start a new session: …" notification in tact's raw terminal output (tact shows why a model
+ * change failed only there, in a box drawn line by line), as one line of text.
+ */
+export function sessionStartFailure(raw: string): string | undefined {
+	const at = raw.lastIndexOf(START_FAILED);
+	if (at < 0) {
+		return undefined;
+	}
+	const end = raw.indexOf('╯', at);
+	if (end < 0) {
+		return undefined;
+	}
+	// Each wrapped line is placed with a cursor move: a space between them.
+	const text = raw.slice(at + START_FAILED.length, end)
+		.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, ' ')
+		.replace(/[│╭╮╰╯─]/g, ' ')
+		.replace(/\s+/g, ' ')
+		.trim();
+	return text || undefined;
+}

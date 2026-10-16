@@ -6,10 +6,10 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type * as acp from '@agentclientprotocol/sdk';
 import { TactAgent } from '../src/agent.js';
-import { configOptions, EntryMapper, isAuthError, pathsIn, promptText, toolDetail } from '../src/mapping.js';
+import { configOptions, EntryMapper, isAuthError, pathsIn, promptText, sessionStartFailure, toolDetail } from '../src/mapping.js';
 import { hasWebApi, launchTact, openFifo, ptyCommand, startFailure, stripAnsi } from '../src/process.js';
 import { reply, TerminalResponder } from '../src/terminal.js';
-import { parseEvent } from '../src/web.js';
+import { parseEvent, TactApiError } from '../src/web.js';
 
 const FAKE_TACT = fileURLToPath(new URL('./fixtures/fake-tact.mjs', import.meta.url));
 chmodSync(FAKE_TACT, 0o755);
@@ -282,6 +282,74 @@ describe('TactAgent on a fake tact (hidden pty, web API)', () => {
 		expect(res.configOptions.find(o => o.id === 'effort')!.currentValue).toBe('low');
 	});
 
+	it('a model picked on a new chat and sent at once: tact\'s new session gets the message; the chat keeps its id, also after a restart', async () => {
+		writeFileSync(join(home, 'config.toml'), '[claude]\nenabled = true\n');
+		const a = agent();
+		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
+		const set = await a.setConfigOption({ sessionId, configId: 'model', value: 'claude-opus-5-5' });
+		expect(set.configOptions.find(o => o.id === 'model')!.currentValue).toBe('claude-opus-5-5');
+		expect((await a.prompt({ sessionId, prompt: [{ type: 'text', text: 'hello' }] })).stopReason).toBe('end_turn');
+		expect(text('agent_message_chunk')).toBe('echo: hello');
+		expect(updates.every(u => u.sessionId === sessionId)).toBe(true);
+		const tactId = JSON.parse(readFileSync(join(home, 'editor-sessions.json'), 'utf8'))[sessionId];
+		expect(tactId).toMatch(/^claude-/);
+
+		a.dispose();
+		await new Promise(r => setTimeout(r, 200));
+		updates = [];
+		const b = agent();
+		const loaded = await b.loadSession({ sessionId, cwd: ws, mcpServers: [] });
+		expect(loaded.configOptions?.find(o => o.id === 'model')!.currentValue).toBe('claude-opus-5-5');
+		expect(text('user_message_chunk')).toBe('hello');
+	});
+
+	it('a reasoning mode change also waits for the new session', async () => {
+		const a = agent();
+		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
+		const set = await a.setConfigOption({ sessionId, configId: 'reasoning_mode', value: 'pro' });
+		expect(set.configOptions.find(o => o.id === 'reasoning_mode')!.currentValue).toBe('pro');
+		expect((await a.prompt({ sessionId, prompt: [{ type: 'text', text: 'hi' }] })).stopReason).toBe('end_turn');
+	});
+
+	it('a model tact can\'t start a session on: the change fails with the reason tact shows in its terminal', async () => {
+		writeFileSync(join(home, 'config.toml'), '[claude]\nenabled = true\n');
+		const a = agent();
+		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
+		await expect(a.setConfigOption({ sessionId, configId: 'model', value: 'claude-broken' }))
+			.rejects.toMatchObject({ code: -32603, message: 'couldn\'t start the Broken session: invalid task request: Claude API-key authentication requires an Anthropic API key' });
+		// The old session is still there.
+		expect((await a.prompt({ sessionId, prompt: [{ type: 'text', text: 'hi' }] })).stopReason).toBe('end_turn');
+	});
+
+	it('a request tact refuses fails with its message, status and code, not a bare "Internal error"', async () => {
+		const a = agent();
+		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
+		await expect(a.setConfigOption({ sessionId, configId: 'model', value: 'claude-opus-5-5' }))
+			.rejects.toMatchObject({ code: -32603, message: 'refused the request: claude-opus-5-5 is not available (set_model: HTTP 400 invalid_request)' });
+	});
+
+	it('a Claude key added to tact\'s config while it runs: reload_config, and the Claude models are offered', async () => {
+		const a = agent();
+		const { sessionId, configOptions } = await a.newSession({ cwd: ws, mcpServers: [] });
+		const models = (o: acp.SessionConfigOption[] | null | undefined) => ((o?.find(x => x.id === 'model') as { options: { value: string }[] }).options).map(x => x.value);
+		expect(models(configOptions)).toEqual(['gpt-6.1-sol', 'gpt-6-luna']);
+		writeFileSync(join(home, 'config.toml'), '[claude]\nenabled = true\n');
+		const update = () => updates.find(u => u.sessionId === sessionId && u.update.sessionUpdate === 'config_option_update' && models(u.update.configOptions).includes('claude-opus-5-5'));
+		for (let i = 0; i < 50 && !update(); i++) {
+			await new Promise(r => setTimeout(r, 50));
+		}
+		expect(update()).toBeDefined();
+	});
+
+	it('a model the catalog didn\'t have at start: the catalog is fetched again before the change', async () => {
+		const a = new TactAgent({ tact: FAKE_TACT, env: { TACT_HOME: home }, watchConfig: false }, async (sessionId, update) => { updates.push({ sessionId, update }); });
+		agents.push(a);
+		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
+		writeFileSync(join(home, 'config.toml'), '[claude]\nenabled = true\n');
+		const set = await a.setConfigOption({ sessionId, configId: 'model', value: 'claude-opus-5-5' });
+		expect(set.configOptions.find(o => o.id === 'model')!.currentValue).toBe('claude-opus-5-5');
+	});
+
 	it('cancel interrupts the turn: stopReason cancelled', async () => {
 		const a = agent();
 		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
@@ -349,5 +417,19 @@ describe('TactAgent on a fake tact (hidden pty, web API)', () => {
 		expect(updates.every(u => u.sessionId === one.sessionId)).toBe(true);
 		expect(text('user_message_chunk')).toBe('remember me');
 		expect(text('agent_message_chunk')).toBe('echo: remember me');
+	});
+});
+
+describe('tact\'s errors', () => {
+	it('reads the reason of a failed session start out of tact\'s terminal output', () => {
+		const raw = '\x1b[?2026h\x1b[1;1H\x1b[;m╭──────╮\x1b[2;1H│\x1b[2;4H\x1b[1mCould not start a new session: invalid task request: Claude API-key authentication requires an Anthropic API key (sk-ant-api... or sk-ant-usr-...); Claude\x1b[2;160H\x1b[22m│\x1b[3;1H│\x1b[3;58H\x1b[1msubscription and OAuth tokens are not supported\x1b[3;160H\x1b[22m│\x1b[4;1H╰──────╯\x1b[44;12H';
+		expect(sessionStartFailure(raw)).toBe('invalid task request: Claude API-key authentication requires an Anthropic API key (sk-ant-api... or sk-ant-usr-...); Claude subscription and OAuth tokens are not supported');
+		expect(sessionStartFailure('Could not start a new session: half')).toBeUndefined();
+		expect(sessionStartFailure('nothing')).toBeUndefined();
+	});
+
+	it('a web API refusal names the request, HTTP status and code', () => {
+		expect(new TactApiError(404, 'unknown_session', 'unknown session', 'set_draft').describe()).toBe('unknown session (set_draft: HTTP 404 unknown_session)');
+		expect(new TactApiError(500, 'failed', 'HTTP 500').describe()).toBe('HTTP 500 (HTTP 500)');
 	});
 });

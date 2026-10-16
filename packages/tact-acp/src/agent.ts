@@ -6,13 +6,19 @@
  * - `session/prompt`: `set_draft`, then `submit` with the draft's revision; entry upserts stream back as updates
  *   until the turn's `turn_completed` / `interrupted` / `error` entry.
  * - `session/cancel` → `interrupt`. Config options → `set_model` / `set_effort` / `set_reasoning_mode` /
- *   `set_speed`; tact's `settings` events → `config_option_update`.
+ *   `set_speed`; tact's `settings` events → `config_option_update`. A model (or reasoning mode) change before the
+ *   first turn makes tact replace the session with a new one (a new id, `claude-…` for Claude): the ACP session
+ *   keeps its id and follows tact's (remembered in `$TACT_HOME/editor-sessions.json`, for `--resume`).
+ * - `$TACT_HOME/config.toml` changes (a Claude key added) → `reload_config` and the `models` catalog again.
+ * - tact's refusals (HTTP status, code, message) are the ACP errors' messages, never a bare "Internal error".
  * - tact not signed in (it exits at start) → `authRequired`. tact never asks for permission, and the client's
  *   fs/terminal methods are never called: tact edits files and runs commands itself.
  */
+import { mkdirSync, readFileSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import * as acp from '@agentclientprotocol/sdk';
-import { configOptions, EntryMapper, isAuthError, promptText, SET_COMMAND, settingsOf, toolDetail, type TactSettings, type TurnEnd } from './mapping.js';
-import { hasWebApi, launchTact, TactStartError, type TactInstance, type TactLaunch } from './process.js';
+import { configOptions, EntryMapper, isAuthError, promptText, sessionStartFailure, SET_COMMAND, settingsOf, toolDetail, type TactSettings, type TurnEnd } from './mapping.js';
+import { hasWebApi, launchTact, tactHome, TactStartError, type TactInstance, type TactLaunch } from './process.js';
 import { TactApiError, TactWeb, type ModelCatalog, type SessionSnapshot, type StreamEvent, type WireEntry } from './web.js';
 
 export interface TactAgentOptions {
@@ -22,6 +28,8 @@ export interface TactAgentOptions {
 	launch?: (o: TactLaunch) => Promise<TactInstance>;
 	/** Skip the `--web` capability check (tests). */
 	skipCheck?: boolean;
+	/** Watch tact's config.toml for changes (default true). */
+	watchConfig?: boolean;
 }
 
 type Notify = (update: acp.SessionUpdate) => Promise<void>;
@@ -37,6 +45,12 @@ class TactSession {
 	alive = true;
 	/** Set once the first snapshot is in: updates before it belong to the replay. */
 	private live = false;
+	/** While tact replaces the session (a model change): called with the new session's snapshot. */
+	private replacing: (() => void) | undefined;
+	/** A model change in flight: a prompt waits for tact's new session. */
+	private switching: Promise<void> | undefined;
+	/** After tact replaced the session: its new id. */
+	onReplaced: ((tactId: string) => void) | undefined;
 
 	constructor(readonly instance: TactInstance, readonly web: TactWeb, private readonly notify: Notify, cwd: string) {
 		this.mapper = new EntryMapper(cwd);
@@ -56,13 +70,21 @@ class TactSession {
 		this.turn?.resolve({ kind: 'error', message: `tact exited.\n${this.instance.output().trim().split('\n').slice(-5).join('\n')}` });
 	}
 
-	/** The session this tact process runs (its active one). */
+	/** tact's session this process runs (its active one); after a model change, not the ACP session's id. */
 	sessionId: string | undefined;
 
 	private onEvent(e: StreamEvent): void {
 		const data = e.data as Record<string, unknown>;
 		if (e.event === 'snapshot') {
 			const s = data as unknown as SessionSnapshot;
+			if (this.replacing && s.session !== this.sessionId) {
+				// tact closed the old session and made this one active: follow it.
+				this.sessionId = s.session;
+				this.settings = settingsOf(s);
+				this.onReplaced?.(s.session);
+				this.replacing();
+				return;
+			}
 			if (!this.sessionId || this.sessionId === s.session) {
 				this.sessionId = s.session;
 				this.settings = settingsOf(s);
@@ -145,23 +167,109 @@ class TactSession {
 		return configOptions(this.settings, this.catalog);
 	}
 
+	/** A web API command; tact's refusal is an ACP error with its message, status and code. */
+	private async command(cmd: string, args?: Record<string, unknown>): Promise<void> {
+		try {
+			await this.web.command(cmd, args);
+		} catch (e) {
+			throw apiFailure(e);
+		}
+	}
+
+	/** Sets a picker: tact's `set_*` command. A model change waits for the session tact starts for it. */
+	async set(configId: string, value: string): Promise<void> {
+		const set = SET_COMMAND[configId];
+		if (!set) {
+			return;
+		}
+		await this.switching?.catch(() => undefined);
+		if (configId === 'model' && !this.catalog?.models.some(m => m.id === value)) {
+			// A model the catalog didn't have when tact started (a key added since): tact's config, again.
+			await this.refreshCatalog(true);
+		}
+		const args = { session: this.sessionId, [set.arg]: value };
+		const current = this.options().find(o => o.id === configId)?.currentValue;
+		if ((configId === 'model' || configId === 'reasoning_mode') && !this.settings.started && current !== value) {
+			const label = configId === 'model' ? this.catalog?.models.find(m => m.id === value)?.label ?? value : `${value} reasoning`;
+			const switching = this.switching = this.replace(set.cmd, args, `the ${label} session`);
+			try {
+				await switching;
+			} finally {
+				if (this.switching === switching) {
+					this.switching = undefined;
+				}
+			}
+			return;
+		}
+		await this.command(set.cmd, args);
+		this.settings = { ...this.settings, [configId]: value };
+	}
+
+	/**
+	 * Sends a command after which tact replaces the session (`set_model`, `set_reasoning_mode`) and waits for the new
+	 * one. If tact can't start it (a bad Claude key), it says why only in its terminal, and keeps the old session.
+	 */
+	private async replace(cmd: string, args: Record<string, unknown>, what: string): Promise<void> {
+		const old = this.sessionId;
+		let raw = '';
+		const off = this.instance.onOutput(chunk => { raw = (raw + chunk).slice(-32_000); });
+		const replaced = new Promise<boolean>(resolve => { this.replacing = () => resolve(true); });
+		const within = (ms: number) => Promise.race([replaced, new Promise<boolean>(resolve => setTimeout(() => resolve(false), ms))]);
+		try {
+			await this.command(cmd, args);
+			const deadline = Date.now() + 60_000;
+			while (!await within(400)) {
+				if (!this.alive) {
+					throw failure(`exited while starting ${what}.`);
+				}
+				if (Date.now() > deadline) {
+					throw failure(`didn't start ${what} within 60 s.`);
+				}
+				// While tact starts the new session the old one refuses commands ("the session is still starting"); if it
+				// takes one again and tact hasn't switched, the start failed.
+				const back = await this.web.command('set_draft', { session: old, text: '' }).then(() => true, () => false);
+				if (back && !await within(300)) {
+					const why = sessionStartFailure(raw);
+					throw failure(`couldn't start ${what}${why ? `: ${why}` : ' (it didn\'t say why)'}`);
+				}
+			}
+		} finally {
+			off();
+			this.replacing = undefined;
+		}
+	}
+
+	/** The `models` catalog again (after `reload_config`, for a key added to tact's config); the pickers if it changed. */
+	async refreshCatalog(reload: boolean): Promise<void> {
+		if (reload) {
+			await this.web.command('reload_config').catch(() => undefined);
+		}
+		const catalog = await this.web.query<ModelCatalog>('models').catch(() => undefined);
+		if (catalog && JSON.stringify(catalog) !== JSON.stringify(this.catalog)) {
+			this.catalog = catalog;
+			await this.notify({ sessionUpdate: 'config_option_update', configOptions: this.options() });
+		}
+	}
+
 	async prompt(text: string): Promise<TurnEnd> {
 		if (!this.alive) {
 			throw failure('tact is no longer running for this chat');
 		}
+		// A model change still starting tact's new session: the message goes to that one.
+		await this.switching;
 		this.mapper.baseline = this.mapper.lastId;
 		const rev = new Promise<number>(resolve => this.drafts.push({ text, resolve }));
 		const end = new Promise<TurnEnd>(resolve => { this.turn = { resolve }; });
 		this.stopping = false;
 		try {
-			await this.web.command('set_draft', { session: this.sessionId, text });
+			await this.command('set_draft', { session: this.sessionId, text });
 			const draft = await withTimeout(rev, 10_000, 'tact did not acknowledge the message');
 			if (this.stopping) {
 				// Stopped before it was sent: don't send it, and leave tact's composer empty.
 				await this.web.command('set_draft', { session: this.sessionId, text: '' }).catch(() => undefined);
 				return { kind: 'interrupted' };
 			}
-			await this.web.command('submit', { session: this.sessionId, rev: draft });
+			await this.command('submit', { session: this.sessionId, rev: draft });
 			return await end;
 		} finally {
 			this.turn = undefined;
@@ -190,10 +298,12 @@ class TactSession {
 }
 
 export class TactAgent {
+	/** ACP session id → its tact */
 	private readonly sessions = new Map<string, TactSession>();
 	/** session id → its workspace (to restart a tact that exited) */
 	private readonly cwds = new Map<string, string>();
 	private checked = false;
+	private watcher: FSWatcher | undefined;
 
 	constructor(private readonly options: TactAgentOptions, private readonly notify: (sessionId: string, update: acp.SessionUpdate) => Promise<void>) { }
 
@@ -206,7 +316,66 @@ export class TactAgent {
 		};
 	}
 
-	private async start(cwd: string, resume: string | undefined, replay: boolean): Promise<TactSession> {
+	private env(): Record<string, string | undefined> {
+		return { ...process.env, ...this.options.env };
+	}
+
+	/** ACP session id → tact's session, for chats whose session tact replaced (a model change). */
+	private aliasFile(): string {
+		return join(tactHome(this.env()), 'editor-sessions.json');
+	}
+
+	private aliases(): Record<string, string> {
+		try {
+			return JSON.parse(readFileSync(this.aliasFile(), 'utf8')) as Record<string, string>;
+		} catch {
+			return {};
+		}
+	}
+
+	private alias(acpId: string, tactId: string): void {
+		try {
+			const file = this.aliasFile();
+			mkdirSync(dirname(file), { recursive: true });
+			writeFileSync(file, JSON.stringify({ ...this.aliases(), [acpId]: tactId }, undefined, '\t'));
+		} catch {
+			// Then a reload resumes the chat's first (empty) session: the chat still works, on tact's default model.
+		}
+	}
+
+	/** tact's config changed (a Claude key added): each tact reloads it, and the pickers get its models now. */
+	private watchConfig(): void {
+		if (this.watcher || this.options.watchConfig === false) {
+			return;
+		}
+		const env = this.env();
+		const file = env.TACT_CONFIG?.trim() || join(tactHome(env), 'config.toml');
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			// The directory: editors replace the file (a new inode) when they save.
+			this.watcher = watch(dirname(file), (_event, name) => {
+				if (name && name.toString() !== basename(file)) {
+					return;
+				}
+				clearTimeout(timer);
+				timer = setTimeout(() => {
+					for (const s of this.sessions.values()) {
+						if (s.alive) {
+							void s.refreshCatalog(true);
+						}
+					}
+				}, 300);
+			});
+			this.watcher.on('error', () => undefined);
+			this.watcher.unref();
+		} catch {
+			// no such directory yet: nothing to watch
+		}
+	}
+
+	/** `id`: the ACP session to start tact on (`--resume` with tact's session for it). */
+	private async start(cwd: string, id: string | undefined, replay: boolean): Promise<TactSession> {
+		const resume = id ? this.aliases()[id] ?? id : undefined;
 		if (!this.checked && !this.options.skipCheck) {
 			if (!hasWebApi(this.options.tact)) {
 				throw failure(`This tact (${this.options.tact}) has no web API, which the editor talks to. It's on tact's main branch after v0.8.3: update to a pre-release build with \`curl -fsSL https://tact.clab.by/install.sh | TACT_CHANNEL=pre-release sh\` (or \`tact update <commit>\` with a commit of tact's main branch), then restart tact from the chat.`);
@@ -222,8 +391,9 @@ export class TactAgent {
 			}
 			throw failure(e instanceof Error ? e.message : String(e));
 		}
+		this.watchConfig();
 		const web = new TactWeb(instance.port, instance.token);
-		let sessionId = resume;
+		let sessionId = id;
 		const pending: acp.SessionUpdate[] = [];
 		const session: TactSession = new TactSession(instance, web, async u => {
 			if (sessionId) {
@@ -234,7 +404,8 @@ export class TactAgent {
 		}, cwd);
 		session.start();
 		const snapshot = await withTimeout(session.ready, 20_000, 'tact did not send its session');
-		sessionId = snapshot.session;
+		const acpId = sessionId = id ?? snapshot.session;
+		session.onReplaced = tactId => this.alias(acpId, tactId);
 		session.catalog = await web.query<ModelCatalog>('models').catch(() => undefined);
 		for (const entry of snapshot.entries) {
 			const updates = session.mapper.map(entry, true);
@@ -244,8 +415,8 @@ export class TactAgent {
 				}
 			}
 		}
-		this.sessions.set(sessionId, session);
-		this.cwds.set(sessionId, cwd);
+		this.sessions.set(acpId, session);
+		this.cwds.set(acpId, cwd);
 		return session;
 	}
 
@@ -259,6 +430,7 @@ export class TactAgent {
 
 	async newSession(p: acp.NewSessionRequest): Promise<acp.NewSessionResponse> {
 		const s = await this.start(p.cwd, undefined, false);
+		// tact's first session: the chat's id from now on, whatever tact's session becomes.
 		return { sessionId: s.sessionId!, configOptions: s.options() };
 	}
 
@@ -298,11 +470,7 @@ export class TactAgent {
 
 	async setConfigOption(p: acp.SetSessionConfigOptionRequest): Promise<acp.SetSessionConfigOptionResponse> {
 		const s = this.session(p.sessionId);
-		const set = SET_COMMAND[p.configId];
-		if (set) {
-			await s.web.command(set.cmd, { session: s.sessionId, [set.arg]: p.value });
-			s.settings = { ...s.settings, [p.configId]: p.value };
-		}
+		await s.set(p.configId, String(p.value));
 		return { configOptions: s.options() };
 	}
 
@@ -313,6 +481,8 @@ export class TactAgent {
 	}
 
 	dispose(): void {
+		this.watcher?.close();
+		this.watcher = undefined;
 		for (const s of this.sessions.values()) {
 			s.close();
 		}
@@ -326,6 +496,17 @@ function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> 
 		p.finally(() => clearTimeout(timer)),
 		new Promise<never>((_, reject) => { timer = setTimeout(() => reject(failure(message)), ms); }),
 	]);
+}
+
+/** A refused web API request (or tact unreachable) as an ACP error with tact's own words. */
+function apiFailure(e: unknown): acp.RequestError {
+	if (e instanceof acp.RequestError) {
+		return e;
+	}
+	if (e instanceof TactApiError) {
+		return failure(`refused the request: ${e.describe()}`);
+	}
+	return failure(`couldn't reach tact's web API: ${e instanceof Error ? e.message : String(e)}`);
 }
 
 /** An error whose message is just tact's (no "Internal error:" prefix). */

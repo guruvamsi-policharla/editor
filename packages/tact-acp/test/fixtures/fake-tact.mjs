@@ -9,6 +9,11 @@
 //   "slow start"   the turn starts 300 ms after submit (interrupt says nothing_running until then)
 //   anything else  reasoning, a streamed answer ("echo: <text>") in two revisions, an exec_command tool
 // Env: FAKE_TACT_NOCREDS=1 → exits like tact without credentials. Sessions persist in $TACT_HOME/fake-sessions.
+// Like tact, a model (or reasoning mode) change before the first turn replaces the session: 150 ms later the old one
+// is `closed` and a new one (`claude-<uuid>` for Claude) is active; commands meanwhile are refused ("still
+// starting"). The model `claude-broken` fails to start: tact keeps the old session and draws the reason in a box.
+// The catalog has the Claude models when $TACT_HOME/config.toml has a [claude] section (read at start and at
+// `reload_config`).
 // At start it asks its terminal what it supports, as tact does (kitty keyboard, kitty graphics, cell size, device
 // status, then DA1), and like tact on macOS it waits for the DA1 reply with no timeout before serving anything.
 // The registration also records the pty's size and SHELL as tact saw them.
@@ -59,10 +64,14 @@ await new Promise(resolve => {
 });
 
 const resume = arg('--resume');
-const id = resume ?? randomUUID();
+let id = resume ?? randomUUID();
 const saved = resume && existsSync(join(store, `${id}.json`)) ? JSON.parse(readFileSync(join(store, `${id}.json`), 'utf8')) : undefined;
-const session = { id, title: saved?.title ?? 'New chat', model: 'gpt-6.1-sol', effort: 'high', reasoning_mode: 'standard', speed: 'standard', entries: saved?.entries ?? [], draft: { rev: 0, text: '' }, running: false };
-const save = () => writeFileSync(join(store, `${id}.json`), JSON.stringify({ title: session.title, entries: session.entries }));
+const session = { id, title: saved?.title ?? 'New chat', model: saved?.model ?? 'gpt-6.1-sol', effort: 'high', reasoning_mode: 'standard', speed: 'standard', entries: saved?.entries ?? [], draft: { rev: 0, text: '' }, running: false };
+const save = () => writeFileSync(join(store, `${id}.json`), JSON.stringify({ title: session.title, model: session.model, entries: session.entries }));
+const configFile = join(home, 'config.toml');
+const readClaude = () => existsSync(configFile) && /^\[claude\]/m.test(readFileSync(configFile, 'utf8'));
+let claude = readClaude();
+let starting = false;
 
 const clients = new Set();
 const send = (event, data) => { for (const res of clients) { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } };
@@ -77,6 +86,26 @@ function upsert(entry) {
 const snapshot = () => ({ session: id, title: session.title, model: session.model, workspace, effort: session.effort, reasoning_mode: session.reasoning_mode, speed: session.speed, entries: session.entries, status: null, queue: [], draft: { ...session.draft, images: [] }, running: session.running, context: { active_tokens: 1000, window_tokens: 272000 }, subagents: { max_subagents: 32, agents: [] } });
 const settings = () => send('settings', { session: id, model: session.model, effort: session.effort, reasoning_mode: session.reasoning_mode, speed: session.speed });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// tact's set_model: a new session on the model (or the old one kept, and why in the terminal).
+async function replaceSession(model, mode) {
+	starting = true;
+	await sleep(150);
+	starting = false;
+	if (model === 'claude-broken') {
+		process.stdout.write('\x1b[1;1H╭────╮\x1b[2;1H│\x1b[2;4H\x1b[1mCould not start a new session: invalid task request: Claude API-key authentication requires an\x1b[2;160H\x1b[22m│\x1b[3;1H│\x1b[3;58H\x1b[1mAnthropic API key\x1b[3;160H\x1b[22m│\x1b[4;1H╰────╯');
+		return;
+	}
+	send('closed', { session: id });
+	id = model.startsWith('claude-') ? `claude-${randomUUID()}` : randomUUID();
+	session.model = model;
+	session.reasoning_mode = mode;
+	session.draft = { rev: 0, text: session.draft.text };
+	save();
+	send('live', { active: id, sessions: [{ id, title: session.title, model, workspace, state: 'idle' }] });
+	send('active', { session: id });
+	send('snapshot', snapshot());
+}
 
 async function turn(text) {
 	session.running = true;
@@ -151,12 +180,13 @@ const server = createServer(async (req, res) => {
 	}
 	if (req.url === '/api/query') {
 		const q = await body(req);
+		const claudeModels = [{ id: 'claude-opus-5-5', label: 'Opus 5.5', provider: 'anthropic', reasoning_modes: ['standard'], effective_speeds: ['standard', 'standard'], effort_fixed_after_start: true }, { id: 'claude-broken', label: 'Broken', provider: 'anthropic', reasoning_modes: ['standard'], effective_speeds: ['standard', 'standard'], effort_fixed_after_start: true }];
 		if (q.query === 'models' && q.args !== undefined) {
 			return reply(res, 400, { code: 'invalid_request', message: 'args: invalid type: map, expected unit variant Query::Models' });
 		}
 		if (q.query === 'models') {
 			return reply(res, 200, {
-				models: [{ id: 'gpt-6.1-sol', label: 'Sol', provider: 'openai', reasoning_modes: ['standard', 'pro'], effective_speeds: ['standard', 'fast'], effort_fixed_after_start: false }, { id: 'gpt-6-luna', label: 'Luna', provider: 'openai', reasoning_modes: ['standard'], effective_speeds: ['standard', 'standard'], effort_fixed_after_start: false }],
+				models: [{ id: 'gpt-6.1-sol', label: 'Sol', provider: 'openai', reasoning_modes: ['standard', 'pro'], effective_speeds: ['standard', 'fast'], effort_fixed_after_start: false }, { id: 'gpt-6-luna', label: 'Luna', provider: 'openai', reasoning_modes: ['standard'], effective_speeds: ['standard', 'standard'], effort_fixed_after_start: false }, ...(claude ? claudeModels : [])],
 				efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
 				speeds: ['standard', 'fast'],
 			});
@@ -165,6 +195,16 @@ const server = createServer(async (req, res) => {
 	}
 	if (req.url === '/api/cmd') {
 		const { cmd, args } = await body(req);
+		if (cmd === 'reload_config') {
+			claude = readClaude();
+			return reply(res, 200, {});
+		}
+		if (args?.session !== undefined && args.session !== id) {
+			return reply(res, 404, { code: 'unknown_session', message: 'unknown session' });
+		}
+		if (starting) {
+			return reply(res, 400, { code: 'failed', message: 'the session is still starting' });
+		}
 		switch (cmd) {
 			case 'set_draft':
 				session.draft = { rev: session.draft.rev + 1, text: args.text };
@@ -193,8 +233,21 @@ const server = createServer(async (req, res) => {
 				if (session.entries.length) {
 					return reply(res, 400, { code: 'invalid_request', message: 'model is fixed' });
 				}
-				session.model = args.model; settings(); return reply(res, 200, {});
-			case 'set_reasoning_mode': session.reasoning_mode = args.mode; settings(); return reply(res, 200, {});
+				if (!args.model.startsWith('gpt-') && !(claude && args.model.startsWith('claude-'))) {
+					return reply(res, 400, { code: 'invalid_request', message: `${args.model} is not available` });
+				}
+				if (args.model !== session.model) {
+					void replaceSession(args.model, session.reasoning_mode);
+				}
+				return reply(res, 200, {});
+			case 'set_reasoning_mode':
+				if (session.entries.length) {
+					return reply(res, 400, { code: 'invalid_request', message: 'the reasoning mode can only change before the first prompt' });
+				}
+				if (args.mode !== session.reasoning_mode) {
+					void replaceSession(session.model, args.mode);
+				}
+				return reply(res, 200, {});
 		}
 		return reply(res, 400, { code: 'invalid_request', message: `unknown command ${cmd}` });
 	}

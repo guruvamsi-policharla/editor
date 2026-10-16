@@ -219,6 +219,15 @@ export class HarnessChat implements vscode.Disposable {
 			this.warmSession = session;
 			this.remember(session);
 			this.refresh();
+			// Its choices can change while it waits (tact: a Claude key added to its config): a new chat's pickers follow.
+			const off = session.onChange(c => {
+				if (this.warmSession !== session) {
+					off();
+				} else if (c.kind === 'config') {
+					this.remember(session);
+					this.refresh();
+				}
+			});
 		}, e => {
 			if (this.warm === warm) {
 				this.warm = undefined;

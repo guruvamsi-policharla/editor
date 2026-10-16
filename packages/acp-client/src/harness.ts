@@ -24,7 +24,10 @@ export function isAuthRequired(e: unknown): boolean {
 export function errorMessage(e: unknown): string {
 	if (e && typeof e === 'object') {
 		const { message, data } = e as { message?: unknown; data?: unknown };
-		const detail = data && typeof data === 'object' && 'message' in data ? String((data as { message: unknown }).message) : typeof data === 'string' ? data : undefined;
+		// The ACP SDK sends an adapter's uncaught error as "Internal error" with `{ details }`: the details are the error.
+		const detail = data && typeof data === 'object' && 'message' in data ? String((data as { message: unknown }).message)
+			: data && typeof data === 'object' && 'details' in data && (data as { details: unknown }).details ? String((data as { details: unknown }).details)
+				: typeof data === 'string' ? data : undefined;
 		if (typeof message === 'string') {
 			return detail && !message.includes(detail) ? `${message}: ${detail}` : message;
 		}
