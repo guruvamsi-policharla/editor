@@ -194,7 +194,7 @@ check_prerequisites() {
 
 # The slow prepare step depends only on these inputs; skip it when they are unchanged.
 prepare_stamp() {
-  { cat "${REPO_ROOT}/fork/upstream.env" "${REPO_ROOT}/fork/branding.env" "${REPO_ROOT}"/patches/*.patch \
+  { cat "${REPO_ROOT}/fork/upstream.env" "${REPO_ROOT}/fork/branding.env" "${REPO_ROOT}"/patches/*.patch "${REPO_ROOT}"/patches/*/*.patch \
       "${REPO_ROOT}/fork/scripts/prepare-vscodium.sh"
     find "${REPO_ROOT}/branding/generated" -type f -print0 | LC_ALL=C sort -z | xargs -0 cat; } | git hash-object --stdin
   echo "${VSCODE_ARCH}"

@@ -14,7 +14,7 @@ WORKDIR="${1:-${XDG_CACHE_HOME:-$HOME/.cache}/editor-fork-build}"
 cd "${WORKDIR}/vscodium/vscode"
 
 FILES=()
-while IFS= read -r f; do FILES+=("$f"); done < <(grep -h '^+++ b/' "${REPO_ROOT}"/patches/*.patch | sed 's|^+++ b/||' | grep '\.ts$' | sort -u)
+while IFS= read -r f; do FILES+=("$f"); done < <(grep -h '^+++ b/' "${REPO_ROOT}"/patches/*.patch "${REPO_ROOT}"/patches/*/*.patch | sed 's|^+++ b/||' | grep '\.ts$' | sort -u)
 
 STUB_DIR=extensions/copilot
 if [[ ! -e "${STUB_DIR}" ]]; then

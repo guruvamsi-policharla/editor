@@ -77,8 +77,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ steps.pins.outputs.node }}
-      - name: Apply VSCodium patches + ours (no npm ci)
-        run: fork/scripts/prepare-vscodium.sh --patches-only "$RUNNER_TEMP/fork"
+      - name: Patch series applies for macOS and Linux (no npm ci; leaves the Linux tree)
+        run: fork/scripts/check-patches.sh "$RUNNER_TEMP/fork"
       - name: fork/src matches what the patches create
         run: |
           for d in agentReview agentChat; do
@@ -88,8 +88,8 @@ jobs:
         run: |
           {
             echo "### Core patches"
-            for p in patches/*.patch; do
-              echo "- \`$(basename "$p")\`: $(grep -c '^+[^+]' "$p") added / $(grep -c '^-[^-]' "$p") removed lines, $(grep -c '^diff --git' "$p") files"
+            for p in patches/*.patch patches/*/*.patch; do
+              echo "- \`${p#patches/}\`: $(grep -c '^+[^+]' "$p") added / $(grep -c '^-[^-]' "$p") removed lines, $(grep -c '^diff --git' "$p") files"
             done
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Add swap

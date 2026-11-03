@@ -1,0 +1,13 @@
+diff --git a/src/vs/platform/environment/node/environmentService.ts b/src/vs/platform/environment/node/environmentService.ts
+index 8652144..a7897f1 100644
+--- a/src/vs/platform/environment/node/environmentService.ts
++++ b/src/vs/platform/environment/node/environmentService.ts
+@@ -17,7 +17,7 @@ export class NativeEnvironmentService extends AbstractNativeEnvironmentService {
+ 		super(args, {
+ 			homeDir,
+ 			tmpDir: tmpdir(),
+-			userDataDir: getUserDataPath(args, productService.nameShort),
++			userDataDir: getUserDataPath(args, productService.userDataFolderName ?? productService.nameShort),
+ 		}, productService);
+ 	}
+ }
