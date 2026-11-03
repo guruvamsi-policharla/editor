@@ -473,6 +473,93 @@ describe('TactAgent on a fake tact (hidden pty, web API)', () => {
 		expect((await turn).stopReason).toBe('cancelled');
 	});
 
+	it('Stop, then the message sent again at once (the stopped turn still ending): the first is cancelled, the second runs', async () => {
+		const a = agent();
+		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
+		const first = a.prompt({ sessionId, prompt: [{ type: 'text', text: 'wait' }] });
+		while (!text('agent_message_chunk')) {
+			await new Promise(r => setTimeout(r, 20));
+		}
+		void a.cancel({ sessionId });
+		const second = a.prompt({ sessionId, prompt: [{ type: 'text', text: 'again' }] });
+		expect((await first).stopReason).toBe('cancelled');
+		expect((await second).stopReason).toBe('end_turn');
+		expect(text('agent_message_chunk')).toContain('echo: again');
+		// And the chat goes on.
+		expect((await a.prompt({ sessionId, prompt: [{ type: 'text', text: 'third' }] })).stopReason).toBe('end_turn');
+	});
+
+	it('an earlier message edited and sent while a turn runs (no Stop): the running turn is stopped, the new one runs', async () => {
+		const a = agent();
+		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
+		const first = a.prompt({ sessionId, prompt: [{ type: 'text', text: 'wait' }] });
+		while (!text('agent_message_chunk')) {
+			await new Promise(r => setTimeout(r, 20));
+		}
+		const edited = a.prompt({ sessionId, prompt: [{ type: 'text', text: 'edited' }] });
+		expect((await first).stopReason).toBe('cancelled');
+		expect((await edited).stopReason).toBe('end_turn');
+		expect(text('agent_message_chunk')).toContain('echo: edited');
+	});
+
+	it('Stop before tact started the turn, then sent again at once: the stop stays with the first message', async () => {
+		const a = agent();
+		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
+		const first = a.prompt({ sessionId, prompt: [{ type: 'text', text: 'slow start' }] });
+		void a.cancel({ sessionId });
+		const second = a.prompt({ sessionId, prompt: [{ type: 'text', text: 'next' }] });
+		expect((await first).stopReason).toBe('cancelled');
+		expect((await second).stopReason).toBe('end_turn');
+		expect(text('agent_message_chunk')).toContain('echo: next');
+	});
+
+	it('Stop on a turn tact doesn\'t end: the prompt ends anyway after the grace period, never a hang', async () => {
+		const a = new TactAgent({ tact: FAKE_TACT, env: { TACT_HOME: home }, stopGraceMs: 300 }, async (sessionId, update) => { updates.push({ sessionId, update }); });
+		agents.push(a);
+		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
+		const turn = a.prompt({ sessionId, prompt: [{ type: 'text', text: 'stuck' }] });
+		while (!text('agent_message_chunk')) {
+			await new Promise(r => setTimeout(r, 20));
+		}
+		await a.cancel({ sessionId });
+		expect((await turn).stopReason).toBe('cancelled');
+	});
+
+	it('tact\'s terminal busy (set_draft: HTTP 503): sent once more; failing twice fails that message only, the next one works', async () => {
+		const once = agent({ FAKE_TACT_STALL: '1' });
+		const one = await once.newSession({ cwd: ws, mcpServers: [] });
+		expect((await once.prompt({ sessionId: one.sessionId, prompt: [{ type: 'text', text: 'hi' }] })).stopReason).toBe('end_turn');
+		const twice = agent({ FAKE_TACT_STALL: '2' });
+		const two = await twice.newSession({ cwd: ws, mcpServers: [] });
+		await expect(twice.prompt({ sessionId: two.sessionId, prompt: [{ type: 'text', text: 'hi' }] }))
+			.rejects.toMatchObject({ message: 'refused the request: the terminal did not answer in time (set_draft: HTTP 503)' });
+		expect((await twice.prompt({ sessionId: two.sessionId, prompt: [{ type: 'text', text: 'hi again' }] })).stopReason).toBe('end_turn');
+	});
+
+	it('two chats at once: one runs while the other sends, stops, edits and sends again', async () => {
+		const a = agent();
+		const one = (await a.newSession({ cwd: ws, mcpServers: [] })).sessionId;
+		const two = (await a.newSession({ cwd: ws, mcpServers: [] })).sessionId;
+		const chunks = (id: string) => updates.filter(u => u.sessionId === id && u.update.sessionUpdate === 'agent_message_chunk').map(u => (u.update as { content: { text: string } }).content.text).join('');
+		const busy = a.prompt({ sessionId: one, prompt: [{ type: 'text', text: 'wait' }] });
+		while (!chunks(one)) {
+			await new Promise(r => setTimeout(r, 20));
+		}
+		expect((await a.prompt({ sessionId: two, prompt: [{ type: 'text', text: 'hello' }] })).stopReason).toBe('end_turn');
+		const stopped = a.prompt({ sessionId: two, prompt: [{ type: 'text', text: 'wait' }] });
+		while (!chunks(two).includes('working')) {
+			await new Promise(r => setTimeout(r, 20));
+		}
+		void a.cancel({ sessionId: two });
+		const resent = a.prompt({ sessionId: two, prompt: [{ type: 'text', text: 'edited' }] });
+		expect((await stopped).stopReason).toBe('cancelled');
+		expect((await resent).stopReason).toBe('end_turn');
+		expect(chunks(two)).toContain('echo: edited');
+		// The first chat's turn was never touched.
+		await a.cancel({ sessionId: one });
+		expect((await busy).stopReason).toBe('cancelled');
+	});
+
 	it('a tact that exited is started again (--resume) on the next prompt', async () => {
 		const a = agent();
 		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
