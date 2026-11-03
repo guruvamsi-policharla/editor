@@ -135,17 +135,21 @@ export function activate(context: vscode.ExtensionContext): void {
 	);
 }
 
-/** `@path:L42-58` for the active editor's selection (when agent-review isn't the caller). */
-function selectionReference(): { text: string; uri: vscode.Uri; startLine: number; endLine: number } | undefined {
+/** `@path:L42-58` for the active editor's selection, `@path` with nothing selected (when agent-review isn't the caller). */
+function selectionReference(): { text: string; uri: vscode.Uri; startLine?: number; endLine?: number } | undefined {
 	const editor = vscode.window.activeTextEditor;
 	if (!editor) {
 		return undefined;
 	}
 	const s = editor.selection;
+	const path = `@${vscode.workspace.asRelativePath(editor.document.uri, false)}`;
+	if (s.isEmpty) {
+		return { text: path, uri: editor.document.uri };
+	}
 	const first = s.start.line + 1;
-	const last = !s.isEmpty && s.end.character === 0 && s.end.line > s.start.line ? s.end.line : s.end.line + 1;
+	const last = s.end.character === 0 && s.end.line > s.start.line ? s.end.line : s.end.line + 1;
 	const range = first === last ? `L${first}` : `L${first}-${last}`;
-	return { text: `@${vscode.workspace.asRelativePath(editor.document.uri, false)}:${range}`, uri: editor.document.uri, startLine: first, endLine: last };
+	return { text: `${path}:${range}`, uri: editor.document.uri, startLine: first, endLine: last };
 }
 
 const HARNESS_LABEL = new Map(BUILTIN_PROFILES.map(p => [p.id, p.label]));
