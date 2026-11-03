@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { SessionView, type acp } from '@editor/acp-client';
-import { fileLink, footer, isServerToolHiccup, permissionButtons, retryText, runningCommands, STOPPED, stoppedCommandsNote, toolCard, turnFailureText, TurnRenderer, type RenderOp } from '../src/render.js';
+import { fileLink, footer, permissionButtons, STOPPED, toolCard, turnFailureText, TurnRenderer, type RenderOp } from '../src/render.js';
 
-const turns = JSON.parse(readFileSync(new URL('../../../packages/acp-client/test/fixtures/claude-0.87.0-turns.json', import.meta.url), 'utf8')) as { updates: acp.SessionUpdate[] };
+const turns = JSON.parse(readFileSync(new URL('../../../packages/acp-client/test/fixtures/acp-v1-turns.json', import.meta.url), 'utf8')) as { updates: acp.SessionUpdate[] };
 
 function replay(updates: acp.SessionUpdate[]): RenderOp[] {
 	const view = new SessionView();
@@ -12,7 +12,7 @@ function replay(updates: acp.SessionUpdate[]): RenderOp[] {
 	return [...updates.flatMap(u => renderer.render(view.apply(u))), ...renderer.finish('stopped')];
 }
 
-describe('turn rendering (recorded Claude run)', () => {
+describe('turn rendering (a recorded ACP v1 update stream)', () => {
 	const ops = replay(turns.updates);
 	const cards = ops.filter((o): o is RenderOp & { op: 'tool' } => o.op === 'tool').map(o => o.card);
 	const last = (id: string) => cards.filter(c => c.id === id).at(-1)!;
@@ -82,7 +82,7 @@ describe('turn rendering', () => {
 		expect(ops.at(-1)).toMatchObject({ card: { past: 'Searched `x`', simple: { input: 'x', output: 'a.txt' } } });
 	});
 
-	it('Codex-style command output: raw text, exit code, failure', () => {
+	it('command output as raw text, exit code, failure', () => {
 		const card = toolCard({ id: 'c', title: 'npm test', kind: 'execute', status: 'failed', content: [{ type: 'content', content: { type: 'text', text: 'boom\nExit code: 2' } }], locations: [], rawInput: { command: ['npm', 'test'] } });
 		expect(card.terminal).toEqual({ command: 'npm test', output: 'boom\nExit code: 2', exitCode: 2 });
 		expect(card.error).toBe(true);
@@ -105,7 +105,7 @@ describe('closing a turn', () => {
 		expect(renderer.finish('stopped')).toEqual([]);
 	});
 
-	it('Stop during an approved command: its card says it ran and was stopped, and the agent is told so; one never approved didn\'t run (#32)', () => {
+	it('Stop during a running command: its card says it was stopped; one never approved didn\'t run (#32)', () => {
 		const view = new SessionView();
 		const renderer = new TurnRenderer('t');
 		renderer.render(view.apply({ sessionUpdate: 'tool_call', toolCallId: 'rm', title: 'x', kind: 'execute', status: 'pending', rawInput: { command: 'rm notes.tex; sleep 30' } }));
@@ -117,11 +117,6 @@ describe('closing a turn', () => {
 			{ op: 'tool', card: expect.objectContaining({ id: 'ask', complete: true, past: 'Didn\'t run `git push`: stopped before it was approved' }) },
 		]);
 		expect(ops[1]!.op === 'tool' && ops[1]!.card.terminal).toBeUndefined();
-		expect(runningCommands(ops, notApproved)).toEqual(['rm notes.tex; sleep 30']);
-		const note = stoppedCommandsNote(['rm notes.tex; sleep 30']);
-		expect(note).toContain('`rm notes.tex; sleep 30`');
-		expect(note).toMatch(/had approved it, and it had started/);
-		expect(note).toMatch(/was not rejected/);
 	});
 
 	it('a card waits for approval while its prompt is open, through the agent\'s updates; closing it drops the flag (#32)', () => {
@@ -152,7 +147,6 @@ describe('the footer', () => {
 		expect(footer({ stopped: true, model: 'Haiku 5.5', usage: { used: 12, size: 100 } })).toBe('Stopped · Haiku 5.5 · 12% of context');
 		expect(footer({ stopped: true })).toBe(STOPPED);
 		expect(footer({ model: 'Haiku 5.5' })).toBe('Haiku 5.5');
-		expect(footer({ dangerous: 'Bypass permissions', model: 'Haiku 5.5' })).toBe('⚠ Bypass permissions · Haiku 5.5');
 		expect(footer({})).toBe('');
 	});
 });
@@ -163,33 +157,18 @@ describe('permission buttons', () => {
 		const buttons = permissionButtons({ choices: [
 			{ optionId: 'y', label: 'Yes', kind: 'allow_once' },
 			{ optionId: 'n', label: 'No', kind: 'reject_once' },
-			{ optionId: 'a', label: long, kind: 'allow_always', persistent: 'saved to .claude/settings.local.json' },
+			{ optionId: 'a', label: long, kind: 'allow_always', persistent: 'saved to the rules file' },
 			{ optionId: 'n2', label: 'No', kind: 'reject_always' },
 		] });
 		expect(buttons[0]).toBe('Yes');
-		expect(buttons[2]).toMatch(/^Yes, and don't ask again for python3 -c .{1,40}… \(saved to \.claude\/settings\.local\.json\)$/);
+		expect(buttons[2]).toMatch(/^Yes, and don't ask again for python3 -c .{1,40}… \(saved to the rules file\)$/);
 		expect(buttons[2]!.length).toBeLessThan(100);
 		expect(new Set(buttons).size).toBe(4);
 	});
 });
 
 describe('a failed turn\'s card', () => {
-	const hiccup = 'Internal error: Claude ended the turn without returning results for tool calls: srvtoolu_01AbCdEf';
-
-	it('says a missing server-tool result is a hiccup on Claude\'s side', () => {
-		expect(isServerToolHiccup(hiccup)).toBe(true);
-		expect(turnFailureText('Claude Code', hiccup)).toBe('Claude Code hit a hiccup on Claude\'s side: the turn ended before one of Claude\'s own server tools (such as the advisor) returned. Nothing went wrong on your end; sending the message again usually works.');
-	});
-
-	it('shows any other error as the agent reported it', () => {
-		const other = 'Internal error: tool call toolu_01AbCdEf failed\nstack…';
-		expect(isServerToolHiccup(other)).toBe(false);
-		expect(turnFailureText('Claude Code', other)).toBe('Claude Code: Internal error: tool call toolu_01AbCdEf failed');
-	});
-
-	it('retries the message as it was typed, a slash command with its slash', () => {
-		expect(retryText({ prompt: 'fix the intro' })).toBe('fix the intro');
-		expect(retryText({ command: 'review', prompt: 'main.tex' })).toBe('/review main.tex');
-		expect(retryText({ command: 'compact', prompt: '' })).toBe('/compact');
+	it('shows the error as the agent reported it, first line', () => {
+		expect(turnFailureText('tact', 'refused the request: unknown session\nstack…')).toBe('tact: refused the request: unknown session');
 	});
 });

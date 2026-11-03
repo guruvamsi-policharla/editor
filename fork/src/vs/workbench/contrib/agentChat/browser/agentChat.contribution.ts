@@ -6,7 +6,8 @@
 // Agent chat (the built-in agent-chat extension), through internal commands:
 // - `_agentChat.openChat(uri, where)` opens a chat session (from the extension's chat search) in the chat view in
 //   the side bar, or in an editor tab.
-// - `_agentChat.resend(uri, text)` sends a message again in a chat session (Retry on a failed turn's card).
+// - A model picked in an extension's chat session (one of the models it targets at the session's type) is reported
+//   to the extension at once (`agentChat.modelPicked`), so it can apply it and show the pickers that model has.
 // - Cmd/Ctrl+L inserts a reference to the selection at the cursor
 // of the last focused chat input, as an inline pill (core's dynamic variable, the same as `#selection`), so a
 // message can say "in this part <ref>, fold in this argument <ref>". The request then carries the text with the
@@ -14,13 +15,17 @@
 // - The Cmd/Ctrl+L keybinding itself (`AGENT_CHAT_CMD_L`), above every extension's default keybindings.
 
 import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
+import { Disposable, DisposableMap } from '../../../../base/common/lifecycle.js';
+import { autorun } from '../../../../base/common/observable.js';
 import { URI, UriComponents } from '../../../../base/common/uri.js';
 import { IRange, Range } from '../../../../editor/common/core/range.js';
 import { EditorContextKeys } from '../../../../editor/common/editorContextKeys.js';
-import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
+import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IKeybindingRule, KeybindingsRegistry, KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
 import { ChatDynamicVariableModel } from '../../chat/browser/attachments/chatDynamicVariables.js';
-import { ChatViewPaneTarget, IChatWidgetService } from '../../chat/browser/chat.js';
+import { ChatViewPaneTarget, IChatWidget, IChatWidgetService } from '../../chat/browser/chat.js';
+import { getChatSessionType } from '../../chat/common/model/chatUri.js';
+import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { ACTIVE_GROUP } from '../../../services/editor/common/editorService.js';
 import { referenceInsertionOffset, referencePrefix } from './insertPlan.js';
 
@@ -47,28 +52,6 @@ CommandsRegistry.registerCommand('_agentChat.openChat', async (accessor, uri: Ur
 	const widget = await accessor.get(IChatWidgetService).openSession(URI.revive(uri), where === 'editor' ? ACTIVE_GROUP : ChatViewPaneTarget);
 	widget?.focusInput();
 	return !!widget;
-});
-
-/**
- * `_agentChat.resend(uri, text)`: sends `text` again in the chat session `uri` (its open widget, in the side bar or an
- * editor tab; opened in the side bar when it isn't open), as if the user typed it: Retry on a failed turn's card.
- * Without `uri` (a chat that has no resource yet), the last focused chat if it can be shown, else the side bar's.
- * Returns whether it was sent.
- */
-CommandsRegistry.registerCommand('_agentChat.resend', async (accessor, uri: UriComponents | undefined, text: unknown) => {
-	if (typeof text !== 'string' || !text) {
-		return false;
-	}
-	const widgetService = accessor.get(IChatWidgetService);
-	const resource = uri ? URI.revive(uri) : undefined;
-	const open = resource && widgetService.getWidgetBySessionResource(resource);
-	const widget = open && await widgetService.reveal(open)
-		? open
-		: resource ? await widgetService.openSession(resource, ChatViewPaneTarget) : await widgetService.revealWidget();
-	if (!widget) {
-		return false;
-	}
-	return !!await widget.acceptInput(text);
 });
 
 /**
@@ -131,3 +114,51 @@ CommandsRegistry.registerCommand('_agentChat.insertReference', async (accessor, 
 	widget.refreshParsedInput();
 	return true;
 });
+
+/** The extension command a model pick is reported to: `(sessionResource, modelIdentifier)`. */
+export const MODEL_PICKED_COMMAND = 'agentChat.modelPicked';
+
+/**
+ * Reports each chat input's selected model to the agent-chat extension when it changes to a model the extension
+ * targets at the chat's session type (`targetChatSessionType`): a tact chat's thinking and speed pickers depend on
+ * its model, so the extension applies the model at once instead of at the next message. Models of other session
+ * types (and core's own) aren't reported. A pick that repeats the last one reported for the same chat isn't either.
+ */
+export class AgentChatModelPicks extends Disposable implements IWorkbenchContribution {
+	static readonly ID = 'workbench.contrib.agentChatModelPicks';
+
+	private readonly widgets = this._register(new DisposableMap<IChatWidget>());
+
+	constructor(
+		@IChatWidgetService widgetService: IChatWidgetService,
+		@ICommandService private readonly commandService: ICommandService,
+	) {
+		super();
+		widgetService.getAllWidgets().forEach(w => this.watch(w));
+		this._register(widgetService.onDidAddWidget(w => this.watch(w)));
+	}
+
+	private watch(widget: IChatWidget): void {
+		if (this.widgets.has(widget)) {
+			return;
+		}
+		let last: string | undefined;
+		this.widgets.set(widget, autorun(reader => {
+			const model = widget.input.selectedLanguageModel.read(reader);
+			const resource = widget.viewModel?.model.sessionResource;
+			const type = model?.metadata.targetChatSessionType;
+			if (!model || !resource || !type || getChatSessionType(resource) !== type) {
+				return;
+			}
+			const key = `${resource.toString()} ${model.identifier}`;
+			if (key === last || !CommandsRegistry.getCommand(MODEL_PICKED_COMMAND)) {
+				return;
+			}
+			last = key;
+			this.commandService.executeCommand(MODEL_PICKED_COMMAND, resource, model.identifier).catch(() => undefined);
+		}));
+	}
+}
+
+registerWorkbenchContribution2(AgentChatModelPicks.ID, AgentChatModelPicks, WorkbenchPhase.AfterRestored);
+

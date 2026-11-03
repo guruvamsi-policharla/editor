@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // A fake `tact` for the adapter tests: it must run in a terminal (like tact's TUI), registers in
 // $TACT_HOME/web/instances/<pid>.json, writes the machine token, and serves the web API subset the adapter uses
-// (protocol 9: /api/stream SSE, /api/cmd, /api/query, entry details). Prompts:
+// (protocol 10: /api/stream SSE, /api/cmd, /api/query, entry details). Prompts:
 //   "edit <path>"  a tool entry (apply_patch) that writes "edited\n" to <path>, then an answer
 //   "wait"         a running turn that only ends on interrupt
 //   "fail"         an error entry (like a rejected API key)
@@ -163,13 +163,13 @@ const server = createServer(async (req, res) => {
 		res.writeHead(200, { 'content-type': 'text/event-stream' });
 		clients.add(res);
 		req.on('close', () => clients.delete(res));
-		res.write(`event: hello\ndata: ${JSON.stringify({ protocol_version: 9, client_hint: 1 })}\n\n`);
+		res.write(`event: hello\ndata: ${JSON.stringify({ protocol_version: 10, client_hint: 1 })}\n\n`);
 		res.write(`event: active\ndata: ${JSON.stringify({ session: id })}\n\n`);
 		res.write(`event: snapshot\ndata: ${JSON.stringify(snapshot())}\n\n`);
 		return;
 	}
 	if (req.url === '/api/instance') {
-		return reply(res, 200, { protocol_version: 9, workspace });
+		return reply(res, 200, { protocol_version: 10, workspace });
 	}
 	const detail = /^\/api\/sessions\/[^/]+\/entries\/(\d+)$/.exec(req.url ?? '');
 	if (detail) {
@@ -180,15 +180,16 @@ const server = createServer(async (req, res) => {
 	}
 	if (req.url === '/api/query') {
 		const q = await body(req);
-		const claudeModels = [{ id: 'claude-opus-5-5', label: 'Opus 5.5', provider: 'anthropic', reasoning_modes: ['standard'], effective_speeds: ['standard', 'standard'], effort_fixed_after_start: true }, { id: 'claude-broken', label: 'Broken', provider: 'anthropic', reasoning_modes: ['standard'], effective_speeds: ['standard', 'standard'], effort_fixed_after_start: true }];
+		// The shape of tact 98ffe05's catalog: `effective_speeds` is indexed like `speeds` (Opus 5.5 runs Ultrafast as Fast).
+		const claudeModels = [{ id: 'claude-opus-5-5', label: 'Opus 5.5', provider: 'anthropic', reasoning_modes: ['standard'], effective_speeds: ['standard', 'fast', 'fast'], effort_fixed_after_start: true }, { id: 'claude-haiku-5-5', label: 'Haiku 5.5', provider: 'anthropic', reasoning_modes: ['standard'], effective_speeds: ['standard', 'standard', 'standard'], effort_fixed_after_start: true }, { id: 'claude-broken', label: 'Broken', provider: 'anthropic', reasoning_modes: ['standard'], effective_speeds: ['standard', 'standard', 'standard'], effort_fixed_after_start: true }];
 		if (q.query === 'models' && q.args !== undefined) {
 			return reply(res, 400, { code: 'invalid_request', message: 'args: invalid type: map, expected unit variant Query::Models' });
 		}
 		if (q.query === 'models') {
 			return reply(res, 200, {
-				models: [{ id: 'gpt-6.1-sol', label: 'Sol', provider: 'openai', reasoning_modes: ['standard', 'pro'], effective_speeds: ['standard', 'fast'], effort_fixed_after_start: false }, { id: 'gpt-6-luna', label: 'Luna', provider: 'openai', reasoning_modes: ['standard'], effective_speeds: ['standard', 'standard'], effort_fixed_after_start: false }, ...(claude ? claudeModels : [])],
+				models: [{ id: 'gpt-6.1-sol', label: 'Sol', provider: 'openai', reasoning_modes: ['standard', 'pro'], effective_speeds: ['standard', 'fast', 'ultrafast'], effort_fixed_after_start: false }, { id: 'gpt-6-luna', label: 'Luna', provider: 'openai', reasoning_modes: ['standard'], effective_speeds: ['standard', 'fast', 'fast'], effort_fixed_after_start: false }, ...(claude ? claudeModels : [])],
 				efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
-				speeds: ['standard', 'fast'],
+				speeds: ['standard', 'fast', 'ultrafast'],
 			});
 		}
 		return reply(res, 400, { code: 'invalid_request', message: 'unknown query' });
@@ -204,6 +205,9 @@ const server = createServer(async (req, res) => {
 		}
 		if (starting) {
 			return reply(res, 400, { code: 'failed', message: 'the session is still starting' });
+		}
+		if (process.env.FAKE_TACT_REFUSE === cmd) {
+			return reply(res, 400, { code: 'invalid_request', message: `${cmd} refused` });
 		}
 		switch (cmd) {
 			case 'set_draft':
@@ -227,7 +231,11 @@ const server = createServer(async (req, res) => {
 				}
 				wake?.();
 				return reply(res, 200, {});
-			case 'set_effort': session.effort = args.effort; settings(); return reply(res, 200, {});
+			case 'set_effort':
+				if (session.entries.length && session.model.startsWith('claude-')) {
+					return reply(res, 400, { code: 'invalid_request', message: 'effort is fixed once the session has started' });
+				}
+				session.effort = args.effort; settings(); return reply(res, 200, {});
 			case 'set_speed': session.speed = args.speed; settings(); return reply(res, 200, {});
 			case 'set_model':
 				if (session.entries.length) {

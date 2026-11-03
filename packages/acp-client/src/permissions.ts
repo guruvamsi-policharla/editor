@@ -26,7 +26,7 @@ export interface PermissionPrompt {
 	command?: string;
 	/** Paths the tool touches. */
 	paths: string[];
-	/** What the agent says it's for (Claude's Bash `description`). */
+	/** What the agent says it's for (the tool input's `description`). */
 	description?: string;
 	toolKind?: acp.ToolKind;
 	/** In button order: allow once, reject, then the "always" ones. */
@@ -49,22 +49,6 @@ function str(v: unknown): string | undefined {
 
 /** Where a harness's "always" answers are written, so the button can say so. */
 export type PersistenceHint = (option: acp.PermissionOption, request: acp.RequestPermissionRequest) => string | undefined;
-
-export const claudePersistence: PersistenceHint = (option, request) => {
-	if (option.kind !== 'allow_always' && option.kind !== 'reject_always') {
-		return undefined;
-	}
-	// Claude Code's suggested rule updates: file edits stay in the session; commands, Skill and WebFetch rules go to
-	// the project's .claude/settings.local.json.
-	return request.toolCall.kind === 'edit' ? 'for this session' : 'saved to .claude/settings.local.json';
-};
-
-export const codexPersistence: PersistenceHint = option => {
-	if (option.kind !== 'allow_always' && option.kind !== 'reject_always') {
-		return undefined;
-	}
-	return /start with|prefix/i.test(option.name) ? 'saved to ~/.codex/rules' : 'for this session';
-};
 
 export function describePermission(request: acp.RequestPermissionRequest, persistence?: PersistenceHint): PermissionPrompt {
 	const call = request.toolCall;

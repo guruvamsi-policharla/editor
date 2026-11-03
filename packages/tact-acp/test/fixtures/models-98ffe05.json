@@ -1,0 +1,131 @@
+{
+	"models": [
+		{
+			"id": "gpt-6-luna",
+			"label": "Luna",
+			"provider": "openai",
+			"reasoning_modes": [
+				"standard",
+				"pro"
+			],
+			"effective_speeds": [
+				"standard",
+				"fast",
+				"fast"
+			],
+			"effort_fixed_after_start": false
+		},
+		{
+			"id": "gpt-6.1-sol",
+			"label": "Sol",
+			"provider": "openai",
+			"reasoning_modes": [
+				"standard",
+				"pro"
+			],
+			"effective_speeds": [
+				"standard",
+				"fast",
+				"ultrafast"
+			],
+			"effort_fixed_after_start": false
+		},
+		{
+			"id": "gpt-6-astra",
+			"label": "Astra",
+			"provider": "openai",
+			"reasoning_modes": [
+				"standard",
+				"pro"
+			],
+			"effective_speeds": [
+				"standard",
+				"fast",
+				"ultrafast"
+			],
+			"effort_fixed_after_start": false
+		},
+		{
+			"id": "claude-haiku-5-5",
+			"label": "Haiku 5.5",
+			"provider": "anthropic",
+			"reasoning_modes": [
+				"standard"
+			],
+			"effective_speeds": [
+				"standard",
+				"standard",
+				"standard"
+			],
+			"effort_fixed_after_start": true
+		},
+		{
+			"id": "claude-sonnet-5-5",
+			"label": "Sonnet 5.5",
+			"provider": "anthropic",
+			"reasoning_modes": [
+				"standard"
+			],
+			"effective_speeds": [
+				"standard",
+				"standard",
+				"standard"
+			],
+			"effort_fixed_after_start": true
+		},
+		{
+			"id": "claude-opus-5-5",
+			"label": "Opus 5.5",
+			"provider": "anthropic",
+			"reasoning_modes": [
+				"standard"
+			],
+			"effective_speeds": [
+				"standard",
+				"fast",
+				"fast"
+			],
+			"effort_fixed_after_start": true
+		},
+		{
+			"id": "claude-fable-5-1",
+			"label": "Fable 5.1",
+			"provider": "anthropic",
+			"reasoning_modes": [
+				"standard"
+			],
+			"effective_speeds": [
+				"standard",
+				"standard",
+				"standard"
+			],
+			"effort_fixed_after_start": true
+		},
+		{
+			"id": "claude-mythos-5-1",
+			"label": "Mythos 5.1",
+			"provider": "anthropic",
+			"reasoning_modes": [
+				"standard"
+			],
+			"effective_speeds": [
+				"standard",
+				"standard",
+				"standard"
+			],
+			"effort_fixed_after_start": true
+		}
+	],
+	"efforts": [
+		"low",
+		"medium",
+		"high",
+		"xhigh",
+		"max"
+	],
+	"speeds": [
+		"standard",
+		"fast",
+		"ultrafast"
+	]
+}

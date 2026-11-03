@@ -56,7 +56,7 @@ function contentTexts(call: ToolCallView): string[] {
 	return call.content.flatMap(c => (c.type === 'content' && c.content.type === 'text' ? [c.content.text] : []));
 }
 
-/** Command output: Claude's adapter wraps it in a ```console fence; Codex sends raw text. */
+/** Command output, without a ```console fence an adapter may wrap it in. */
 function unfence(text: string): string {
 	const m = /^```[\w-]*\n([\s\S]*?)\n?```\s*$/.exec(text.trim());
 	return m ? m[1]! : text;
@@ -161,7 +161,7 @@ export function toolCard(call: ToolCallView): ToolCard {
 	}
 }
 
-/** Claude's adapter announces a tool call with placeholder titles before the input streams in. */
+/** A tool call announced with a placeholder title before its input streams in. */
 function isPlaceholder(call: ToolCallView): boolean {
 	return call.status === 'pending' && call.content.length === 0 && (!call.rawInput || (typeof call.rawInput === 'object' && !Object.keys(call.rawInput).length));
 }
@@ -266,8 +266,8 @@ export class TurnRenderer {
 }
 
 /**
- * Button labels for a permission prompt, short enough for the confirmation's dropdown (Claude's "always" label
- * repeats the whole command, which the prompt already shows) and unique, since the answer is matched by label.
+ * Button labels for a permission prompt, short enough for the confirmation's dropdown (an "always" label can repeat
+ * the whole command, which the prompt already shows) and unique, since the answer is matched by label.
  */
 export function permissionButtons(p: Pick<PermissionPrompt, 'choices'>): string[] {
 	const seen = new Set<string>();
@@ -287,53 +287,17 @@ export const STOPPED = 'Stopped';
 
 /**
  * A response's footer details: "Stopped" for a turn ended by Stop (core drops a response's updates after Stop,
- * but takes its result's details, so that's where the live transcript can say so), a dangerous mode the turn ran in
- * ("⚠ Bypass permissions"), then the model and context use.
+ * but takes its result's details, so that's where the live transcript can say so), then the model and context use.
  */
-export function footer(info: { stopped?: boolean; dangerous?: string; model?: string; usage?: { used: number; size: number } }): string {
+export function footer(info: { stopped?: boolean; model?: string; usage?: { used: number; size: number } }): string {
 	return [
 		info.stopped ? STOPPED : undefined,
-		// The turn ran in a dangerous mode (Bypass permissions): no permission prompts.
-		info.dangerous ? `⚠ ${info.dangerous}` : undefined,
 		info.model,
 		info.usage?.size ? `${Math.round(100 * info.usage.used / info.usage.size)}% of context` : undefined,
 	].filter(Boolean).join(' · ');
 }
 
-/**
- * What the agent is told with the next message after Stop ended a turn while commands the user had approved were
- * running. Claude Code reports an interrupted tool call to the model as rejected ("The user doesn't want to
- * proceed with this tool use"), so it would claim a command didn't run although it had (an `rm` already done).
- */
-export function stoppedCommandsNote(commands: readonly string[]): string {
-	const list = commands.map(c => `- ${code(c)}`).join('\n');
-	return `(Note from the editor: the user pressed Stop while ${commands.length === 1 ? 'this command was' : 'these commands were'} running. The user had approved ${commands.length === 1 ? 'it' : 'them'}, and ${commands.length === 1 ? 'it' : 'they'} had started, so ${commands.length === 1 ? 'it' : 'they'} may have run partly or completely; it was not rejected. Check ${commands.length === 1 ? 'its' : 'their'} effects before saying ${commands.length === 1 ? 'it' : 'they'} didn't run.\n${list})`;
-}
-
-/** The commands a stopped turn left running (approved: not in `notApproved`), from its closing ops. */
-export function runningCommands(closing: readonly RenderOp[], notApproved: ReadonlySet<string>): string[] {
-	return closing.flatMap(o => (o.op === 'tool' && o.card.terminal && !notApproved.has(o.card.id) ? [o.card.terminal.command] : []));
-}
-
-/**
- * Claude ended a turn without the results of its own server-side tool calls (`srvtoolu_…` ids: tools Anthropic runs,
- * such as the advisor or web search). The adapter reports it as "Internal error: Claude ended the turn without
- * returning results for tool calls: srvtoolu_…". It's a hiccup on Claude's side, not the editor's or the user's, and
- * sending the message again usually works.
- */
-export function isServerToolHiccup(message: string): boolean {
-	return /\bsrvtoolu_[A-Za-z0-9]/.test(message);
-}
-
-/** The warning of a failed turn: a Claude-side hiccup in plain words, anything else as the agent reported it. */
+/** The warning of a failed turn: the agent's own words, first line. */
 export function turnFailureText(label: string, message: string): string {
-	if (isServerToolHiccup(message)) {
-		return `${label} hit a hiccup on Claude's side: the turn ended before one of Claude's own server tools (such as the advisor) returned. Nothing went wrong on your end; sending the message again usually works.`;
-	}
 	return `${label}: ${message.split('\n')[0]!.slice(0, 300)}`;
-}
-
-/** The text that sends a request again as the user typed it: a slash command keeps its slash. */
-export function retryText(request: { command?: string; prompt: string }): string {
-	return request.command ? `/${request.command}${request.prompt ? ` ${request.prompt}` : ''}` : request.prompt;
 }

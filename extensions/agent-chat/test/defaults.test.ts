@@ -13,4 +13,8 @@ describe('setting defaults', () => {
 	it('the editor\'s selection isn\'t attached by itself: a new chat starts clean, and Cmd/Ctrl+L is the way to reference lines', () => {
 		expect(defaults['chat.implicitContext.enabled']).toEqual({ panel: 'never' });
 	});
+
+	it('chat text is a bit bigger than VS Code\'s 13 px, through chat.fontSize, which the transcript and (patch 94) the input follow', () => {
+		expect(defaults['chat.fontSize']).toBe(14);
+	});
 });

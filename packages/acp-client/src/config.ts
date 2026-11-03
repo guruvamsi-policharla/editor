@@ -1,17 +1,17 @@
 /**
  * ACP session config options → UI controls. The `model` category goes to the editor's native model picker; every
- * other select option becomes a picker, in the agent's order. Hidden values are dropped, dangerous ones flagged,
- * and each control says when a change takes effect. Options the client can't render (booleans, which we don't
- * negotiate, or unknown types) are skipped.
+ * other select option becomes a picker, in the agent's order, with exactly the choices the agent offers for the
+ * session as it is now (the agent drops the ones the current model doesn't have). An option with a single choice is
+ * a setting that can't change now (fixed once the chat has started): it's shown locked. Options the client can't
+ * render (booleans, which we don't negotiate, or unknown types) are skipped.
  */
 import type * as acp from '@agentclientprotocol/sdk';
-import { isTransient, optionTiming, type HarnessProfile, type OptionTiming } from './profiles.js';
+import { optionTiming, type HarnessProfile, type OptionTiming } from './profiles.js';
 
 export interface ConfigChoice {
 	id: string;
 	name: string;
 	description?: string;
-	dangerous?: boolean;
 }
 
 export interface ConfigControl {
@@ -23,8 +23,8 @@ export interface ConfigControl {
 	choices: ConfigChoice[];
 	current: string;
 	timing: OptionTiming;
-	/** This control is where plan mode lives. */
-	plan?: string;
+	/** Only one choice is offered: the value can't be changed now (the description says why, when the agent does). */
+	locked?: boolean;
 }
 
 type SelectOption = acp.SessionConfigOption & { type: 'select' };
@@ -37,11 +37,7 @@ export function configControls(options: readonly acp.SessionConfigOption[] | nul
 	return (options ?? [])
 		.filter((o): o is SelectOption => o.type === 'select')
 		.map(o => {
-			const hidden = new Set(profile.hiddenValues?.[o.id] ?? []);
-			const dangerous = new Set(profile.dangerousValues?.[o.id] ?? []);
-			const choices = flatChoices(o)
-				.filter(c => !hidden.has(c.value) || c.value === o.currentValue)
-				.map(c => ({ id: c.value, name: c.name, ...(c.description ? { description: c.description } : {}), ...(dangerous.has(c.value) ? { dangerous: true } : {}) }));
+			const choices = flatChoices(o).map(c => ({ id: c.value, name: c.name, ...(c.description ? { description: c.description } : {}) }));
 			return {
 				id: o.id,
 				name: o.name,
@@ -51,18 +47,16 @@ export function configControls(options: readonly acp.SessionConfigOption[] | nul
 				choices,
 				current: String(o.currentValue),
 				timing: optionTiming(profile, o.id),
-				...(profile.planOption?.configId === o.id ? { plan: profile.planOption.value } : {}),
+				...(choices.length === 1 ? { locked: true } : {}),
 			};
 		})
 		.filter(c => c.choices.length > 0);
 }
 
-export function isDangerous(profile: HarnessProfile, configId: string, value: string): boolean {
-	return profile.dangerousValues?.[configId]?.includes(value) ?? false;
-}
-
-export function isHidden(profile: HarnessProfile, configId: string, value: string): boolean {
-	return profile.hiddenValues?.[configId]?.includes(value) ?? false;
+/** Whether the select option `id` offers `value`. */
+export function offers(options: readonly acp.SessionConfigOption[] | null | undefined, id: string, value: string): boolean {
+	const o = options?.find(x => x.id === id);
+	return o?.type === 'select' && flatChoices(o).some(c => c.value === value);
 }
 
 /** The profile defaults the agent actually offers and that differ from the current values (applied after session/new). */
@@ -70,33 +64,11 @@ export function pendingDefaults(options: readonly acp.SessionConfigOption[] | nu
 	const out: { id: string; value: string }[] = [];
 	for (const [id, value] of Object.entries(profile.defaults ?? {})) {
 		const o = options?.find(x => x.id === id);
-		if (!isTransient(profile, id, value) && o?.type === 'select' && String(o.currentValue) !== value && flatChoices(o).some(c => c.value === value)) {
+		if (o?.type === 'select' && String(o.currentValue) !== value && offers(options, id, value)) {
 			out.push({ id, value });
 		}
 	}
 	return out;
-}
-
-/** How much a value of the profile's permission option lets the agent do without asking: 0 is the strictest. */
-export function permissionRank(profile: HarnessProfile, value: string): number {
-	const order = profile.permissionOption?.strictest ?? [];
-	const i = order.indexOf(value);
-	return i >= 0 ? i : order.length;
-}
-
-/** Whether `value` of the permission option lets the agent do more without asking than `than`. */
-export function isLooser(profile: HarnessProfile, value: string, than: string): boolean {
-	return value !== than && permissionRank(profile, value) > permissionRank(profile, than);
-}
-
-/** The strictest value of the profile's permission option that the options offer. */
-export function strictestOffered(options: readonly acp.SessionConfigOption[] | null | undefined, profile: HarnessProfile): string | undefined {
-	const id = profile.permissionOption?.configId;
-	const o = options?.find(x => x.id === id);
-	if (o?.type !== 'select') {
-		return undefined;
-	}
-	return flatChoices(o).map(c => c.value).sort((a, b) => permissionRank(profile, a) - permissionRank(profile, b))[0];
 }
 
 /** The select options' current values, by option id (a chat's settings, saved with it). */
@@ -108,30 +80,39 @@ export function optionValues(options: readonly acp.SessionConfigOption[] | null 
 export function withValues(options: readonly acp.SessionConfigOption[] | null | undefined, values: Readonly<Record<string, string>>): acp.SessionConfigOption[] {
 	return (options ?? []).map(o => {
 		const value = values[o.id];
-		return o.type === 'select' && value !== undefined && flatChoices(o).some(c => c.value === value) ? { ...o, currentValue: value } : o;
+		return o.type === 'select' && value !== undefined && offers([o], o.id, value) ? { ...o, currentValue: value } : o;
 	});
 }
 
+/** One option the agent changed by itself after another one was set (a model change resetting the speed). */
+export interface ConfigReset {
+	id: string;
+	name: string;
+	from: { id: string; name: string };
+	/** Undefined: the option is gone (the new model has no choice in it). */
+	to?: { id: string; name: string };
+}
+
 /**
- * Values a chat can be saved and restored with: a transient value (Claude's Bypass) is replaced by the one the chat
- * had before (`previous`), else the profile's default, else the strictest value offered; never by another transient
- * one. With `options`, only values they offer count (without them, nothing is checked).
+ * What changed in `after` besides the option the user set (`changed`): values the agent reset, and options that
+ * appeared without the old value or went away. The chat says so, so a choice is never dropped silently.
  */
-export function withoutTransient(values: Readonly<Record<string, string>>, previous: Readonly<Record<string, string>> | undefined, profile: HarnessProfile, options?: readonly acp.SessionConfigOption[] | null): Record<string, string> {
-	const out = { ...values };
-	for (const [id, value] of Object.entries(values)) {
-		if (!isTransient(profile, id, value)) {
+export function configResets(before: readonly acp.SessionConfigOption[] | null | undefined, after: readonly acp.SessionConfigOption[] | null | undefined, changed: string): ConfigReset[] {
+	const named = (o: SelectOption, value: string) => ({ id: value, name: flatChoices(o).find(c => c.value === value)?.name ?? value });
+	const out: ConfigReset[] = [];
+	for (const b of (before ?? []).filter((o): o is SelectOption => o.type === 'select')) {
+		if (b.id === changed || b.category === 'model' || flatChoices(b).length < 2) {
 			continue;
 		}
-		const o = options?.find(x => x.id === id);
-		const usable = (v: string | undefined): v is string => v !== undefined && !isTransient(profile, id, v)
-			&& (!options || (o?.type === 'select' && flatChoices(o).some(c => c.value === v)));
-		const strictest = id === profile.permissionOption?.configId ? strictestOffered(options, profile) : undefined;
-		const fallback = [previous?.[id], profile.defaults?.[id], strictest].find(usable);
-		if (fallback !== undefined) {
-			out[id] = fallback;
-		} else {
-			delete out[id];
+		const a = (after ?? []).find((o): o is SelectOption => o.id === b.id && o.type === 'select');
+		const from = named(b, String(b.currentValue));
+		if (!a) {
+			// Gone: worth saying unless it was on its first choice (the base tier, which a model without the choice runs).
+			if (String(b.currentValue) !== flatChoices(b)[0]!.value) {
+				out.push({ id: b.id, name: b.name, from });
+			}
+		} else if (String(a.currentValue) !== String(b.currentValue)) {
+			out.push({ id: b.id, name: b.name, from, to: named(a, String(a.currentValue)) });
 		}
 	}
 	return out;

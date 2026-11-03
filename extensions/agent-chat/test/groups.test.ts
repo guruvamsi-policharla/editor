@@ -1,113 +1,73 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { CLAUDE, CODEX, configControls, type acp } from '@editor/acp-client';
-import { changedSelections, groupsFromControls, modelChoices, RISKY, signInGroup, SIGN_IN_GROUP } from '../src/groups.js';
+import { configControls, TACT, type acp } from '@editor/acp-client';
+import { configOptions } from '../../../packages/tact-acp/src/mapping.js';
+import type { ModelCatalog } from '../../../packages/tact-acp/src/web.js';
+import realCatalog from '../../../packages/tact-acp/test/fixtures/models-98ffe05.json' with { type: 'json' };
+import { changedSelections, groupsFromControls, signInGroup, SIGN_IN_GROUP } from '../src/groups.js';
 
-// Recorded from claude-agent-acp 0.87.0 (session/new with Bypass disabled).
-const fixture = JSON.parse(readFileSync(new URL('../../../packages/acp-client/test/fixtures/claude-0.87.0.json', import.meta.url), 'utf8'));
-const claude: acp.SessionConfigOption[] = fixture.sessionNew.configOptions;
-
-const codexOptions: acp.SessionConfigOption[] = [
-	{ id: 'mode', name: 'Approval Preset', category: 'mode', type: 'select', currentValue: 'workspace-write', options: [{ value: 'read-only', name: 'Read-only' }, { value: 'workspace-write', name: 'Workspace access' }, { value: 'agent', name: 'Auto review' }, { value: 'agent-full-access', name: 'Full access' }] },
-	{ id: 'collaboration_mode', name: 'Collaboration', category: 'collaboration_mode' as acp.SessionConfigOptionCategory, type: 'select', currentValue: 'default', options: [{ value: 'default', name: 'Default' }, { value: 'plan', name: 'Plan' }] },
-	{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'gpt', options: [{ value: 'gpt', name: 'GPT' }] },
-];
+// What the pickers show is what the tact adapter offers for tact dev-98ffe05's catalog: nothing here lists models.
+const catalog = realCatalog as ModelCatalog;
+const tact = (model: string, more: { speed?: string; started?: boolean; effort?: 'high' | 'max'; reasoning_mode?: string } = {}): acp.SessionConfigOption[] =>
+	configOptions({ model, effort: more.effort ?? 'high', reasoning_mode: more.reasoning_mode ?? 'standard', speed: more.speed ?? 'standard', started: more.started ?? false }, catalog);
+const groups = (options: acp.SessionConfigOption[]) => groupsFromControls(configControls(options, TACT), id => ({ id }) as never);
+const items = (options: acp.SessionConfigOption[], id: string) => groups(options).find(g => g.id === id)?.items.map(i => i.id);
 
 describe('pickers from config controls', () => {
-	it('Claude: mode, effort, fast pickers (model goes to the model picker); plan has the /plan alias', () => {
-		const groups = groupsFromControls(configControls(claude, CLAUDE));
-		expect(groups.map(g => g.id)).toEqual(['mode', 'effort', 'fast']);
-		expect(groups[0]!.items.map(i => i.id)).toEqual(['default', 'acceptEdits', 'plan', 'auto']);
-		expect(groups[0]!.items.find(i => i.id === 'plan')!.slashCommand).toBe('plan');
-		expect(groups[0]!.description ?? '').not.toMatch(/next message/);
+	it('every model in the catalog gets exactly its own pickers: speed tiers it runs, Pro only where offered', () => {
+		for (const m of catalog.models) {
+			const speeds = catalog.speeds.filter((s, i) => m.effective_speeds[i] === s);
+			expect(items(tact(m.id), 'speed'), m.id).toEqual(speeds.length > 1 ? speeds : undefined);
+			expect(items(tact(m.id), 'reasoning_mode'), m.id).toEqual(m.reasoning_modes.length > 1 ? m.reasoning_modes : undefined);
+			expect(items(tact(m.id), 'effort'), m.id).toEqual(catalog.efforts);
+		}
+		// The reported bug: Ultrafast on a Claude model. Opus 5.5 runs Ultrafast as Fast, so it isn't offered.
+		expect(items(tact('claude-opus-5-5'), 'speed')).toEqual(['standard', 'fast']);
+		expect(items(tact('claude-sonnet-5-5'), 'speed')).toBeUndefined();
 	});
 
-	it('Codex: next-turn options say so; Full access is marked; plan is its own picker', () => {
-		const groups = groupsFromControls(configControls(codexOptions, CODEX));
-		const mode = groups.find(g => g.id === 'mode')!;
-		expect(mode.description).toMatch(/Applies from your next message/);
-		expect(mode.items.find(i => i.id === 'agent-full-access')!.name).toBe('Full access ⚠');
-		const collab = groups.find(g => g.id === 'collaboration_mode')!;
-		expect(collab.description).toBeUndefined(); // live
-		expect(collab.items.find(i => i.id === 'plan')!.slashCommand).toBe('plan');
+	it('a setting fixed once the chat has started is shown locked, with why; the others stay open', () => {
+		const opus = groups(tact('claude-opus-5-5', { started: true, effort: 'max' }));
+		const effort = opus.find(g => g.id === 'effort')!;
+		expect(effort.items).toEqual([expect.objectContaining({ id: 'max', name: 'Max', locked: true, description: 'Fixed once the chat has started on Opus 5.5' })]);
+		expect(opus.find(g => g.id === 'speed')!.items.every(i => !i.locked)).toBe(true);
+		const sol = groups(tact('gpt-6.1-sol', { started: true, reasoning_mode: 'pro' }));
+		expect(sol.find(g => g.id === 'reasoning_mode')!.items).toEqual([expect.objectContaining({ id: 'pro', locked: true })]);
+		expect(sol.find(g => g.id === 'effort')!.items).toHaveLength(5);
 	});
 
-	it('Claude with Bypass offered: it\'s in the mode picker with a warning icon and a risky description', () => {
-		const withBypass = structuredClone(claude);
-		(withBypass[0] as acp.SessionConfigOption & { options: acp.SessionConfigSelectOption[] }).options.push({ value: 'bypassPermissions', name: 'Bypass permissions', description: 'Accepts all permissions' });
-		const icon = (id: string) => ({ id }) as unknown as import('vscode').ThemeIcon;
-		const mode = groupsFromControls(configControls(withBypass, CLAUDE), icon)[0]!;
-		const bypass = mode.items.find(i => i.id === 'bypassPermissions')!;
-		expect(bypass.name).toBe('Bypass permissions ⚠');
-		expect(bypass.icon).toEqual({ id: 'warning' });
-		expect(bypass.description).toBe(`Accepts all permissions · ${RISKY}`);
-		expect(mode.items.find(i => i.id === 'acceptEdits')!.icon).toEqual({ id: 'shield' });
-		// Not the selection: a new chat opens in Accept edits (the agent's current value here is Manual).
-		expect(mode.selected!.id).not.toBe('bypassPermissions');
+	it('the footer pickers show which setting they are: each choice has its group\'s icon', () => {
+		const g = groups(tact('gpt-6.1-sol', { speed: 'ultrafast' }));
+		expect(g.map(x => x.selected!.name)).toEqual(['High', 'Standard reasoning', 'Ultrafast']);
+		expect(g.map(x => (x.selected!.icon as { id?: string } | undefined)?.id)).toEqual(['lightbulb', undefined, 'zap']);
 	});
 
-	it('carries the untitled chat\'s selections over; a value no longer offered falls back to the current one', () => {
-		const controls = configControls(claude, CLAUDE);
-		const previous = { groups: [{ id: 'effort', name: 'Effort', items: [], selected: { id: 'max', name: 'Max' } }, { id: 'mode', name: 'Mode', items: [], selected: { id: 'bypassPermissions', name: 'Bypass' } }] };
-		const groups = groupsFromControls(controls, undefined, previous);
-		expect(groups.find(g => g.id === 'effort')!.selected!.id).toBe('max');
-		expect(groups.find(g => g.id === 'mode')!.selected!.id).toBe('default');
+	it('carries a new chat\'s selections over; a value the model doesn\'t offer falls back to the current one', () => {
+		const controls = configControls(tact('claude-opus-5-5'), TACT);
+		const previous = { groups: [{ id: 'effort', name: 'Thinking', items: [], selected: { id: 'max', name: 'Max' } }, { id: 'speed', name: 'Speed', items: [], selected: { id: 'ultrafast', name: 'Ultrafast' } }] };
+		const g = groupsFromControls(controls, undefined, previous);
+		expect(g.find(x => x.id === 'effort')!.selected!.id).toBe('max');
+		expect(g.find(x => x.id === 'speed')!.selected!.id).toBe('standard');
 	});
 
-	it('reports which selections differ from the session', () => {
-		const controls = configControls(claude, CLAUDE);
-		const groups = groupsFromControls(controls);
-		expect(changedSelections(groups, controls)).toEqual([]);
-		const changed = groups.map(g => (g.id === 'mode' ? { ...g, selected: g.items.find(i => i.id === 'plan') } : g));
-		expect(changedSelections(changed, controls)).toEqual([{ id: 'mode', value: 'plan', previous: 'default' }]);
+	it('reports which selections differ from the session, never one it doesn\'t offer', () => {
+		const controls = configControls(tact('claude-opus-5-5'), TACT);
+		const g = groupsFromControls(controls);
+		expect(changedSelections(g, controls)).toEqual([]);
+		const changed = g.map(x => (x.id === 'speed' ? { ...x, selected: { id: 'fast', name: 'Fast' } } : x));
+		expect(changedSelections(changed, controls)).toEqual([{ id: 'speed', value: 'fast', previous: 'standard' }]);
+		const bogus = g.map(x => (x.id === 'speed' ? { ...x, selected: { id: 'ultrafast', name: 'Ultrafast' } } : x));
+		expect(changedSelections(bogus, controls)).toEqual([]);
 	});
 
-	it('the footer pickers show which setting they are: each choice has its group\'s icon (the footer shows the selected item\'s)', () => {
-		const groups = groupsFromControls(configControls(claude, CLAUDE), id => ({ id }) as never);
-		expect(groups.map(g => g.selected!.name)).toEqual(['Manual', 'Default', 'Off']);
-		expect(groups.map(g => (g.selected!.icon as { id?: string } | undefined)?.id)).toEqual(['shield', 'lightbulb', 'zap']);
-		expect(groups.map(g => g.name)).toEqual(['Mode', 'Effort', 'Fast mode']);
-	});
-
-	it('the model picker names the model a "Default (recommended)" choice stands for', () => {
-		const model = claude.find(o => o.id === 'model')! as acp.SessionConfigOption & { options: { value: string; name: string; description?: string }[] };
-		const { items: choices } = modelChoices(model.options.map(o => ({ id: o.value, name: o.name, ...(o.description ? { description: o.description } : {}) })));
-		expect(choices[0]).toEqual({ id: 'default', name: 'Opus 5.5 (default)', description: 'For complex work and everyday tasks' });
-		expect(choices.find(c => c.id === 'haiku')!.name).toBe('Haiku 5.5');
-		// A "Default" whose description isn't a model name stays as it is.
-		expect(modelChoices([{ id: 'default', name: 'Default', description: 'Uses the model from your config file' }]).items[0]!.name).toBe('Default');
-	});
-
-	it('the model picker lists each model once, and no two versions of a model share a description (#48)', () => {
-		const model = claude.find(o => o.id === 'model')! as acp.SessionConfigOption & { options: { value: string; name: string; description?: string }[] };
-		const all = model.options.map(o => ({ id: o.value, name: o.name, ...(o.description ? { description: o.description } : {}) }));
-		const { items, current } = modelChoices(all, 'default');
-		// "Opus 5.5" (the default's model) is the default row, not a second one.
-		expect(items.filter(c => c.name.startsWith('Opus 5.5'))).toEqual([{ id: 'default', name: 'Opus 5.5 (default)', description: 'For complex work and everyday tasks' }]);
-		expect(current).toBe('default');
-		// A chat running on that model shows the default row selected.
-		expect(modelChoices(all, 'opus').current).toBe('default');
-		expect(modelChoices(all, 'haiku').current).toBe('haiku');
-		// The newest of each family keeps its description, the older ones say they are older.
-		const described = (name: string) => items.find(c => c.name === name)?.description;
-		expect(described('Haiku 5.5')).toBe('Fastest for quick answers');
-		expect(described('Haiku 4.5')).toBe('Older version');
-		expect(described('Sonnet 5.5')).toBe('Most efficient for simpler tasks');
-		expect(described('Sonnet 5')).toBe('Older version');
-		expect(described('Fable 5.1')).toBe('For your toughest challenges');
-		expect(described('Fable 5')).toBe('Older version');
-		expect(['Opus 5', 'Opus 4.8', 'Opus 4.7', 'Opus 4.6'].map(described)).toEqual(Array(4).fill('Older version'));
-		const descriptions = items.map(c => c.description).filter(d => d !== 'Older version');
-		expect(new Set(descriptions).size).toBe(descriptions.length);
-		expect(new Set(items.map(c => c.name)).size).toBe(items.length);
-		// Names without a version (Codex's) are left as they are.
-		expect(modelChoices([{ id: 'a', name: 'GPT', description: 'x' }, { id: 'b', name: 'GPT mini', description: 'x' }]).items.map(c => c.description)).toEqual(['x', 'x']);
+	it('the model picker\'s choices are the catalog\'s, each with its provider', () => {
+		const model = configControls(tact('gpt-6.1-sol'), TACT).find(c => c.placement === 'model')!;
+		expect(model.choices.map(c => [c.name, c.description])).toEqual(catalog.models.map(m => [m.label, m.provider === 'openai' ? 'OpenAI' : 'Anthropic']));
 	});
 
 	it('the sign-in picker runs the login and offers a retry', () => {
-		const g = signInGroup(CODEX);
+		const g = signInGroup(TACT);
 		expect(g.id).toBe(SIGN_IN_GROUP);
-		expect(g.selected!.name).toBe('Not signed in to Codex');
-		expect(g.commands!.map(c => c.command)).toEqual(['agentChat.login.codex', 'agentChat.restart.codex']);
+		expect(g.selected!.name).toBe('Not signed in to tact');
+		expect(g.commands!.map(c => c.command)).toEqual(['agentChat.login.tact', 'agentChat.restart.tact']);
 	});
 });

@@ -3,13 +3,14 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-// Agent chat's Cmd/Ctrl+L and Retry go to a chat the user can see. Closing a chat's editor tab doesn't dispose its
+// Agent chat's Cmd/Ctrl+L goes to a chat the user can see. Closing a chat's editor tab doesn't dispose its
 // widget (the editor pane is kept for the next chat tab), so the last focused widget can be one that isn't shown
-// anywhere: a reference inserted there, or a message sent there, is lost. The real ChatWidgetService decides.
+// anywhere: a reference inserted there is lost. The real ChatWidgetService decides.
 
 import assert from 'assert';
 import { Emitter, Event } from '../../../../../base/common/event.js';
 import { DisposableStore } from '../../../../../base/common/lifecycle.js';
+import { observableValue } from '../../../../../base/common/observable.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { IRange } from '../../../../../editor/common/core/range.js';
@@ -21,7 +22,7 @@ import { ChatDynamicVariableModel } from '../../../chat/browser/attachments/chat
 import { ChatViewId, IChatWidget, IChatWidgetService } from '../../../chat/browser/chat.js';
 import { ChatWidgetService } from '../../../chat/browser/widget/chatWidgetService.js';
 import { chatSetUpForSessionsList } from '../../../chat/browser/widgetHosts/viewPane/chatViewPane.js';
-import '../../browser/agentChat.contribution.js';
+import { AgentChatModelPicks, MODEL_PICKED_COMMAND } from '../../browser/agentChat.contribution.js';
 
 interface FakeWidget {
 	readonly widget: IChatWidget;
@@ -31,7 +32,7 @@ interface FakeWidget {
 	text(): string;
 }
 
-suite('AgentChat: Cmd/Ctrl+L and Retry go to a chat that is shown', () => {
+suite('AgentChat: Cmd/Ctrl+L goes to a chat that is shown', () => {
 
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 	let disposables: DisposableStore;
@@ -111,16 +112,6 @@ suite('AgentChat: Cmd/Ctrl+L and Retry go to a chat that is shown', () => {
 		assert.strictEqual(viewWidget.text(), '@notes.md:L2 ');
 	});
 
-	test('Retry without a chat resource sends in the chat view, not in a closed editor tab', async () => {
-		const closedTab = fakeWidget();
-		closedTab.focus();
-
-		const sent = await run('_agentChat.resend', undefined, 'try again');
-
-		assert.strictEqual(sent, true);
-		assert.deepStrictEqual(viewWidget.sent, ['try again']);
-		assert.deepStrictEqual(closedTab.sent, []);
-	});
 });
 
 suite('AgentChat: the chat view lists past chats', () => {
@@ -135,5 +126,36 @@ suite('AgentChat: the chat view lists past chats', () => {
 		assert.strictEqual(chatSetUpForSessionsList({}, false), false);
 		assert.strictEqual(chatSetUpForSessionsList({ completed: true }, false), true);
 		assert.strictEqual(chatSetUpForSessionsList({}, true), true);
+	});
+});
+
+suite('AgentChat: a model picked in an extension\'s chat is reported at once', () => {
+
+	const store = ensureNoDisposablesAreLeakedInTestSuite();
+
+	type Model = { identifier: string; metadata: { targetChatSessionType?: string } };
+
+	test('only models the extension targets at the chat\'s session type, once per pick', () => {
+		const disposables = store.add(new DisposableStore());
+		const reported: [string, string][] = [];
+		disposables.add(CommandsRegistry.registerCommand(MODEL_PICKED_COMMAND, () => undefined));
+		const commands = { executeCommand: async (id: string, resource: URI, model: string) => { reported.push([resource.toString(), model]); return undefined; } };
+		const selected = observableValue<Model | undefined>('model', undefined);
+		const added = disposables.add(new Emitter<IChatWidget>());
+		const widget = { input: { selectedLanguageModel: selected }, viewModel: { model: { sessionResource: URI.parse('agent-tact:/untitled-1') } } } as unknown as IChatWidget;
+		const widgetService = { getAllWidgets: () => [], onDidAddWidget: added.event } as unknown as IChatWidgetService;
+		disposables.add(new AgentChatModelPicks(widgetService, commands as never));
+		added.fire(widget);
+
+		selected.set({ identifier: 'agent-chat/agent-tact:claude-opus-5-5', metadata: { targetChatSessionType: 'agent-tact' } }, undefined);
+		selected.set({ identifier: 'agent-chat/agent-tact:claude-opus-5-5', metadata: { targetChatSessionType: 'agent-tact' } }, undefined);
+		selected.set({ identifier: 'copilot/gpt', metadata: {} }, undefined);
+		selected.set({ identifier: 'other/x', metadata: { targetChatSessionType: 'other-type' } }, undefined);
+		selected.set({ identifier: 'agent-chat/agent-tact:gpt-6.1-sol', metadata: { targetChatSessionType: 'agent-tact' } }, undefined);
+
+		assert.deepStrictEqual(reported, [
+			['agent-tact:/untitled-1', 'agent-chat/agent-tact:claude-opus-5-5'],
+			['agent-tact:/untitled-1', 'agent-chat/agent-tact:gpt-6.1-sol'],
+		]);
 	});
 });

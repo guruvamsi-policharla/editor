@@ -6,10 +6,16 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type * as acp from '@agentclientprotocol/sdk';
 import { TactAgent } from '../src/agent.js';
-import { configOptions, EntryMapper, isAuthError, pathsIn, promptText, sessionStartFailure, toolDetail } from '../src/mapping.js';
+import { configOptions, EntryMapper, isAuthError, pathsIn, promptText, sessionStartFailure, speedFix, toolDetail } from '../src/mapping.js';
+import realCatalog from './fixtures/models-98ffe05.json' with { type: 'json' };
+
+/** tact dev-98ffe05's `models` answer with OpenAI, Claude and Glasswing keys (the editor hard-codes none of it). */
+const REAL_CATALOG = realCatalog as ModelCatalog;
+const choices = (options: acp.SessionConfigOption[], id: string) => ((options.find(o => o.id === id) as { options: { value: string }[] } | undefined)?.options ?? []).map(o => o.value);
+const choiceNames = (options: acp.SessionConfigOption[], id: string) => ((options.find(o => o.id === id) as { options: { name: string }[] } | undefined)?.options ?? []).map(o => o.name);
 import { hasWebApi, launchTact, openFifo, ptyCommand, startFailure, stripAnsi } from '../src/process.js';
 import { reply, TerminalResponder } from '../src/terminal.js';
-import { parseEvent, TactApiError } from '../src/web.js';
+import { parseEvent, TactApiError, type ModelCatalog } from '../src/web.js';
 
 const FAKE_TACT = fileURLToPath(new URL('./fixtures/fake-tact.mjs', import.meta.url));
 chmodSync(FAKE_TACT, 0o755);
@@ -60,14 +66,56 @@ describe('entries → updates', () => {
 	});
 
 	it('settings → pickers: model only before the first turn, effort, Pro where offered, speed; no approvals (tact has none)', () => {
-		const catalog = { models: [{ id: 'sol', label: 'Sol', provider: 'openai', reasoning_modes: ['standard', 'pro'], effective_speeds: [], effort_fixed_after_start: false }], efforts: ['low' as const, 'high' as const], speeds: ['standard', 'fast'] };
-		const fresh = configOptions({ model: 'gpt-6.1-sol', effort: 'high', reasoning_mode: 'standard', speed: 'standard', started: false }, catalog);
+		const fresh = configOptions({ model: 'gpt-6.1-sol', effort: 'high', reasoning_mode: 'standard', speed: 'standard', started: false }, REAL_CATALOG);
 		expect(fresh.map(o => o.id)).toEqual(['model', 'effort', 'reasoning_mode', 'speed']);
-		expect(fresh[0]).toMatchObject({ category: 'model', currentValue: 'sol' });
-		const started = configOptions({ model: 'gpt-6.1-sol', effort: 'high', reasoning_mode: 'standard', speed: 'standard', started: true }, catalog);
-		expect(started.map(o => o.id)).toEqual(['model', 'effort', 'speed']);
+		expect(fresh[0]).toMatchObject({ category: 'model', currentValue: 'gpt-6.1-sol' });
+		expect(choices(fresh, 'model')).toEqual(REAL_CATALOG.models.map(m => m.id));
+		expect(choiceNames(fresh, 'model')).toEqual(REAL_CATALOG.models.map(m => m.label));
+		expect((fresh[0] as { options: { description?: string }[] }).options.map(o => o.description)).toEqual(['OpenAI', 'OpenAI', 'OpenAI', 'Anthropic', 'Anthropic', 'Anthropic', 'Anthropic', 'Anthropic']);
+		const started = configOptions({ model: 'gpt-6.1-sol', effort: 'high', reasoning_mode: 'pro', speed: 'standard', started: true }, REAL_CATALOG);
+		expect(started.map(o => o.id)).toEqual(['model', 'effort', 'reasoning_mode', 'speed']);
 		expect(fresh.some(o => o.category === 'mode')).toBe(false);
-		expect((started[0] as { options: unknown[] }).options).toHaveLength(1);
+		expect(choices(started, 'model')).toEqual(['gpt-6.1-sol']);
+		// The reasoning mode is fixed once started: it stays shown, with only its value.
+		expect(choices(started, 'reasoning_mode')).toEqual(['pro']);
+		expect(choices(started, 'effort')).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+	});
+
+	it('every picker follows the selected model in the catalog (speed, effort, reasoning mode)', () => {
+		const at = (model: string, more: Partial<{ speed: string; started: boolean; effort: 'high' | 'max' }> = {}) =>
+			configOptions({ model, effort: more.effort ?? 'high', reasoning_mode: 'standard', speed: more.speed ?? 'standard', started: more.started ?? false }, REAL_CATALOG);
+		// Speed: only tiers the model runs at.
+		expect(choices(at('gpt-6.1-sol'), 'speed')).toEqual(['standard', 'fast', 'ultrafast']);
+		expect(choices(at('gpt-6-astra'), 'speed')).toEqual(['standard', 'fast', 'ultrafast']);
+		expect(choices(at('gpt-6-luna'), 'speed')).toEqual(['standard', 'fast']);
+		expect(choices(at('claude-opus-5-5'), 'speed')).toEqual(['standard', 'fast']);
+		for (const model of ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-fable-5-1', 'claude-mythos-5-1']) {
+			expect(at(model).map(o => o.id), model).toEqual(['model', 'effort']);
+		}
+		// A tier the model runs lower is shown as the tier it runs.
+		expect(at('claude-opus-5-5', { speed: 'ultrafast' }).find(o => o.id === 'speed')!.currentValue).toBe('fast');
+		// Pro reasoning: OpenAI models only.
+		expect(choices(at('gpt-6-luna'), 'reasoning_mode')).toEqual(['standard', 'pro']);
+		expect(at('claude-opus-5-5').some(o => o.id === 'reasoning_mode')).toBe(false);
+		// Effort: every level before the first turn; a Claude model's is fixed after it, an OpenAI model's isn't.
+		expect(choices(at('claude-opus-5-5', { effort: 'max' }), 'effort')).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+		const fixed = at('claude-opus-5-5', { effort: 'max', started: true }).find(o => o.id === 'effort')!;
+		expect(choices([fixed], 'effort')).toEqual(['max']);
+		expect(fixed.description).toBe('Fixed once the chat has started on Opus 5.5');
+		expect(choices(at('gpt-6.1-sol', { started: true }), 'effort')).toHaveLength(5);
+		// Without a catalog (tact didn't answer): only the session's own values, no guessed speeds.
+		const bare = configOptions({ model: 'x', effort: 'high', reasoning_mode: 'standard', speed: 'fast', started: false }, undefined);
+		expect(bare.map(o => o.id)).toEqual(['model', 'effort']);
+	});
+
+	it('the speed to set after a model change: the tier the new model runs, none when it has it', () => {
+		const s = (model: string, speed: string) => ({ model, effort: 'high' as const, reasoning_mode: 'standard', speed, started: false });
+		expect(speedFix(s('claude-opus-5-5', 'ultrafast'), REAL_CATALOG)).toBe('fast');
+		expect(speedFix(s('claude-haiku-5-5', 'fast'), REAL_CATALOG)).toBe('standard');
+		expect(speedFix(s('gpt-6-luna', 'ultrafast'), REAL_CATALOG)).toBe('fast');
+		expect(speedFix(s('gpt-6.1-sol', 'ultrafast'), REAL_CATALOG)).toBeUndefined();
+		expect(speedFix(s('claude-haiku-5-5', 'standard'), REAL_CATALOG)).toBeUndefined();
+		expect(speedFix(s('unknown', 'ultrafast'), REAL_CATALOG)).toBeUndefined();
 	});
 
 	it('prompt text keeps references in place and adds links not mentioned', () => {
@@ -255,7 +303,7 @@ describe('TactAgent on a fake tact (hidden pty, web API)', () => {
 		const { sessionId, configOptions: options } = await a.newSession({ cwd: ws, mcpServers: [] });
 		expect(sessionId).toMatch(/[0-9a-f-]{36}/);
 		expect(options?.map(o => o.id)).toEqual(['model', 'effort', 'reasoning_mode', 'speed']);
-		expect(options?.[0]).toMatchObject({ currentValue: 'gpt-6.1-sol', options: [{ value: 'gpt-6.1-sol', name: 'Sol' }, { value: 'gpt-6-luna', name: 'Luna' }] });
+		expect(options?.[0]).toMatchObject({ currentValue: 'gpt-6.1-sol', options: [{ value: 'gpt-6.1-sol', name: 'Sol', description: 'OpenAI' }, { value: 'gpt-6-luna', name: 'Luna', description: 'OpenAI' }] });
 		const res = await a.prompt({ sessionId, prompt: [{ type: 'text', text: 'hello' }] });
 		expect(res.stopReason).toBe('end_turn');
 		expect(text('agent_message_chunk')).toBe('echo: hello');
@@ -263,7 +311,9 @@ describe('TactAgent on a fake tact (hidden pty, web API)', () => {
 		expect(updates.some(u => u.update.sessionUpdate === 'tool_call' && u.update.kind === 'execute')).toBe(true);
 		// After the first turn the model is fixed.
 		const last = updates.filter(u => u.update.sessionUpdate === 'config_option_update').at(-1)!.update as { configOptions: acp.SessionConfigOption[] };
-		expect(last.configOptions.map(o => o.id)).not.toContain('reasoning_mode');
+		expect(choices(last.configOptions, 'model')).toEqual(['gpt-6.1-sol']);
+		// The reasoning mode too: still shown, with only its value.
+		expect(choices(last.configOptions, 'reasoning_mode')).toEqual(['standard']);
 	});
 
 	it('the harness edits files itself; the edit is a tool call with its path', async () => {
@@ -322,10 +372,50 @@ describe('TactAgent on a fake tact (hidden pty, web API)', () => {
 	});
 
 	it('a request tact refuses fails with its message, status and code, not a bare "Internal error"', async () => {
+		const a = agent({ FAKE_TACT_REFUSE: 'set_effort' });
+		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
+		await expect(a.setConfigOption({ sessionId, configId: 'effort', value: 'low' }))
+			.rejects.toMatchObject({ code: -32603, message: 'refused the request: set_effort refused (set_effort: HTTP 400 invalid_request)' });
+	});
+
+	it('a value the model doesn\'t offer is refused with what it does offer, never sent to tact and quietly run differently', async () => {
+		writeFileSync(join(home, 'config.toml'), '[claude]\nenabled = true\n');
 		const a = agent();
 		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
-		await expect(a.setConfigOption({ sessionId, configId: 'model', value: 'claude-opus-5-5' }))
-			.rejects.toMatchObject({ code: -32603, message: 'refused the request: claude-opus-5-5 is not available (set_model: HTTP 400 invalid_request)' });
+		await a.setConfigOption({ sessionId, configId: 'model', value: 'claude-opus-5-5' });
+		await expect(a.setConfigOption({ sessionId, configId: 'speed', value: 'ultrafast' }))
+			.rejects.toMatchObject({ code: -32603, message: 'Opus 5.5 doesn\'t offer ultrafast for speed: Standard speed, Fast' });
+		await expect(a.setConfigOption({ sessionId, configId: 'reasoning_mode', value: 'pro' }))
+			.rejects.toMatchObject({ message: 'Opus 5.5 has no reasoning_mode setting' });
+		await expect(a.setConfigOption({ sessionId, configId: 'model', value: 'no-such-model' }))
+			.rejects.toMatchObject({ message: expect.stringContaining('doesn\'t offer no-such-model for model') });
+	});
+
+	it('a model change puts the speed on a tier the new model runs (Ultrafast → Fast on Opus, → Standard on Haiku), and says so in the options', async () => {
+		writeFileSync(join(home, 'config.toml'), '[claude]\nenabled = true\n');
+		const a = agent();
+		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
+		await a.setConfigOption({ sessionId, configId: 'speed', value: 'ultrafast' });
+		const opus = await a.setConfigOption({ sessionId, configId: 'model', value: 'claude-opus-5-5' });
+		expect(opus.configOptions.find(o => o.id === 'speed')).toMatchObject({ currentValue: 'fast' });
+		expect(choices(opus.configOptions, 'speed')).toEqual(['standard', 'fast']);
+		const haiku = await a.setConfigOption({ sessionId, configId: 'model', value: 'claude-haiku-5-5' });
+		expect(haiku.configOptions.map(o => o.id)).toEqual(['model', 'effort']);
+		// tact's own session has the tier too (a reload shows it).
+		const sol = await a.setConfigOption({ sessionId, configId: 'model', value: 'gpt-6.1-sol' });
+		expect(sol.configOptions.find(o => o.id === 'speed')).toMatchObject({ currentValue: 'standard' });
+	});
+
+	it('a Claude model\'s effort is fixed once the chat has started: offered alone, and a change is refused', async () => {
+		writeFileSync(join(home, 'config.toml'), '[claude]\nenabled = true\n');
+		const a = agent();
+		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
+		await a.setConfigOption({ sessionId, configId: 'model', value: 'claude-opus-5-5' });
+		await a.prompt({ sessionId, prompt: [{ type: 'text', text: 'hello' }] });
+		const last = updates.filter(u => u.sessionId === sessionId && u.update.sessionUpdate === 'config_option_update').at(-1)!.update as { configOptions: acp.SessionConfigOption[] };
+		expect(choices(last.configOptions, 'effort')).toEqual(['high']);
+		expect(last.configOptions.find(o => o.id === 'effort')!.description).toBe('Fixed once the chat has started on Opus 5.5');
+		await expect(a.setConfigOption({ sessionId, configId: 'effort', value: 'low' })).rejects.toMatchObject({ message: expect.stringContaining('Opus 5.5 doesn\'t offer low for thinking') });
 	});
 
 	it('a Claude key added to tact\'s config while it runs: reload_config, and the Claude models are offered', async () => {

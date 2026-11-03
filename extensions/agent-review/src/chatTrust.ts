@@ -11,8 +11,6 @@ import * as vscode from 'vscode';
 /** Stand-in command ids (package.json) → the chat each one stands for. */
 export const TRUST_COMMANDS: Record<string, string> = {
   'agentReview.chatNeedsTrust.newChat': 'An agent chat',
-  'agentReview.chatNeedsTrust.newClaude': 'A Claude Code chat',
-  'agentReview.chatNeedsTrust.newCodex': 'A Codex chat',
   'agentReview.chatNeedsTrust.newTact': 'A tact chat',
 };
 

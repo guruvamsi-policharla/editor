@@ -4,12 +4,12 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-	AgentSupervisor, CLAUDE, errorMessage, HarnessClient, isAuthRequired, optionValues, PermissionBroker, PermissionNotRestoredError, textOf, withValues,
+	AgentSupervisor, errorMessage, HarnessClient, isAuthRequired, optionValues, PermissionBroker, TACT, textOf, withValues,
 	type AgentStatus, type Change, type HarnessProfile, type PermissionPrompt,
 } from '../src/index.js';
 
 const FAKE_AGENT = fileURLToPath(new URL('./fixtures/fake-agent.mjs', import.meta.url));
-const PROFILE: HarnessProfile = { ...CLAUDE, id: 'fake', label: 'Fake' };
+const PROFILE: HarnessProfile = { ...TACT, id: 'fake', label: 'Fake', sessionMeta: { fake: { option: true } }, defaults: { mode: 'acceptEdits' } };
 
 let clients: HarnessClient[] = [];
 afterEach(async () => {
@@ -56,8 +56,7 @@ describe('HarnessClient on a fake agent', () => {
 		session.onChange(c => changes.push(c));
 		await session.prompt('meta');
 		const seen = JSON.parse(lastText(changes));
-		// Bypass is allowed at launch (the adapter's --allow-dangerously-skip-permissions), but the session isn't in it.
-		expect(seen.state.meta).toEqual({ claudeCode: { options: { allowDangerouslySkipPermissions: true } } });
+		expect(seen.state.meta).toEqual({ fake: { option: true } });
 		expect(seen.state.mode).toBe('acceptEdits');
 	});
 
@@ -163,50 +162,6 @@ describe('HarnessClient on a fake agent', () => {
 		expect(client.get(old)).toBeUndefined();
 	});
 
-	describe('Bypass permissions: allowed, never a default, never restored', () => {
-		it('a chat in Bypass is saved with the mode it had before; switching modes moves that along', async () => {
-			const { client } = harness();
-			const session = await client.newSession();
-			expect(session.keptValues()).toMatchObject({ mode: 'acceptEdits' });
-			await session.setOption('mode', 'bypassPermissions');
-			expect(session.inTransient()).toBe(true);
-			expect(session.view.state.modeId).toBe('bypassPermissions');
-			expect(session.keptValues()).toMatchObject({ mode: 'acceptEdits' });
-			await session.setOption('mode', 'default');
-			await session.setOption('mode', 'bypassPermissions');
-			expect(session.keptValues()).toMatchObject({ mode: 'default' });
-		});
-
-		it('after an adapter restart, a chat that was in Bypass is back in its previous mode, and says so', async () => {
-			const { client, supervisor } = harness({ FAKE_RESUME_MODE: 'bypassPermissions' });
-			const session = await client.newSession();
-			await session.setOption('mode', 'default');
-			await session.setOption('mode', 'bypassPermissions');
-			await supervisor.restart();
-			const live = await session.ensureLive();
-			expect(live.recovery).toBe('resumed');
-			expect(live.left).toEqual([{ id: 'mode', value: 'bypassPermissions', to: 'default' }]);
-			expect(live.settings?.permissionHeld).toBe(true);
-			expect(session.view.state.modeId).toBe('default');
-		});
-
-		it('a new session never starts in Bypass, also when the agent starts it there (settings.json defaultMode)', async () => {
-			const noDefaults: HarnessProfile = { ...PROFILE, defaults: {} };
-			const supervisor = new AgentSupervisor({ launch: async () => ({ command: process.execPath, args: [FAKE_AGENT], env: { FAKE_NEW_MODE: 'bypassPermissions' } }), sleep: async () => { } });
-			const client = new HarnessClient(noDefaults, supervisor, process.cwd(), new PermissionBroker());
-			clients.push(client);
-			const session = await client.newSession();
-			expect(session.view.state.modeId).toBe('default');
-		});
-
-		it('a session that comes back in Bypass and can\'t leave it sends nothing', async () => {
-			const { client, supervisor } = harness({ FAKE_RESUME_MODE: 'bypassPermissions', FAKE_REJECT: 'mode=acceptEdits,mode=default' });
-			const session = await client.newSession();
-			await supervisor.restart();
-			await expect(session.prompt('meta')).rejects.toBeInstanceOf(PermissionNotRestoredError);
-		});
-	});
-
 	describe('history (session/list, session/load, restore) across adapter restarts', () => {
 		let store: string;
 		beforeEach(() => { store = mkdtempSync(join(tmpdir(), 'fake-store-')); });
@@ -268,13 +223,12 @@ describe('HarnessClient on a fake agent', () => {
 			expect(session.replaying).toBe(false);
 		});
 
-		it('a chat reopened after a restart gets its own mode and model back, although the agent resumes it in a looser mode (#33, #25)', async () => {
+		it('a chat reopened after a restart gets its own values back, although the agent resumes it with its defaults (#25)', async () => {
 			const id = await earlier();
 			const { client } = harness({ FAKE_STORE: store, FAKE_RESUME_MODE: 'acceptEdits' });
 			const session = client.restore(id);
 			const result = await session.applySettings({ mode: 'default', model: 'small' });
-			expect(result).toMatchObject({ permissionHeld: true, failed: [] });
-			expect(result.fellBackTo).toBeUndefined();
+			expect(result).toMatchObject({ failed: [] });
 			expect(optionValues(session.view.state.configOptions)).toMatchObject({ mode: 'default', model: 'small' });
 			const changes: Change[] = [];
 			session.onChange(c => changes.push(c));
@@ -282,35 +236,17 @@ describe('HarnessClient on a fake agent', () => {
 			expect(JSON.parse(lastText(changes)).state).toMatchObject({ mode: 'default', model: 'small', resumed: true });
 		});
 
-		it('a mode the agent refuses falls back to the strictest one offered, never to the looser one it resumed in (#33)', async () => {
+		it('a value the agent refuses is reported; one it doesn\'t offer is skipped', async () => {
 			const id = await earlier();
-			const { client } = harness({ FAKE_STORE: store, FAKE_RESUME_MODE: 'bypassPermissions', FAKE_REJECT: 'mode=acceptEdits' });
+			const { client } = harness({ FAKE_STORE: store, FAKE_REJECT: 'mode=acceptEdits' });
 			const session = client.restore(id);
-			const result = await session.applySettings({ mode: 'acceptEdits' });
-			expect(result.failed.map(f => f.value)).toEqual(['acceptEdits']);
-			// Out of Bypass already when the session came back (leaveTransient), so this is no looser than wanted.
-			expect(result).toMatchObject({ permissionHeld: true });
+			const result = await session.applySettings({ mode: 'acceptEdits', model: 'huge' });
+			expect(result.failed.map(f => `${f.id}=${f.value}`)).toEqual(['mode=acceptEdits']);
+			expect(result.applied).toEqual([]);
 			expect(session.view.state.modeId).toBe('default');
 		});
 
-		it('a saved mode the agent doesn\'t offer falls back to the strictest one (#33)', async () => {
-			const id = await earlier();
-			const { client } = harness({ FAKE_STORE: store, FAKE_RESUME_MODE: 'acceptEdits' });
-			const session = client.restore(id);
-			expect(await session.applySettings({ mode: 'dontAsk' })).toMatchObject({ fellBackTo: 'default', permissionHeld: true });
-			expect(session.view.state.modeId).toBe('default');
-		});
-
-		it('when not even the strictest mode can be set, it says so: the permission didn\'t hold (#33)', async () => {
-			const id = await earlier();
-			const { client } = harness({ FAKE_STORE: store, FAKE_RESUME_MODE: 'acceptEdits', FAKE_REJECT: 'mode=default,mode=plan' });
-			const session = client.restore(id);
-			const result = await session.applySettings({ mode: 'default' });
-			expect(result.permissionHeld).toBe(false);
-			expect(result.fellBackTo).toBe('acceptEdits');
-		});
-
-		it('a restored session given the chat\'s settings gets them back when it resumes; so does a crashed one (#33)', async () => {
+		it('a restored session given the chat\'s settings gets them back when it resumes; so does a crashed one', async () => {
 			const id = await earlier();
 			const { client } = harness({ FAKE_STORE: store, FAKE_RESUME_MODE: 'acceptEdits' });
 			const options = (await client.newSession()).view.state.configOptions;
@@ -323,17 +259,6 @@ describe('HarnessClient on a fake agent', () => {
 			changes.length = 0;
 			await session.prompt('meta');
 			expect(JSON.parse(lastText(changes)).state).toMatchObject({ mode: 'default', model: 'small', resumed: true });
-		});
-
-		it('a session that comes back looser and can\'t be switched back sends nothing (#33)', async () => {
-			const id = await earlier();
-			const { client } = harness({ FAKE_STORE: store, FAKE_RESUME_MODE: 'acceptEdits', FAKE_REJECT: 'mode=default,mode=plan' });
-			const options = (await client.newSession()).view.state.configOptions;
-			const session = client.restore(id, withValues(options, { mode: 'default' }));
-			const changes: Change[] = [];
-			session.onChange(c => changes.push(c));
-			await expect(session.prompt('meta')).rejects.toBeInstanceOf(PermissionNotRestoredError);
-			expect(lastText(changes)).toBe('');
 		});
 
 		it('an agent without list support lists nothing; load says why', async () => {

@@ -1,10 +1,10 @@
-// Where a harness comes from: the user's CLI on PATH (shared install and login), the pinned adapter installed
-// on first use (or a user-configured adapter command), run under the editor's own Node (Electron as node),
-// so no system Node is needed at run time.
+// Where a harness comes from: the user's CLI on PATH (shared install and login), driven by the adapter that ships
+// with the editor (or a user-configured adapter command), run under the editor's own Node (Electron as node), so
+// no system Node is needed at run time.
 import { accessSync, constants } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
-import { launchFor, npmAdapter, type AdapterInstaller, type AgentLaunch, type HarnessProfile, type ProfileOverride } from '@editor/acp-client';
+import { launchFor, type AgentLaunch, type HarnessProfile, type ProfileOverride } from '@editor/acp-client';
 
 export function expandHome(p: string): string {
 	return p === '~' || p.startsWith('~/') ? join(homedir(), p.slice(2)) : p;
@@ -48,37 +48,25 @@ export class HarnessMissingError extends Error {
 export const EDITOR_NODE = { path: process.execPath, env: { ELECTRON_RUN_AS_NODE: '1' } };
 
 /**
- * The adapter's launch. `bundledDir` holds the adapters that ship with the extension (tact's); a bundled
- * adapter drives the user's CLI, so a missing CLI is an error that says how to install it.
+ * The adapter's launch. `bundledDir` holds the adapters that ship with the extension (tact's); the adapter drives
+ * the user's CLI, so a missing CLI is an error that says how to install it.
  */
-export async function resolveLaunch(profile: HarnessProfile, override: ProfileOverride | undefined, installer: AdapterInstaller, cwd: string, progress: (m: string) => void, bundledDir: string): Promise<AgentLaunch> {
+export function resolveLaunch(profile: HarnessProfile, override: ProfileOverride | undefined, cwd: string, bundledDir: string): AgentLaunch {
 	const harnessPath = findHarness(profile, override);
 	if (override?.adapterPath) {
 		return launchFor(profile, { adapter: { kind: 'command', command: expandHome(override.adapterPath) }, node: EDITOR_NODE, harnessPath, cwd });
 	}
-	if ('bundled' in profile.adapter) {
-		if (!harnessPath) {
-			throw new HarnessMissingError(profile);
-		}
-		return launchFor(profile, { adapter: { kind: 'script', path: join(bundledDir, profile.adapter.bundled) }, node: EDITOR_NODE, harnessPath, cwd });
+	if (!harnessPath) {
+		throw new HarnessMissingError(profile);
 	}
-	if (!installer.installed(profile, !harnessPath)) {
-		const adapter = npmAdapter(profile);
-		progress(`Downloading the ${profile.label} adapter (${adapter.npm}@${adapter.version})…`);
-	}
-	const installed = await installer.ensure(profile, { omitOptional: !!harnessPath, onProgress: progress });
-	return launchFor(profile, { adapter: { kind: 'script', path: installed.entry }, node: EDITOR_NODE, harnessPath, cwd });
+	return launchFor(profile, { adapter: { kind: 'script', path: join(bundledDir, profile.adapter.bundled) }, node: EDITOR_NODE, harnessPath, cwd });
 }
 
-/** The login command line: the user's CLI, or the adapter's bundled copy run under the editor's node. */
-export async function loginCommand(profile: HarnessProfile, override: ProfileOverride | undefined, installer: AdapterInstaller): Promise<{ shellPath: string; shellArgs: string[]; env?: Record<string, string> }> {
+/** The login command line: the user's CLI. */
+export function loginCommand(profile: HarnessProfile, override: ProfileOverride | undefined): { shellPath: string; shellArgs: string[] } {
 	const cli = findHarness(profile, override);
-	if (cli) {
-		return { shellPath: cli, shellArgs: [...profile.login.args] };
-	}
-	if (!profile.harness.bundled) {
+	if (!cli) {
 		throw new Error(`${profile.harness.binary} isn't on PATH. ${profile.install ?? `Install ${profile.label}`}, or set agentChat.harnesses.${profile.id}.harnessPath.`);
 	}
-	const installed = await installer.ensure(profile, { omitOptional: false });
-	return { shellPath: EDITOR_NODE.path, shellArgs: [join(installed.nodeModules, profile.harness.bundled), ...profile.login.args], env: EDITOR_NODE.env };
+	return { shellPath: cli, shellArgs: [...profile.login.args] };
 }

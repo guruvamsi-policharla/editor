@@ -38,10 +38,10 @@ function save() {
 
 function options(state) {
 	const list = [
-		{ id: 'mode', name: 'Mode', category: 'mode', type: 'select', currentValue: state.mode, options: [{ value: 'default', name: 'Manual' }, { value: 'acceptEdits', name: 'Accept edits' }, { value: 'plan', name: 'Plan' }, { value: 'bypassPermissions', name: 'Bypass' }] },
+		{ id: 'mode', name: 'Mode', category: 'mode', type: 'select', currentValue: state.mode, options: [{ value: 'default', name: 'Manual' }, { value: 'acceptEdits', name: 'Accept edits' }, { value: 'plan', name: 'Plan' }] },
 		{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: state.model, options: [{ value: 'big', name: 'Big' }, { value: 'small', name: 'Small' }] },
 	];
-	// Like Claude: effort exists only for models that support it.
+	// Effort exists only for models that support it (an option that comes and goes with the model).
 	if (state.model === 'big') {
 		list.push({ id: 'effort', name: 'Effort', category: 'thought_level', type: 'select', currentValue: state.effort, options: [{ value: 'low', name: 'Low' }, { value: 'high', name: 'High' }] });
 	}

@@ -60,7 +60,9 @@ describe.skipIf(!BIN)('the real tact', () => {
 		expect(answer()).toBe('Hello from mock claude-opus-5-5.');
 		expect(mock.requests.at(-1)).toEqual({ path: '/v1/messages', model: 'claude-opus-5-5' });
 		const tactId = JSON.parse(readFileSync(join(home, 'editor-sessions.json'), 'utf8'))[sessionId];
-		expect(tactId).toMatch(/^claude-/);
+		// tact started a new session for the model (its id no longer says which model: `claude-…` before 98ffe05).
+		expect(tactId).toBeTruthy();
+		expect(tactId).not.toBe(sessionId);
 
 		a.dispose();
 		await new Promise(r => setTimeout(r, 300));
@@ -90,4 +92,21 @@ describe.skipIf(!BIN)('the real tact', () => {
 		}
 		expect(updates.some(u => u.sessionUpdate === 'config_option_update' && models(u.configOptions).includes('claude-opus-5-5'))).toBe(true);
 	});
+
+	it('each model\'s pickers are the catalog\'s: speeds it runs, Pro only where offered, a Claude effort fixed after the first turn', async () => {
+		config(claude('sk-ant-api03-mock'));
+		const a = agent();
+		const { sessionId, configOptions } = await a.newSession({ cwd: ws, mcpServers: [] });
+		const pick = (options: acp.SessionConfigOption[] | null | undefined, id: string) => ((options?.find(o => o.id === id) as { options: { value: string }[] } | undefined)?.options ?? []).map(o => o.value);
+		expect(models(configOptions).length).toBeGreaterThanOrEqual(7);
+		await a.setConfigOption({ sessionId, configId: 'speed', value: 'ultrafast' } as acp.SetSessionConfigOptionRequest);
+		const opus = await a.setConfigOption({ sessionId, configId: 'model', value: 'claude-opus-5-5' } as acp.SetSessionConfigOptionRequest);
+		expect(pick(opus.configOptions, 'speed')).toEqual(['standard', 'fast']);
+		expect(opus.configOptions?.find(o => o.id === 'speed')?.currentValue).toBe('fast');
+		expect(pick(opus.configOptions, 'reasoning_mode')).toEqual([]);
+		await a.prompt({ sessionId, prompt: [{ type: 'text', text: 'hello' }] });
+		const last = updates.filter(u => u.sessionUpdate === 'config_option_update').at(-1) as { configOptions: acp.SessionConfigOption[] };
+		expect(pick(last.configOptions, 'effort')).toHaveLength(1);
+		await expect(a.setConfigOption({ sessionId, configId: 'effort', value: 'low' } as acp.SetSessionConfigOptionRequest)).rejects.toThrow(/doesn't offer low/);
+	}, 60_000);
 });
