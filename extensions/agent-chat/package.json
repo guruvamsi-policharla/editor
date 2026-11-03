@@ -1,7 +1,7 @@
 {
   "name": "agent-chat",
   "displayName": "Agent Chat",
-  "description": "Chat with your agent harness (Claude Code, Codex, tact) in VS Code's native chat, over ACP. The harness edits files itself; edits are reviewed inline with Keep/Undo.",
+  "description": "Chat with tact in VS Code's native chat, over ACP. tact edits files itself; edits are reviewed inline with Keep/Undo.",
   "version": "0.0.1",
   "publisher": "editor",
   "private": true,
@@ -35,7 +35,7 @@
         "id": "agent-chat.default",
         "name": "agent",
         "fullName": "Agent",
-        "description": "Chat with Claude Code, Codex or tact",
+        "description": "Chat with tact",
         "isDefault": true,
         "modes": [
           "ask",
@@ -49,72 +49,6 @@
     ],
     "chatSessions": [
       {
-        "type": "agent-claude",
-        "name": "claude",
-        "displayName": "Claude Code",
-        "icon": "$(sparkle)",
-        "welcomeTitle": "Claude Code",
-        "welcomeMessage": "Your own Claude Code. It edits files itself; every edit shows up inline for review with Keep/Undo. Commands ask first.",
-        "inputPlaceholder": "Ask Claude Code. @ to reference, / for commands",
-        "order": 1,
-        "canDelegate": true,
-        "capabilities": {
-          "supportsFileAttachments": true
-        },
-        "requiresCustomModels": true,
-        "commands": [
-          {
-            "name": "compact",
-            "description": "Summarize the conversation to free up context"
-          },
-          {
-            "name": "context",
-            "description": "Show what fills the context window"
-          },
-          {
-            "name": "init",
-            "description": "Write a CLAUDE.md for this project"
-          },
-          {
-            "name": "security-review",
-            "description": "Review the pending changes for security issues"
-          },
-          {
-            "name": "usage",
-            "description": "Show plan usage limits"
-          }
-        ]
-      },
-      {
-        "type": "agent-codex",
-        "name": "codex",
-        "displayName": "Codex",
-        "icon": "$(terminal)",
-        "welcomeTitle": "Codex",
-        "welcomeMessage": "Your own Codex, in Workspace access. Its edits show up inline for review with Keep/Undo.",
-        "inputPlaceholder": "Ask Codex. @ to reference, / for commands",
-        "order": 2,
-        "canDelegate": true,
-        "capabilities": {
-          "supportsFileAttachments": true
-        },
-        "requiresCustomModels": true,
-        "commands": [
-          {
-            "name": "init",
-            "description": "Write an AGENTS.md for this project"
-          },
-          {
-            "name": "compact",
-            "description": "Summarize the conversation to free up context"
-          },
-          {
-            "name": "review",
-            "description": "Review the current changes"
-          }
-        ]
-      },
-      {
         "type": "agent-tact",
         "name": "tact",
         "displayName": "tact",
@@ -122,7 +56,7 @@
         "welcomeTitle": "tact",
         "welcomeMessage": "Your own tact (Nanocodex). It runs commands and edits files without asking (tact has no approval mode); every edit in the workspace shows up inline for review with Keep/Undo.",
         "inputPlaceholder": "Ask tact. @ to reference",
-        "order": 3,
+        "order": 1,
         "canDelegate": true,
         "capabilities": {
           "supportsFileAttachments": true
@@ -156,16 +90,6 @@
         "category": "Agent Chat"
       },
       {
-        "command": "agentChat.newClaude",
-        "title": "New Claude Code Chat",
-        "category": "Agent Chat"
-      },
-      {
-        "command": "agentChat.newCodex",
-        "title": "New Codex Chat",
-        "category": "Agent Chat"
-      },
-      {
         "command": "agentChat.newTact",
         "title": "New tact Chat",
         "category": "Agent Chat"
@@ -177,12 +101,12 @@
       },
       {
         "command": "agentChat.login",
-        "title": "Sign In to an Agent\u2026",
+        "title": "Sign In to tact",
         "category": "Agent Chat"
       },
       {
         "command": "agentChat.restart",
-        "title": "Restart Agent\u2026",
+        "title": "Restart tact",
         "category": "Agent Chat"
       },
       {
@@ -191,39 +115,14 @@
         "category": "Agent Chat"
       },
       {
-        "command": "agentChat.login.claude",
-        "title": "Sign In to Claude Code",
-        "category": "Agent Chat"
-      },
-      {
-        "command": "agentChat.restart.claude",
-        "title": "Restart Claude Code",
-        "category": "Agent Chat"
-      },
-      {
-        "command": "agentChat.login.codex",
-        "title": "Sign In to Codex",
-        "category": "Agent Chat"
-      },
-      {
-        "command": "agentChat.restart.codex",
-        "title": "Restart Codex",
-        "category": "Agent Chat"
-      },
-      {
         "command": "agentChat.searchChats",
-        "title": "Search Chats\u2026",
+        "title": "Search Chats…",
         "category": "Agent Chat",
         "icon": "$(search)"
       },
       {
         "command": "agentChat.runNow",
         "title": "Run Now (Don't Wait for the Other Chat)",
-        "category": "Agent Chat"
-      },
-      {
-        "command": "agentChat.retry",
-        "title": "Retry the Last Message",
         "category": "Agent Chat"
       },
       {
@@ -248,7 +147,7 @@
         "agentChat.harnesses": {
           "type": "object",
           "default": {},
-          "markdownDescription": "Per-harness overrides, keyed by `claude` / `codex` / `tact`: `adapterPath` (an installed ACP adapter command instead of the pinned download), `harnessPath` (the `claude`/`codex`/`tact` CLI instead of the one on PATH), `env` (extra adapter environment), `defaults` (config option values set on new sessions, e.g. `{\"mode\": \"default\"}`).",
+          "markdownDescription": "Overrides for the agent harness, keyed by `tact`: `adapterPath` (an ACP adapter command instead of the one that ships with the editor), `harnessPath` (the `tact` CLI instead of the one on PATH), `env` (extra adapter environment, e.g. `{\"TACT_HOME\": \"…\"}`), `defaults` (config option values set on new sessions, e.g. `{\"speed\": \"fast\"}`; a value the model doesn't offer is skipped). Entries for harnesses the editor no longer runs (`claude`, `codex`) are ignored.",
           "additionalProperties": {
             "type": "object",
             "properties": {
@@ -276,7 +175,7 @@
         "agentChat.turns.waitForOtherChats": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "One agent edits at a time: a message in one chat waits (\"Waiting for \u2026 to finish\") while another chat's turn is running, then starts by itself. **Run now** in the waiting chat starts it anyway. Chats in a mode that doesn't edit (plan, read-only) never wait."
+          "markdownDescription": "One agent edits at a time: a message in one chat waits (\"Waiting for … to finish\") while another chat's turn is running, then starts by itself. **Run now** in the waiting chat starts it anyway. Chats in a mode that doesn't edit (plan, read-only) never wait."
         }
       }
     },
@@ -294,10 +193,6 @@
         },
         {
           "command": "agentChat.runNow",
-          "when": "false"
-        },
-        {
-          "command": "agentChat.retry",
           "when": "false"
         },
         {

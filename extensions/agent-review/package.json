@@ -161,16 +161,6 @@
         "category": "Agent Chat"
       },
       {
-        "command": "agentReview.chatNeedsTrust.newClaude",
-        "title": "New Claude Code Chat",
-        "category": "Agent Chat"
-      },
-      {
-        "command": "agentReview.chatNeedsTrust.newCodex",
-        "title": "New Codex Chat",
-        "category": "Agent Chat"
-      },
-      {
         "command": "agentReview.chatNeedsTrust.newTact",
         "title": "New tact Chat",
         "category": "Agent Chat"
@@ -208,7 +198,7 @@
       },
       {
         "view": "agentReview.chatNeedsTrust",
-        "contents": "The agent chat (Claude Code, Codex, tact) is off in Restricted Mode: the agents run commands and edit files in this folder. Trust the folder to start a chat.\n[Manage Workspace Trust](command:workbench.trust.manage)"
+        "contents": "The agent chat (tact) is off in Restricted Mode: the agent runs commands and edit files in this folder. Trust the folder to start a chat.\n[Manage Workspace Trust](command:workbench.trust.manage)"
       }
     ],
     "menus": {
@@ -294,14 +284,6 @@
         },
         {
           "command": "agentReview.chatNeedsTrust.newChat",
-          "when": "!isWorkspaceTrusted"
-        },
-        {
-          "command": "agentReview.chatNeedsTrust.newClaude",
-          "when": "!isWorkspaceTrusted"
-        },
-        {
-          "command": "agentReview.chatNeedsTrust.newCodex",
           "when": "!isWorkspaceTrusted"
         },
         {

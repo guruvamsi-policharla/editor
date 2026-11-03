@@ -6,7 +6,7 @@ import type { AgentLaunch } from './profiles.js';
 /**
  * The client capabilities we advertise. Deliberately no `fs` and no `terminal`: the harness reads, writes
  * and runs commands with its own tools, and the review engine sees its edits on disk like any other agent's.
- * (No `_meta.terminal_output` either: Claude's adapter would then send `terminal` content pointing at a
+ * (No `_meta.terminal_output` either: an adapter could then send `terminal` content pointing at a
  * client terminal we don't have. Without it, command output arrives as ordinary text content.)
  */
 export const CLIENT_CAPABILITIES: acp.ClientCapabilities = Object.freeze({});
@@ -70,7 +70,7 @@ export class AgentConnection {
 			cwd: launch.cwd,
 			env: { ...process.env, ...launch.env },
 			stdio: ['pipe', 'pipe', 'pipe'],
-			// Own process group, so dispose() also ends the harness the adapter starts (Claude Code, codex app-server).
+			// Own process group, so dispose() also ends the harness the adapter starts (tact).
 			detached: process.platform !== 'win32',
 		});
 		this.child.stderr!.setEncoding('utf8');

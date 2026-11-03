@@ -1,6 +1,6 @@
 # ACP connector: research and design
 
-*Prepared Oct 8, 2026 (PT) for `guruvamsi-policharla/editor`. Status: approved; A0 (spike) done, A and B built as an MVP (`packages/acp-client`, `extensions/agent-chat`); history, several chats, waiting between agents, inline Cmd/Ctrl+L and tact (parts of D and E) built in the chat-polish round, §11. PLAN.md §5.4 and Phase 4 summarize it. Where the build differs from this doc: the spike report (`kind: 'permissions'` unused, mode is a normal picker; models are the native model picker; no core patch) and `extensions/agent-chat/README.md`.*
+*Prepared Oct 8, 2026 (PT) for `guruvamsi-policharla/editor`. **Since Nov 2, 2026 tact is the chat's only harness** ([tact only](#tact-only)): what this doc says about Claude Code and Codex is history. Status: approved; A0 (spike) done, A and B built as an MVP (`packages/acp-client`, `extensions/agent-chat`); history, several chats, waiting between agents, inline Cmd/Ctrl+L and tact (parts of D and E) built in the chat-polish round, §11. PLAN.md §5.4 and Phase 4 summarize it. Where the build differs from this doc: the spike report (`kind: 'permissions'` unused, mode is a normal picker; models are the native model picker; no core patch) and `extensions/agent-chat/README.md`.*
 
 **Decisions (Oct 8, 2026), answering §10:** Claude starts in Accept edits with prompts for commands; Codex starts in Workspace access (not Auto review); Claude's Bypass is hidden and Codex's Full access is behind a confirmation (changed Oct 12, 2026 by Guru: Bypass permissions is offered behind a confirmation each time, never a default and never restored; see the extension's README); the chat lives in the secondary side bar (right), with sessions also openable as editor tabs; Cmd/Ctrl+L goes to whichever of chat/terminal was used last (configurable); the user's installed `claude`/`codex` are used when found on PATH, else pinned adapters are downloaded on first use; a webview fallback is acceptable if the native chat needs invasive patches; the PLAN.md wording changes are approved.
 
@@ -144,103 +144,7 @@ Design consequence: keep a **protocol-neutral session view model** (messages by 
 
 ---
 
-## 2. Claude adapter: `@agentclientprotocol/claude-agent-acp` 0.87.0 (Q2)
-
-**What it is.** An ACP agent built on the official Claude Agent SDK (`@anthropic-ai/claude-agent-sdk` 0.3.287), so it runs real Claude Code. The README lists:
-- @-mentions and images;
-- tool calls with permission requests;
-- edit review, TODO lists (plans), subagents and background terminals;
-- custom slash commands, client MCP servers, `/mcp`;
-- many JetBrains "AIR" `_meta` extensions.
-
-**Launch.** `claude-agent-acp`, the npm `bin`, run through `npx -y @agentclientprotocol/claude-agent-acp@<ver>` or a global install. [verified: source `package.json`]
-- **Env knobs:**
-  - `CLAUDE_CODE_EXECUTABLE` picks the Claude Code binary (otherwise the SDK's);
-  - `CLAUDE_MODEL_CONFIG` (JSON `{modelOverrides, availableModels}`) restricts or maps models ([docs/model-configuration.md](https://github.com/agentclientprotocol/claude-agent-acp/blob/b2dbc8f5a1b84f48cc1512d06f50a9d85d6e757b/docs/model-configuration.md));
-  - `MAX_THINKING_TOKENS`;
-  - `IS_SANDBOX`, which allows bypass mode under root. [verified: source `acp-agent.ts`, `permissions/modes.ts`]
-- **Per-session pass-through:** `session/new` `_meta.claudeCode.options` is forwarded as Claude Agent SDK `Options`, including `allowedTools`, `disallowedTools`, `settings`, `env`, `tools`, `additionalDirectories`, and `allowDangerouslySkipPermissions: false` (which removes bypass mode from the session). `cwd`, `permissionMode`, `canUseTool` and `executable` are controlled by ACP and ignored. [verified: source `acp-agent.ts` `NewSessionMeta`]
-
-**Capabilities advertised in `initialize`:** [verified: source `acp-agent.ts` ~L2675–2740]
-- `protocolVersion: 1`, `loadSession: true`;
-- `sessionCapabilities`: `additionalDirectories`, `close`, `delete`, `fork`, `list`, `resume`, `subagents`;
-- `promptCapabilities`: `image`, `embeddedContext`;
-- `mcpCapabilities`: `http`, `sse`;
-- `auth.logout`, plus `providers`, `_meta.claudeCode.promptQueueing` and `_meta.steering`;
-- auth methods: terminal login methods (`--cli auth login --claudeai` / `--console`), **only if** the client advertises `auth.terminal`, plus gateway auth if negotiated.
-
-An existing `~/.claude` login is used as-is [unverified, but it's the Claude Code SDK's normal behavior].
-
-**Settings sources.** The adapter starts Claude Code with `settingSources: ["user","project","local"]`, so `~/.claude/settings.json`, `.claude/settings.json` and `.claude/settings.local.json` apply, permission rules and `permissions.defaultMode` included. [verified: source `acp-agent.ts` ~L9516, ~L9389]
-
-**Config options** (`buildConfigOptions`, in this order). All are live through `session/set_config_option`: [verified: source]
-
-| id | category | values | applied |
-|---|---|---|---|
-| `mode` | `mode` | `default` (shown as "Manual"), `acceptEdits`, `plan`, `auto` ("Claude handles permission decisions"; falls back to acceptEdits if the model doesn't support it), and `bypassPermissions` (only when allowed: not root unless `IS_SANDBOX`, not disabled by `permissions.disableBypassPermissionsMode`, and not `_meta…allowDangerouslySkipPermissions:false`) | Live (SDK `setPermissionMode`). The initial value is the explicit mode, else the mode of the resumed transcript, else settings `permissions.defaultMode` (`session-mode.ts`) |
-| `model` | `model` | From the SDK's model list (restricted by `CLAUDE_MODEL_CONFIG`) | Live (`query.setModel`) |
-| `effort` | `thought_level` | `default` plus the model's `supportedEffortLevels`. **Omitted if the model doesn't support effort** (`session-effort.ts`) | Live (`applyFlagSettings`) |
-| `fast` | `model_config` | Boolean if the client opted into boolean options, else a select with `on`/`off`. **Only when the current model supports Fast mode.** The description explains why it's unavailable when off | Live |
-| `agent` | (none) | Custom agent personas. Only when the user has configured some | Live |
-
-The legacy `session/set_mode` is still served. [verified: source L7661, L11600]
-
-**Permissions.** Claude Code's `canUseTool` → `session/request_permission`. Options are built per tool (Bash, Read, Edit, Write, WebFetch, Skill, ExitPlanMode, …) and labelled like the Claude Code TUI. [verified: source `permissions/options*.ts`, `effects.ts`]
-- **`allow_always`** applies the permission updates Claude Code itself suggests. For Skill and WebFetch, the adapter writes an allow rule to **`localSettings`, i.e. the project's `.claude/settings.local.json`**. File-edit "always" suggestions are **session-scoped**.
-- **`ExitPlanMode`** prompts offer "exit to bypass / auto / acceptEdits / default", optionally with a fresh context. Choosing one switches the mode. "Reject" keeps planning.
-- **`AskUserQuestion`** is disabled unless the client supports form elicitation; with support it becomes an `elicitation/create` form.
-
-**Who writes files?** **The harness does, with Claude Code's own Edit/Write/Bash tools** (the default `tools` preset is `claude_code`). The adapter still has `readTextFile`/`writeTextFile` pass-through methods, but **nothing in `src/` calls them**: a grep at `b2dbc8f` finds only their definitions. [verified: source; **confirm with a contract test**, Phase A exit criterion] Tool calls still report edits as ACP `diff` content, which is fine to show as information.
-
-**Terminal output.** Without the `terminal` capability, Bash runs in Claude Code's own process. The client can opt into display-only output through `clientCapabilities._meta.terminal_output: true` (or `terminal_output_delta: true`), and tool calls then carry `_meta.terminal_info/terminal_output/terminal_exit`. [verified: source `tool-calls/client-capabilities.ts`]
-
----
-
-## 3. Codex adapter: `@agentclientprotocol/codex-acp` 2.1.1 (Q3)
-
-**What it is.** A stdio ACP server that "starts the Codex App Server, translates ACP requests into Codex operations, and maps Codex events back" ([README](https://github.com/agentclientprotocol/codex-acp/blob/4583cb3978276c2b7ea87fcfa5ae66e1e9817f13/README.md)). The old Rust `zed-industries/codex-acp` is superseded.
-
-**Launch.** `npx -y @agentclientprotocol/codex-acp` or `codex-acp` from a global install. It bundles a compatible `@openai/codex`.
-- **Env knobs:**
-  - `CODEX_PATH` (use your own `codex` binary);
-  - `CODEX_CONFIG` (a JSON object merged into the Codex session config);
-  - `INITIAL_AGENT_MODE` (`read-only` | `workspace-write` | `agent` | `agent-full-access`);
-  - `MODEL_PROVIDER`;
-  - `CODEX_API_KEY` / `OPENAI_API_KEY`;
-  - `NO_BROWSER`;
-  - `DEFAULT_AUTH_REQUEST`;
-  - `APP_SERVER_LOGS`.
-  
-  [verified: README + `src/index.ts`, `src/AgentMode.ts`]
-
-**Capabilities.** `loadSession: true` and `sessionCapabilities` `resume`, `list`, `close`, `fork`. [verified: source `CodexAcpServer.ts` ~L428–466]
-- **Auth methods:** API key, ChatGPT login (hidden when `NO_BROWSER` is set), ChatGPT device code (only if the client supports URL elicitation), and gateway (opt-in). [verified: source `CodexAuthMethod.ts`]
-- Whether an existing `~/.codex/auth.json` login is reused without calling `authenticate` is [unverified].
-
-**Config options** (`createSessionConfigOptions`): [verified: source]
-
-| id | category | values | applied |
-|---|---|---|---|
-| `mode` | `mode` | `read-only` ("Read-only": approval on-request, read-only sandbox, no network), `workspace-write` ("Workspace access"), `agent` ("Auto review": on-request with **`approvalsReviewer: auto_review`**, which only asks for actions it detects as potentially unsafe; **default**), `agent-full-access` ("Full access": approval never, `dangerFullAccess`) | Approval policy and sandbox are sent **with each turn** (`CodexAcpClient.sendPrompt`), so a change applies **from the next turn**. The initial value comes only from `INITIAL_AGENT_MODE`, else `agent` |
-| `collaboration_mode` | `collaboration_mode` (non-standard, and not `_`-prefixed) | `default`, `plan` | Live (`threadSettingsUpdate`) |
-| `model` | `model` | From the App Server's model list | Next turn |
-| `reasoning_effort` | `thought_level` | The model's supported efforts. Omitted if there are none | Next turn |
-| `fast-mode` | `model_config` | Boolean or `on`/`off`. **Only if the model has a `fast` speed tier** ("1.5x speed, increased usage") | Next turn (`serviceTier: "fast"`) |
-
-**Permissions.** Codex approval requests → `session/request_permission`. [verified: source `permissions/options.ts`, `option-ids.ts`]
-- **Command options:** "Yes, proceed" (`allow_once`), "Yes, and don't ask again for this command in this session" (`allow_always`, session-scoped), "Yes, and don't ask again for commands that start with `…`" (`allow_always`; an exec-policy amendment), network-host allow/block amendments, "No, continue without running it", "No, and tell Codex what to do differently".
-- **File changes:** "Yes", "Yes, and don't ask again for these files" (session-scoped), "No…".
-- **Exec-policy amendments are persistent and global.** Codex writes `prefix_rule(..., decision="allow")` to `~/.codex/rules/default.rules`. Trusted projects can also have `<repo>/.codex/rules/default.rules`, and Codex scans `rules/` **at startup** ([Codex rules docs](https://learn.chatgpt.com/docs/agent-configuration/rules), [openai/codex#27157](https://github.com/openai/codex/issues/27157)). [verified: docs]
-
-**Who writes files?** **The harness does.** Codex applies its own patches in the App Server, and there are **no** `fs/*` or `terminal/*` client calls anywhere in `src/` (grep). [verified: source; confirm with a contract test]
-
----
-
-## 4. Gemini CLI (later)
-
-`gemini --acp` starts ACP mode; `--experimental-acp` is deprecated ([docs](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/acp-mode.md), [PR #21171](https://github.com/google-gemini/gemini-cli/pull/21171)). In ACP mode it excludes its `ask_user` tool. Its config options, permission options, and whether it falls back to its own fs tools without the client `fs` capability are all **[unverified]**: check them in Phase E with the same contract test.
-
----
+*§2–4 (the Claude Code, Codex and Gemini adapters) and §6 (their capability table) were removed with those harnesses on Nov 2, 2026; see [tact only](#tact-only).*
 
 ## 5. Existing ACP clients for VS Code, and the SDK (Q4)
 
@@ -251,32 +155,6 @@ The legacy `session/set_mode` is still served. [verified: source L7661, L11600]
 | [solutionsunity/acp-patchbay](https://github.com/solutionsunity/acp-patchbay) | Apache-2.0 | VS Code ACP extension | Not reviewed in depth |
 | Exo, ACP Pro, Multicoder, Poolside Assistant | Marketplace extensions; licenses not checked | Listed on [ACP clients](https://agentclientprotocol.com/get-started/clients) | No |
 | **VS Code 1.135's built-in "Agent Host"** (`src/vs/platform/agentHost`, with Claude / Codex / Copilot harnesses and its own "AHP" protocol) | MIT (part of VS Code) | Microsoft's in-core equivalent of ACP. Claude goes through the Claude Agent SDK, Codex through its App Server | **No.** It's tied to Copilot and GitHub (`claudeAgent.ts` imports `@vscode/copilot-api`, `ICopilotApiService`, GitHub endpoints), downloads SDKs through `product.json` config, and isn't ACP. Whether it runs at all in VSCodium is [unverified] |
-
----
-
-## 6. Capability table: "all the buttons" × harness (Q5)
-
-**Live** = changeable mid-session over ACP. **Next turn** = accepted live, takes effect on the next turn. **Launch** = only through CLI flags, env or config files when the adapter or session starts. **File** = the harness's own config file, which our editor can edit.
-
-| Button | Claude (`claude-agent-acp` 0.87.0) | Codex (`codex-acp` 2.1.1) | Gemini CLI |
-|---|---|---|---|
-| **Answer a permission prompt** (once / always / reject) | **Live**, `session/request_permission`. "Always" = Claude's suggested rule update (Skill/WebFetch → project `.claude/settings.local.json`; file edits → session) | **Live**. Once, for session, persistent `prefix_rule` (global `~/.codex/rules/default.rules`), network amendments, decline, cancel | Live via ACP [unverified details] |
-| **Permission mode** | **Live**, option `mode`: Manual / Accept edits / Plan / Auto / Bypass (Bypass can be hidden at launch with `_meta.claudeCode.options.allowDangerouslySkipPermissions:false` or the settings key `permissions.disableBypassPermissionsMode`). Initial: **File** `permissions.defaultMode` | **Next turn**, option `mode`: Read-only / Workspace / Auto review / Full access (fixed presets). Initial: **Launch** `INITIAL_AGENT_MODE` | [unverified] |
-| **Standing allow/deny rules** | **Not over ACP.** **File**: `permissions.allow/deny/ask` in `~/.claude/settings.json`, `.claude/settings.json`, `.claude/settings.local.json`; or **Launch** via `_meta.claudeCode.options.allowedTools/disallowedTools/settings` on `session/new`. Whether settings edits hot-reload mid-session is [unverified]; restart/resume to be safe | **Not over ACP.** **File**: `~/.codex/rules/*.rules` (and trusted `<repo>/.codex/rules`), read **at startup** → restart the adapter, then `session/resume`. Other config through **Launch** `CODEX_CONFIG` | [unverified] |
-| **Model** | **Live**, option `model`. List restricted with **Launch** `CLAUDE_MODEL_CONFIG` | **Next turn**, option `model` | [unverified] |
-| **Reasoning effort** | **Live**, option `effort` (`thought_level`), only for models with effort levels | **Next turn**, option `reasoning_effort` (`thought_level`) | [unverified] |
-| **Fast mode** | **Live**, option `fast` (`model_config`), only if the model and account support it | **Next turn**, option `fast-mode` (`model_config`), only for models with a fast tier | [unverified] |
-| **Plan mode** | **Live**: `mode = plan`. Leaving it goes through the ExitPlanMode prompt (choose the next mode) | **Live**: option `collaboration_mode = plan` (separate from the permission `mode`) | [unverified] |
-| **Cancel** | **Live**, `session/cancel` (baseline) | **Live**, `session/cancel` | Live (baseline) |
-| **Resume a previous session** | **Live**: `session/list`, `session/load` (replay), `session/resume`, `session/close`, `session/delete` | **Live**: `session/list`, `session/load`, `session/resume`, `session/close` | [unverified] (`loadSession` capability) |
-| Steer a running turn | `_meta.steering` / `promptQueueing` extension (not standard) | Steering queue (not standard) | n/a |
-
-What this means for Guru's requirements:
-1. **Permission prompts, mode, model, effort, fast mode, plan, cancel and resume** all go through ACP for both harnesses. The panel renders them generically from `configOptions`, so there's no per-harness UI code.
-2. **Standing rules are the one thing ACP can't do.** Workaround: a per-harness **rules editor** in the panel's permission menu. It opens or edits the harness's own files with a small structured UI (allow/deny/ask lists for Claude, `prefix_rule` lines for Codex), then offers "Apply: restart agent and resume this chat" (`session/resume` keeps the conversation). The profile declares the file format and paths.
-3. **Codex mode granularity.** Codex modes are 4 presets that combine approval policy and sandbox. Arbitrary combinations (such as "untrusted approvals + workspace-write") aren't reachable over ACP. They might be reachable through `CODEX_CONFIG` at launch, but the adapter sends the preset's policy with every turn, so that would probably be overridden [unverified]. Accept the presets.
-4. **Changes during a Codex turn apply from the next turn.** The UI should say so ("applies to the next message").
-5. **Option availability depends on the model.** Effort and fast appear and disappear with the model. The panel must re-render from every `config_option_update` and `set_config_option` response.
 
 ---
 
@@ -534,3 +412,13 @@ Built on branch `chat-polish`. User-facing details are in `extensions/agent-chat
 ### 11.4 Inline Cmd/Ctrl+L references
 
 The reference goes in at the cursor as core's own dynamic-variable pill (the mechanism behind `#file` and `#selection`), so a message can hold several references in place. No extension API inserts at the chat input's cursor (`workbench.action.chat.open` replaces the whole input, and the chat input isn't a `TextEditor` for extensions), so patch 94 adds `_agentChat.insertReference`, modelled on core's own insert-and-decorate code. The request then carries the text with the references in place plus `Location` references with their offsets, sent as `resource_link`s in text order. Core shows prompt references as attachment chips too; ours are excluded, since the pill is already in the text.
+
+<a id="tact-only"></a>
+## 12. tact only (Nov 2, 2026)
+
+Claude Code and Codex were removed from the chat (Guru's call): their profiles, the pinned-adapter installer and lockfiles, the contract tests, the Bypass permissions mode (confirmation, status bar item, `allowDangerouslySkipPermissions`, transient values), the permission-mode fallback, the Claude-side hiccup card with Retry, and their sign-in and install cards. tact is the default and only harness (`BUILTIN_PROFILES = [TACT]`). Their saved chats are still listed and open read-only under `agent-tact:/archived/…`; `agentChat.harnesses.claude/codex` settings are ignored. The ACP layer stays generic: permission requests, load/resume recovery, option timing and read-only values are protocol or profile data, not harness branches.
+
+Controls come only from tact's `models` catalog, per model: speed tiers from `effective_speeds`, thinking locked after the first turn where `effort_fixed_after_start`, Pro reasoning only where listed; a model change re-sets effort and speed on tact's new session and the chat says what it reset.
+
+What tact would need to match the removed harnesses, most important first: an approval policy with per-command approval events (Claude's modes, Codex's presets, Yes/No/always), a plan / read-only mode, effort changeable after the first message, per-model effort levels in the catalog (`effective_efforts`), a command list for slash commands, `session/list` from tact's `history` (adapter work), cost and plan usage, and a headless `tact acp` / `tact serve`.
+

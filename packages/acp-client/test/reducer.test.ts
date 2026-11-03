@@ -3,10 +3,10 @@ import { describe, expect, it } from 'vitest';
 import type * as acp from '@agentclientprotocol/sdk';
 import { SessionView, textOf } from '../src/index.js';
 
-const turns = JSON.parse(readFileSync(new URL('./fixtures/claude-0.87.0-turns.json', import.meta.url), 'utf8')) as { updates: acp.SessionUpdate[] };
+const turns = JSON.parse(readFileSync(new URL('./fixtures/acp-v1-turns.json', import.meta.url), 'utf8')) as { updates: acp.SessionUpdate[] };
 
 describe('SessionView (ACP v1 reducer)', () => {
-	it('replays a recorded Claude run: tool calls merged by id, text, usage, title', () => {
+	it('replays a recorded ACP v1 update stream (every kind tact sends and more): tool calls merged by id, text, usage, title', () => {
 		const view = new SessionView();
 		for (const u of turns.updates) {
 			view.apply(u);

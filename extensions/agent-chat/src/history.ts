@@ -8,9 +8,9 @@ import { join } from 'node:path';
 import { matchChat, type TranscriptTurn } from './transcript.js';
 
 export interface ChatEntry {
-	/** The chat's resource (`agent-claude:/…`), as a string. */
+	/** The chat's resource (`agent-tact:/…`), as a string. */
 	resource: string;
-	/** The harness profile id. */
+	/** The harness profile id (`tact`; `claude` or `codex` in chats from before those harnesses were removed). */
 	harness: string;
 	/** The ACP session behind the chat, once it has one. */
 	sessionId?: string;
@@ -243,4 +243,28 @@ export function menuTarget(arg: unknown): ResourceLike | undefined {
 	const resource = (v: unknown): ResourceLike | undefined => (v && typeof v === 'object' && typeof (v as ResourceLike).scheme === 'string' && typeof (v as ResourceLike).path === 'string' ? v as ResourceLike : undefined);
 	const a = (arg && typeof arg === 'object' ? arg : {}) as { resource?: unknown; session?: { resource?: unknown } };
 	return resource(arg) ?? resource(a.resource) ?? resource(a.session?.resource);
+}
+
+/** Harnesses the chat ran before tact was its only one: their chats are kept, read-only (`archivedResource`). */
+const RETIRED: Record<string, string> = { claude: 'Claude Code', codex: 'Codex' };
+
+/** A harness's name for the history (`claude` → Claude Code). */
+export function harnessName(id: string, labels: ReadonlyMap<string, string>): string {
+	return labels.get(id) ?? RETIRED[id] ?? id;
+}
+
+/** Path prefix of an archived chat's resource: a chat from a harness the editor no longer runs. */
+export const ARCHIVED = '/archived/';
+
+/**
+ * Where a chat from a harness the editor no longer runs opens: under the current session type (`agent-tact:` has a
+ * content provider, `agent-claude:` doesn't anymore), its saved resource encoded in the path. Read-only there.
+ */
+export function archivedResource(type: string, saved: string): ResourceLike {
+	return { scheme: type, path: `${ARCHIVED}${encodeURIComponent(saved)}` };
+}
+
+/** The saved resource of an archived chat's resource path, if it is one. */
+export function archivedKey(path: string): string | undefined {
+	return path.startsWith(ARCHIVED) ? decodeURIComponent(path.slice(ARCHIVED.length)) : undefined;
 }

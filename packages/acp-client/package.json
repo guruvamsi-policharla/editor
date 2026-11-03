@@ -2,7 +2,7 @@
   "name": "@editor/acp-client",
   "version": "0.0.1",
   "private": true,
-  "description": "Editor-independent ACP client: adapter process supervision, session reducer, permission broker, harness profiles, pinned adapter installer. No fs/terminal client capabilities.",
+  "description": "Editor-independent ACP client: adapter process supervision, session reducer, permission broker, harness profiles (tact). No fs/terminal client capabilities.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -13,8 +13,7 @@
     }
   },
   "files": [
-    "dist",
-    "adapters"
+    "dist"
   ],
   "engines": {
     "node": ">=22.12"
@@ -22,8 +21,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
-    "test:contract": "RUN_ACP_CONTRACT=1 vitest run test/contract"
+    "test": "vitest run"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.7.0"

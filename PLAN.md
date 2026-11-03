@@ -89,31 +89,14 @@ The core. Keep it editor-independent so it can be reused (Zed, Neovim, etc.).
 
 ### 5.4 ACP chat panel (connector)
 
-For agents that speak [ACP](https://agentclientprotocol.com) (Claude Code via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp), Codex via [codex-acp](https://github.com/agentclientprotocol/codex-acp), and Gemini CLI via `gemini --acp`), offer a native chat panel next to the agent terminal. Review still comes only from the engine, never from ACP. Design and citations: [docs/acp-design.md](docs/acp-design.md).
+A native chat panel next to the agent terminal, driving tact over [ACP](https://agentclientprotocol.com) through our adapter (`packages/tact-acp`: tact has no ACP mode, so it runs tact's UI in a hidden pty and bridges to its local web API). Review still comes only from the engine, never from ACP. Design and citations: [docs/acp-design.md](docs/acp-design.md). **Since Nov 2, 2026 tact is the only chat harness:** Claude Code and Codex, which the panel also ran from Oct 8, were removed; their saved chats stay readable, and what tact would need to match them is in [docs/acp-design.md §12](docs/acp-design.md#tact-only). Claude Code, Codex and any other CLI agent still work in a terminal, with the same review.
 
 - **The harness makes its own edits.** The editor advertises no `fs` or `terminal` client capabilities, so the agent reads, writes and runs commands with its own tools, exactly as in a terminal. The file watcher shows those edits as Keep/Undo. ACP v2 (draft) removes those client APIs anyway.
-- **One client, small profiles.** ACP lives in an editor-independent `packages/acp-client`: process management, the connection (`@agentclientprotocol/sdk`, protocol v1), a session reducer, a permission broker and profiles. Per-harness profiles hold only tailoring data: launch command and pinned adapter version, env, defaults, dangerous values, and the rules-file format. All UI comes from what the adapter advertises.
-- **Native chat UI.** A built-in extension `extensions/agent-chat` drives VS Code's hidden chat through the chat-session-provider proposed APIs. ACP config options become the input-bar pickers (mode → the permission picker; model; effort; fast; plan), tool calls become tool cards, plans become the todo list, and permission requests use the core confirmation tool, which can't be auto-approved. Copilot stays disabled. If the spike shows the native chat can't be un-hidden cleanly, fall back to a webview over the same client.
-- **The buttons.** These work live over ACP for Claude and Codex:
-  - permission prompts;
-  - permission mode;
-  - model;
-  - reasoning effort;
-  - fast mode;
-  - plan mode;
-  - cancel;
-  - list/resume sessions.
-
-  Codex applies mode, model, effort and fast changes from the next turn. Effort and fast appear only for models that support them.
-- **Defaults.** Claude starts in Accept edits (commands still prompt); Codex starts in Workspace access. Claude's Bypass permissions needs a confirmation every time it's chosen and is never a default or restored after a restart (Oct 12, 2026; hidden before); Codex's Full access needs a confirmation. The chat lives in the secondary side bar (right), and sessions can also open as editor tabs. The user's installed `claude`/`codex` are used when found on PATH; otherwise pinned adapters are downloaded on first use.
-- **Standing permission rules aren't in ACP.** A rules editor edits the harness's own files: `permissions.allow/deny/ask` in Claude's `settings.json` files, and `prefix_rule` in `~/.codex/rules/default.rules`. Then it restarts the agent and resumes the chat.
+- **One client, a small profile.** ACP lives in an editor-independent `packages/acp-client`: process management, the connection (`@agentclientprotocol/sdk`, protocol v1), a session reducer, a permission broker and the harness profile (tailoring data only: the adapter, the CLI, env, defaults, option timing). All UI comes from what the adapter advertises.
+- **Native chat UI.** A built-in extension `extensions/agent-chat` drives VS Code's hidden chat through the chat-session-provider proposed APIs. ACP config options become the input-bar pickers (model in the native model picker; thinking, Pro reasoning, speed), tool calls become tool cards, plans become the todo list. Copilot stays disabled.
+- **The controls are tact's catalog.** Every picker shows exactly what tact's `models` catalog gives the chosen model (speed tiers it really runs, Pro only where offered, thinking locked where tact fixes it after the first message); a model change resets what the new model lacks, visibly. No model list in the editor.
 - **Cmd+L** inserts `@path:L42-58` into the chat input (always the chat, never the agent terminal). The reference goes to the agent as text, plus a `resource_link` for the file.
-- **Permission safety:**
-  - only an explicit click answers a prompt;
-  - prompts show the exact command or paths and whether "always" writes a persistent rule;
-  - dangerous modes (Claude Bypass, Codex Full access) need confirmation and show a badge; Claude Bypass is never a default and never restored;
-  - adapter versions are pinned, and agents don't start in Restricted Mode.
-- `.claude/settings.local.json` joins the built-in ignores, so "always allow" clicks don't show up as agent edits. tact has no ACP: our adapter (`packages/tact-acp`) bridges to the web API of a tact UI run in a hidden pty; a `tact acp` subcommand remains a separate upstream contribution.
+- **Safety:** tact has no approval mode, so the panel can't ask before a command; review catches every edit. Agents don't start in Restricted Mode. `.claude/settings.local.json` stays in the built-in ignores (Claude Code in a terminal writes it).
 
 ## 6. Phases
 
@@ -157,7 +140,7 @@ For agents that speak [ACP](https://agentclientprotocol.com) (Claude Code via [c
 - **B. Chat panel MVP.** Sessions per harness, streaming text and thinking, tool cards, plan, slash commands, Stop, permission prompts, config-option pickers, Cmd+L to chat. **Exit criteria:** Claude Code and Codex run from the panel on a LaTeX paper; mode, model and effort can be changed; prompts can be answered; edits review inline; no Copilot UI appears; packaged-app smoke test passes.
 - **C. Permissions UX.** Rules editor (Claude settings, Codex exec-policy rules) with restart-and-resume, dangerous-mode confirmation, persistent-option labels, audit log. **Exit criteria:** every button in the capability table is reachable from the panel.
 - **D. Sessions and robustness.** History, reopening with replay, multiple sessions, crash recovery, login flows, an adapter update command. **Exit criteria:** a chat survives a restart and an adapter crash with its transcript.
-- **E. More harnesses.** Gemini CLI by profile only; tact through our adapter now, `tact acp` (or a headless `tact serve`) upstream later; ACP v2 behind a flag once it's stable. **Exit criteria:** a third harness passes the same contract and UI tests without UI code.
+- **E. tact.** (Nov 2, 2026: tact became the only harness; Claude Code and Codex removed.) tact through our adapter now, `tact acp` (or a headless `tact serve`) upstream later; ACP v2 behind a flag once it's stable. **Exit criteria:** tact passes the same UI tests as the earlier harnesses, with per-model controls from its catalog.
 
 ### Phase 5: Polish and extend
 

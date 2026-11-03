@@ -1,10 +1,16 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type * as acp from '@agentclientprotocol/sdk';
-import { claudePersistence, describePermission, orderChoices, PermissionBroker, type PermissionAudit } from '../src/index.js';
+import { describePermission, orderChoices, PermissionBroker, type PermissionAudit } from '../src/index.js';
 
-const turns = JSON.parse(readFileSync(new URL('./fixtures/claude-0.87.0-turns.json', import.meta.url), 'utf8')) as { permissionRequests: acp.RequestPermissionRequest[] };
-const bash = turns.permissionRequests[0]!;
+const bash: acp.RequestPermissionRequest = {
+	sessionId: 's',
+	toolCall: { toolCallId: 't1', title: 'Run a command', kind: 'execute', rawInput: { command: `python3 -c "open('ran.txt','w').write('x')"`, description: 'Write x into ran.txt via Python' } },
+	options: [
+		{ optionId: 'allow-always', name: 'Yes, and don\'t ask again', kind: 'allow_always' },
+		{ optionId: 'allow-once', name: 'Yes', kind: 'allow_once' },
+		{ optionId: 'reject', name: 'No', kind: 'reject_once' },
+	],
+};
 
 describe('permission prompts', () => {
 	it('orders buttons once / no / always, so No is never hidden in the dropdown', () => {
@@ -12,12 +18,12 @@ describe('permission prompts', () => {
 	});
 
 	it('shows the exact command, the agent\'s description, and where "always" is saved', () => {
-		const p = describePermission(bash, claudePersistence);
+		const p = describePermission(bash, o => (o.kind === 'allow_always' ? 'saved to the rules file' : undefined));
 		expect(p.title).toBe('Run this command?');
 		expect(p.command).toBe(`python3 -c "open('ran.txt','w').write('x')"`);
 		expect(p.description).toBe('Write x into ran.txt via Python');
 		expect(p.choices.map(c => c.label)).toEqual(['Yes', 'No', expect.stringContaining("don't ask again")]);
-		expect(p.choices[2]!.persistent).toBe('saved to .claude/settings.local.json');
+		expect(p.choices[2]!.persistent).toBe('saved to the rules file');
 		expect(p.choices[0]!.persistent).toBeUndefined();
 	});
 

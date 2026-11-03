@@ -25,7 +25,7 @@ export interface Ready {
 }
 
 export interface SupervisorOptions {
-	/** Resolves the launch command (and may install the adapter first). */
+	/** Resolves the launch command (throws when the harness isn't installed). */
 	launch: (progress: (message: string) => void) => Promise<AgentLaunch>;
 	clientInfo?: ClientInfo;
 	backoffMs?: readonly number[];

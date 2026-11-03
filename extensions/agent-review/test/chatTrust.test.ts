@@ -31,8 +31,6 @@ describe('Restricted Mode: the agent chat says it needs a trusted folder (#36)',
     const palette = review.contributes.menus.commandPalette;
     const real: Record<string, string> = {
       'agentReview.chatNeedsTrust.newChat': 'agentChat.newChat',
-      'agentReview.chatNeedsTrust.newClaude': 'agentChat.newClaude',
-      'agentReview.chatNeedsTrust.newCodex': 'agentChat.newCodex',
       'agentReview.chatNeedsTrust.newTact': 'agentChat.newTact',
     };
     expect(Object.keys(TRUST_COMMANDS).sort()).toEqual(Object.keys(real).sort());
@@ -57,13 +55,13 @@ describe('Restricted Mode: the agent chat says it needs a trusted folder (#36)',
 
   it('a stand-in command explains why and opens Manage Workspace Trust when asked', async () => {
     showInformationMessage.mockResolvedValueOnce(MANAGE_TRUST);
-    await explainChatNeedsTrust('A Claude Code chat');
-    expect(showInformationMessage).toHaveBeenCalledWith('A Claude Code chat needs a trusted folder', expect.objectContaining({ modal: true, detail: expect.stringContaining('Restricted Mode') }), MANAGE_TRUST);
+    await explainChatNeedsTrust('A tact chat');
+    expect(showInformationMessage).toHaveBeenCalledWith('A tact chat needs a trusted folder', expect.objectContaining({ modal: true, detail: expect.stringContaining('Restricted Mode') }), MANAGE_TRUST);
     expect(executeCommand).toHaveBeenCalledWith('workbench.trust.manage');
   });
 
   it('dismissing it does nothing', async () => {
-    await explainChatNeedsTrust('A Codex chat');
+    await explainChatNeedsTrust('An agent chat');
     expect(executeCommand).not.toHaveBeenCalled();
   });
 });

@@ -7,7 +7,7 @@
 export interface TurnHolder {
 	/** The chat (resource) the turn belongs to. */
 	chat: string;
-	/** Shown to the waiting chat: `Claude Code ("Fix the intro")`. */
+	/** Shown to the waiting chat: `tact ("Fix the intro")`. */
 	label: string;
 }
 

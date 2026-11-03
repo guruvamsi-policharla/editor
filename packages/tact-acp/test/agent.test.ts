@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type * as acp from '@agentclientprotocol/sdk';
 import { TactAgent } from '../src/agent.js';
 import { configOptions, EntryMapper, isAuthError, pathsIn, promptText, sessionStartFailure, speedFix, toolDetail } from '../src/mapping.js';
-import type { ModelCatalog } from '../src/web.js';
 import realCatalog from './fixtures/models-98ffe05.json' with { type: 'json' };
 
 /** tact dev-98ffe05's `models` answer with OpenAI, Claude and Glasswing keys (the editor hard-codes none of it). */
@@ -16,7 +15,7 @@ const choices = (options: acp.SessionConfigOption[], id: string) => ((options.fi
 const choiceNames = (options: acp.SessionConfigOption[], id: string) => ((options.find(o => o.id === id) as { options: { name: string }[] } | undefined)?.options ?? []).map(o => o.name);
 import { hasWebApi, launchTact, openFifo, ptyCommand, startFailure, stripAnsi } from '../src/process.js';
 import { reply, TerminalResponder } from '../src/terminal.js';
-import { parseEvent, TactApiError } from '../src/web.js';
+import { parseEvent, TactApiError, type ModelCatalog } from '../src/web.js';
 
 const FAKE_TACT = fileURLToPath(new URL('./fixtures/fake-tact.mjs', import.meta.url));
 chmodSync(FAKE_TACT, 0o755);

@@ -1,8 +1,9 @@
-// Agent Chat: VS Code's native chat, driven by ACP harnesses (Claude Code, Codex, tact) through @editor/acp-client.
+// Agent Chat: VS Code's native chat, driven by tact over ACP through @editor/acp-client.
 //
 // - A default participant (`isDefault`, defaultChatParticipant proposal) is what makes core show the chat view
 //   and accept requests while Copilot is absent; it only points at the session types.
-// - One chat session type per harness profile (harnessChat.ts), in the secondary side bar or as editor tabs.
+// - One chat session type per harness profile (harnessChat.ts; tact's is the only one), in the secondary side bar or
+//   as editor tabs. Chats from the harnesses the editor ran before (Claude Code, Codex) stay listed, read-only.
 // - Nothing here emits edit parts: the harness writes files itself and agent-review shows them with Keep/Undo.
 // - Cmd/Ctrl+L: agent-review's "Send Selection to Agent" always calls `agentChat.insertReference` (never the agent
 //   terminal). The reference goes in at the cursor, as an inline pill (core's `_agentChat.insertReference`, patch 94).
@@ -11,9 +12,9 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import * as vscode from 'vscode';
-import { AdapterInstaller, BUILTIN_PROFILES } from '@editor/acp-client';
+import { BUILTIN_PROFILES, DEFAULT_PROFILE } from '@editor/acp-client';
 import { HarnessChat } from './harnessChat.js';
-import { ChatHistory, menuTarget } from './history.js';
+import { archivedResource, ChatHistory, harnessName, menuTarget, type ChatEntry } from './history.js';
 import { HarnessModels, MODEL_VENDOR } from './models.js';
 import { TurnScheduler } from './scheduler.js';
 
@@ -26,14 +27,15 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	const models = new HarnessModels();
 	context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider(MODEL_VENDOR, models));
-	const installer = new AdapterInstaller(join(context.globalStorageUri.fsPath, 'adapters'), join(context.extensionPath, 'dist', 'adapters'));
 	const markUsed = () => { lastUsed = Date.now(); };
 	// Chats belong to the workspace folder they ran in. Kept in global storage under a hash of the folder's path:
 	// VS Code's workspace storage id can change for the same folder, which would lose the history.
 	const folder = vscode.workspace.workspaceFolders?.[0]?.uri.toString() ?? '';
 	const history = new ChatHistory(join(context.globalStorageUri.fsPath, 'chats', createHash('sha256').update(folder).digest('hex').slice(0, 16)));
 	const scheduler = new TurnScheduler(() => vscode.workspace.getConfiguration('agentChat').get<boolean>('turns.waitForOtherChats', true));
-	const env = { context, log, models, installer, activatedAt, markUsed, version: String(context.extension.packageJSON.version ?? '0.0.0'), history, scheduler };
+	const builtins = new Set(BUILTIN_PROFILES.map(p => p.id));
+	const env = { context, log, models, builtins, activatedAt, markUsed, version: String(context.extension.packageJSON.version ?? '0.0.0'), history, scheduler };
+	retiredSettings(log);
 
 	const chats = new Map<string, HarnessChat>();
 	for (const profile of BUILTIN_PROFILES) {
@@ -48,7 +50,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	// The default participant: required for core to show chat (chatPanelParticipantRegistered) and enable it (chatIsEnabled).
 	const def = vscode.chat.createChatParticipant('agent-chat.default', async (_request, _context, stream) => {
-		stream.markdown('Pick an agent to chat with:\n\n');
+		stream.markdown('Start a chat:\n\n');
 		for (const profile of BUILTIN_PROFILES) {
 			stream.button({ command: 'agentChat.newChat', title: profile.label, arguments: [profile.id] });
 		}
@@ -56,44 +58,26 @@ export function activate(context: vscode.ExtensionContext): void {
 	});
 	context.subscriptions.push(def);
 
-	const chatFor = (id: unknown) => chats.get(typeof id === 'string' ? id : 'claude');
-	const pickHarness = async (): Promise<string | undefined> => {
-		const pick = await vscode.window.showQuickPick(BUILTIN_PROFILES.map(p => ({ label: p.label, id: p.id })), { placeHolder: 'Agent' });
-		return pick?.id;
-	};
+	// An id the editor doesn't run (a keybinding or link to a removed harness's chat): tact's.
+	const chatFor = (id: unknown) => chats.get(typeof id === 'string' && chats.has(id) ? id : DEFAULT_PROFILE.id)!;
 	const open = async (id: unknown, where: 'sidebar' | 'editor') => {
-		const harness = typeof id === 'string' ? id : await pickHarness();
-		if (harness) {
-			markUsed();
-			await vscode.commands.executeCommand(`workbench.action.chat.openNewChatSessionInPlace.agent-${harness}`, where);
-		}
+		markUsed();
+		await vscode.commands.executeCommand(`workbench.action.chat.openNewChatSessionInPlace.${chatFor(id).type}`, where);
 	};
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('agentChat.newChat', (id?: string) => open(id, 'sidebar')),
 		vscode.commands.registerCommand('agentChat.newChatInEditor', (id?: string) => open(id, 'editor')),
-		vscode.commands.registerCommand('agentChat.newClaude', () => open('claude', 'sidebar')),
-		vscode.commands.registerCommand('agentChat.newCodex', () => open('codex', 'sidebar')),
 		vscode.commands.registerCommand('agentChat.newTact', () => open('tact', 'sidebar')),
-		vscode.commands.registerCommand('agentChat.login', async (id?: string) => chatFor(id ?? await pickHarness())?.login()),
-		vscode.commands.registerCommand('agentChat.install', async (id?: string) => chatFor(id ?? await pickHarness())?.install()),
-		vscode.commands.registerCommand('agentChat.restart', async (id?: string) => chatFor(id ?? await pickHarness())?.restart()),
+		vscode.commands.registerCommand('agentChat.login', (id?: string) => chatFor(id).login()),
+		vscode.commands.registerCommand('agentChat.install', (id?: string) => chatFor(id).install()),
+		vscode.commands.registerCommand('agentChat.restart', (id?: string) => chatFor(id).restart()),
 		vscode.commands.registerCommand('agentChat.showLog', () => log.show()),
-		// The status bar's Bypass permissions item: shows the chat that's in it.
+		// Opens a chat by its resource (a link to it).
 		vscode.commands.registerCommand('agentChat.openChat', async (resource: string) => {
 			const uri = vscode.Uri.parse(resource);
 			if (!await Promise.resolve(vscode.commands.executeCommand<boolean>('_agentChat.openChat', uri, 'sidebar')).catch(() => false)) {
 				await vscode.commands.executeCommand('vscode.open', uri);
-			}
-		}),
-		// Retry on a Claude-side hiccup's card: sends the failed message again in its chat.
-		vscode.commands.registerCommand('agentChat.retry', async (resource?: string, text?: string) => {
-			if (typeof text !== 'string' || !text) {
-				return;
-			}
-			const uri = resource ? vscode.Uri.parse(resource) : undefined;
-			if (!await Promise.resolve(vscode.commands.executeCommand<boolean>('_agentChat.resend', uri, text)).catch(() => false)) {
-				void vscode.window.showWarningMessage('Couldn\'t send the message again. Send it from the chat input.');
 			}
 		}),
 		vscode.commands.registerCommand('agentChat.lastUsed', () => lastUsed),
@@ -111,7 +95,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				await vscode.commands.executeCommand('workbench.action.chat.open', { query: `${ref.text} `, isPartialQuery: true });
 			}
 		}),
-		vscode.commands.registerCommand('agentChat.searchChats', () => searchChats(history)),
+		vscode.commands.registerCommand('agentChat.searchChats', () => searchChats(history, entry => chatResource(entry, builtins, DEFAULT_PROFILE.id))),
 		vscode.commands.registerCommand('agentChat.runNow', (id?: string) => {
 			if (typeof id !== 'string' || !scheduler.runNow(id)) {
 				void vscode.window.showInformationMessage('That message isn\'t waiting anymore.');
@@ -127,9 +111,8 @@ export function activate(context: vscode.ExtensionContext): void {
 		}),
 		vscode.workspace.onDidChangeConfiguration(e => {
 			if (e.affectsConfiguration('agentChat.harnesses')) {
-				void vscode.window.showInformationMessage('Agent Chat: harness settings changed. Restart the agent to apply them.', ...BUILTIN_PROFILES.map(p => `Restart ${p.label}`))
-					.then(a => BUILTIN_PROFILES.find(p => a === `Restart ${p.label}`))
-					.then(p => (p ? chats.get(p.id)?.restart() : undefined));
+				void vscode.window.showInformationMessage(`Agent Chat: ${DEFAULT_PROFILE.label} settings changed. Restart ${DEFAULT_PROFILE.label} to apply them.`, `Restart ${DEFAULT_PROFILE.label}`)
+					.then(a => (a ? chatFor(DEFAULT_PROFILE.id).restart() : undefined));
 			}
 		}),
 	);
@@ -154,8 +137,24 @@ function selectionReference(): { text: string; uri: vscode.Uri; startLine?: numb
 
 const HARNESS_LABEL = new Map(BUILTIN_PROFILES.map(p => [p.id, p.label]));
 
+/**
+ * `agentChat.harnesses` entries for harnesses the editor no longer runs (`claude`, `codex`) are ignored: tact runs
+ * every chat. Said once in the log, not in a popup: nothing is broken.
+ */
+function retiredSettings(log: vscode.LogOutputChannel): void {
+	const ids = Object.keys(vscode.workspace.getConfiguration('agentChat').get<Record<string, unknown>>('harnesses') ?? {}).filter(id => !HARNESS_LABEL.has(id));
+	if (ids.length) {
+		log.info(`agentChat.harnesses: ignoring ${ids.map(id => `"${id}"`).join(', ')}: the chat runs ${DEFAULT_PROFILE.label} only`);
+	}
+}
+
+/** Where a saved chat opens: its own resource, or (a harness the editor no longer runs) its read-only archive. */
+function chatResource(entry: ChatEntry, builtins: ReadonlySet<string>, current: string): string {
+	return builtins.has(entry.harness) ? entry.resource : vscode.Uri.from(archivedResource(`agent-${current}`, entry.resource)).toString();
+}
+
 /** Search Chats: this workspace's chats, by title and content, newest first; opens the pick in the side bar. */
-async function searchChats(history: ChatHistory): Promise<void> {
+async function searchChats(history: ChatHistory, resourceOf: (entry: ChatEntry) => string): Promise<void> {
 	const pick = vscode.window.createQuickPick<vscode.QuickPickItem & { resource: string }>();
 	pick.placeholder = 'Search chats by title or content';
 	pick.matchOnDescription = false;
@@ -164,12 +163,12 @@ async function searchChats(history: ChatHistory): Promise<void> {
 		const hits = history.search(pick.value);
 		pick.items = hits.map(({ entry, snippet }) => ({
 			label: entry.title,
-			description: `${HARNESS_LABEL.get(entry.harness) ?? entry.harness} · ${ago(entry.updated)}`,
+			description: `${harnessName(entry.harness, HARNESS_LABEL)}${HARNESS_LABEL.has(entry.harness) ? '' : ', read-only'} · ${ago(entry.updated)}`,
 			...(snippet ? { detail: snippet } : {}),
 			// Our own filter (content too): core's would only match the label.
 			alwaysShow: true,
 			buttons: [openInEditor],
-			resource: entry.resource,
+			resource: resourceOf(entry),
 		}));
 	};
 	const open = async (resource: string, where: 'sidebar' | 'editor') => {
