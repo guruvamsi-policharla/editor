@@ -7,8 +7,10 @@
 //   "fail"         an error entry (like a rejected API key)
 //   "crash"        an error entry that isn't about credentials
 //   "slow start"   the turn starts 300 ms after submit (interrupt says nothing_running until then)
+//   "stuck"        a running turn that ignores interrupt (never ends)
 //   anything else  reasoning, a streamed answer ("echo: <text>") in two revisions, an exec_command tool
-// Env: FAKE_TACT_NOCREDS=1 → exits like tact without credentials. Sessions persist in $TACT_HOME/fake-sessions.
+// Env: FAKE_TACT_NOCREDS=1 → exits like tact without credentials. FAKE_TACT_STALL=<n> → the first n set_draft
+// commands answer like tact whose terminal loop is busy (HTTP 503 "the terminal did not answer in time"). Sessions persist in $TACT_HOME/fake-sessions.
 // Like tact, a model (or reasoning mode) change before the first turn replaces the session: 150 ms later the old one
 // is `closed` and a new one (`claude-<uuid>` for Claude) is active; commands meanwhile are refused ("still
 // starting"). The model `claude-broken` fails to start: tact keeps the old session and draws the reason in a box.
@@ -72,6 +74,7 @@ const configFile = join(home, 'config.toml');
 const readClaude = () => existsSync(configFile) && /^\[claude\]/m.test(readFileSync(configFile, 'utf8'));
 let claude = readClaude();
 let starting = false;
+let stalls = Number(process.env.FAKE_TACT_STALL ?? 0);
 
 const clients = new Set();
 const send = (event, data) => { for (const res of clients) { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } };
@@ -122,6 +125,9 @@ async function turn(text) {
 		upsert({ id: nextId++, revision: 1, parent: null, kind: 'interrupted', count: 1 });
 	} else if (text === 'fail') {
 		upsert({ id: nextId++, revision: 1, parent: null, kind: 'error', message: 'Responses WebSocket handshake was rejected with HTTP 401' });
+	} else if (text === 'stuck') {
+		upsert({ id: nextId++, revision: 1, parent: null, kind: 'assistant', text: 'stuck', complete: false, commentary: false });
+		await new Promise(() => {});
 	} else if (text === 'wait') {
 		upsert({ id: nextId++, revision: 1, parent: null, kind: 'assistant', text: 'working', complete: false, commentary: false });
 		await new Promise(r => { wake = r; });
@@ -211,6 +217,10 @@ const server = createServer(async (req, res) => {
 		}
 		switch (cmd) {
 			case 'set_draft':
+				if (stalls > 0) {
+					stalls--;
+					return reply(res, 503, { code: 'failed', message: 'the terminal did not answer in time' });
+				}
 				session.draft = { rev: session.draft.rev + 1, text: args.text };
 				send('draft', { session: id, rev: session.draft.rev, text: args.text, origin: 'web:1' });
 				return reply(res, 200, {});
@@ -229,7 +239,9 @@ const server = createServer(async (req, res) => {
 				if (!session.running) {
 					return reply(res, 409, { code: 'nothing_running', message: 'nothing running' });
 				}
-				wake?.();
+				if (session.entries.at(-1)?.text !== 'stuck') {
+					wake?.();
+				}
 				return reply(res, 200, {});
 			case 'set_effort':
 				if (session.entries.length && session.model.startsWith('claude-')) {

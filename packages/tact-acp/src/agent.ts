@@ -5,6 +5,8 @@
  *   `session/resume` start tact with `--resume <id>`; load replays the snapshot's entries.
  * - `session/prompt`: `set_draft`, then `submit` with the draft's revision; entry upserts stream back as updates
  *   until the turn's `turn_completed` / `interrupted` / `error` entry.
+ *   One turn at a time per session: a newer message stops the running one first (Stop then send again, an edited
+ *   message sent again).
  * - `session/cancel` → `interrupt`. Config options → `set_model` / `set_effort` / `set_reasoning_mode` /
  *   `set_speed`; tact's `settings` events → `config_option_update`. A model (or reasoning mode) change before the
  *   first turn makes tact replace the session with a new one (a new id): the ACP session
@@ -30,15 +32,35 @@ export interface TactAgentOptions {
 	skipCheck?: boolean;
 	/** Watch tact's config.toml for changes (default true). */
 	watchConfig?: boolean;
+	/** How long a stopped turn may take to end before its prompt ends anyway (default 10 s; tact can be slow to stop a tool). */
+	stopGraceMs?: number;
 }
 
 type Notify = (update: acp.SessionUpdate) => Promise<void>;
+
+/** One message's turn. */
+interface Turn {
+	resolve: (end: TurnEnd) => void;
+	/** Stop (or a newer message) asked for it. */
+	stopped: boolean;
+	/** Stopped before tact started it (`nothing_running`): interrupt it as soon as it starts. */
+	stopping: boolean;
+	/** Ends it as interrupted if tact doesn't, a while after a Stop (`stopGraceMs`). */
+	timer?: ReturnType<typeof setTimeout>;
+}
+
 
 class TactSession {
 	readonly mapper: EntryMapper;
 	settings!: TactSettings;
 	catalog: ModelCatalog | undefined;
-	private turn: { resolve: (end: TurnEnd) => void } | undefined;
+	/** The turn being sent or run (one at a time: `prompt`). */
+	private turn: Turn | undefined;
+	/** Ends when the last prompt asked for has ended: the next one starts after it. */
+	private lane: Promise<unknown> = Promise.resolve();
+	/** Prompts asked for so far, and how many of them a Stop (or a newer message) has given up. */
+	private asked = 0;
+	private dropped = 0;
 	private drafts: { text: string; resolve: (rev: number) => void }[] = [];
 	private snapshot!: (s: SessionSnapshot) => void;
 	readonly ready: Promise<SessionSnapshot> = new Promise(resolve => { this.snapshot = resolve; });
@@ -52,7 +74,7 @@ class TactSession {
 	/** After tact replaced the session: its new id. */
 	onReplaced: ((tactId: string) => void) | undefined;
 
-	constructor(readonly instance: TactInstance, readonly web: TactWeb, private readonly notify: Notify, cwd: string) {
+	constructor(readonly instance: TactInstance, readonly web: TactWeb, private readonly notify: Notify, cwd: string, private readonly stopGraceMs = 10_000) {
 		this.mapper = new EntryMapper(cwd);
 	}
 
@@ -127,9 +149,9 @@ class TactSession {
 	}
 
 	private onEntry(entry: WireEntry): void {
-		if (this.stopping && this.turn && entry.id > this.mapper.baseline && entry.kind !== 'user') {
+		if (this.turn?.stopping && entry.id > this.mapper.baseline && entry.kind !== 'user') {
 			// Stop came before tact started the turn (`nothing_running`): now there's something to interrupt.
-			this.stopping = false;
+			this.turn.stopping = false;
 			void this.web.command('interrupt', { session: this.sessionId }).catch(() => undefined);
 		}
 		if (entry.kind === 'user' && !this.settings.started) {
@@ -299,41 +321,97 @@ class TactSession {
 		}
 	}
 
+	/**
+	 * A message. One turn at a time per chat: a message sent while the last one is still running or ending (Stop
+	 * and send again, an earlier message edited and sent again; the editor doesn't wait for the stopped turn to end)
+	 * stops that one, waits for it, then goes. Messages a Stop or a newer message gave up end as interrupted
+	 * without being sent. Each turn has its own state, so nothing of one (a Stop, a draft) leaks into the next.
+	 */
 	async prompt(text: string): Promise<TurnEnd> {
+		const n = ++this.asked;
+		// Earlier messages still waiting are given up; the running one is stopped.
+		this.dropped = Math.max(this.dropped, n - 1);
+		if (this.turn) {
+			void this.stop(this.turn);
+		}
+		const run = this.lane.then(() => (n <= this.dropped ? { kind: 'interrupted' as const } : this.run(text)));
+		this.lane = run.catch(() => undefined);
+		return run;
+	}
+
+	private async run(text: string): Promise<TurnEnd> {
 		if (!this.alive) {
 			throw failure('tact is no longer running for this chat');
 		}
 		// A model change still starting tact's new session: the message goes to that one.
 		await this.switching;
 		this.mapper.baseline = this.mapper.lastId;
+		this.drafts = [];
 		const rev = new Promise<number>(resolve => this.drafts.push({ text, resolve }));
-		const end = new Promise<TurnEnd>(resolve => { this.turn = { resolve }; });
-		this.stopping = false;
+		let resolve!: (end: TurnEnd) => void;
+		const end = new Promise<TurnEnd>(r => { resolve = r; });
+		const turn: Turn = this.turn = { resolve, stopping: false, stopped: false };
 		try {
-			await this.command('set_draft', { session: this.sessionId, text });
-			const draft = await withTimeout(rev, 10_000, 'tact did not acknowledge the message');
-			if (this.stopping) {
+			await this.retrying('set_draft', { session: this.sessionId, text });
+			const draft = await Promise.race([withTimeout(rev, 10_000, 'tact did not acknowledge the message'), end.then(() => -1)]);
+			if (turn.stopped) {
 				// Stopped before it was sent: don't send it, and leave tact's composer empty.
 				await this.web.command('set_draft', { session: this.sessionId, text: '' }).catch(() => undefined);
 				return { kind: 'interrupted' };
 			}
+			if (draft < 0) {
+				// tact exited before it took the message
+				return await end;
+			}
 			await this.command('submit', { session: this.sessionId, rev: draft });
 			return await end;
 		} finally {
-			this.turn = undefined;
-			this.stopping = false;
+			if (this.turn === turn) {
+				this.turn = undefined;
+			}
+			clearTimeout(turn.timer);
+			this.drafts = [];
 		}
 	}
 
-	/** Stop was asked for a turn tact hadn't started yet: interrupt it as soon as it has. */
-	private stopping = false;
+	/**
+	 * A command sent once more if tact's terminal didn't answer it in time (HTTP 503, after tact's 60 s) or tact's web
+	 * server couldn't be reached: the terminal can be busy for a while (saving a stopped turn while another chat's
+	 * tact writes the same session store). tact's refusals aren't sent again.
+	 */
+	private async retrying(cmd: string, args: Record<string, unknown>): Promise<void> {
+		try {
+			await this.web.command(cmd, args);
+		} catch (e) {
+			if (!this.alive || (e instanceof TactApiError && e.status !== 503)) {
+				throw apiFailure(e);
+			}
+			await new Promise(r => setTimeout(r, 500));
+			await this.command(cmd, args);
+		}
+	}
 
 	async cancel(): Promise<void> {
+		// Messages still waiting for the running one are given up too.
+		this.dropped = this.asked;
+		if (this.turn) {
+			await this.stop(this.turn);
+		}
+	}
+
+	/**
+	 * Stops a turn: `interrupt`, or (before tact started it: `nothing_running`) an interrupt as soon as it starts, or
+	 * not sending it at all. If tact hasn't ended it within `stopGraceMs`, the prompt ends as interrupted anyway: Stop
+	 * never leaves the chat waiting on a turn that doesn't end.
+	 */
+	private async stop(turn: Turn): Promise<void> {
+		turn.stopped = true;
+		turn.timer ??= setTimeout(() => turn.resolve({ kind: 'interrupted' }), this.stopGraceMs);
 		try {
 			await this.web.command('interrupt', { session: this.sessionId });
 		} catch (e) {
-			if (e instanceof TactApiError && e.code === 'nothing_running' && this.turn) {
-				this.stopping = true;
+			if (e instanceof TactApiError && e.code === 'nothing_running' && this.turn === turn) {
+				turn.stopping = true;
 			}
 		}
 	}
@@ -449,7 +527,7 @@ export class TactAgent {
 			} else {
 				pending.push(u);
 			}
-		}, cwd);
+		}, cwd, this.options.stopGraceMs);
 		session.start();
 		const snapshot = await withTimeout(session.ready, 20_000, 'tact did not send its session');
 		const acpId = sessionId = id ?? snapshot.session;
