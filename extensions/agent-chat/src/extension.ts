@@ -16,6 +16,7 @@ import { BUILTIN_PROFILES, DEFAULT_PROFILE } from '@editor/acp-client';
 import { HarnessChat } from './harnessChat.js';
 import { archivedResource, ChatHistory, harnessName, menuTarget, type ChatEntry } from './history.js';
 import { HarnessModels, MODEL_VENDOR } from './models.js';
+import { insertReference } from './reference.js';
 import { TurnScheduler } from './scheduler.js';
 
 let lastUsed: number | undefined;
@@ -87,18 +88,14 @@ export function activate(context: vscode.ExtensionContext): void {
 			await chat?.modelPicked(resource!, identifier!);
 		}),
 		// Cmd/Ctrl+L to chat: insert the reference at the cursor of the last focused chat input, as an inline pill,
-		// without sending it. Without the core command (an older core), the reference replaces the input.
+		// without sending it; focus ends there (reference.ts).
 		vscode.commands.registerCommand('agentChat.insertReference', async (text?: string, uri?: vscode.Uri, startLine?: number, endLine?: number) => {
 			const ref = typeof text === 'string' ? { text: text.trim(), uri, startLine, endLine } : selectionReference();
 			if (!ref?.text) {
 				return;
 			}
 			markUsed();
-			const range = ref.startLine ? new vscode.Range(ref.startLine - 1, 0, (ref.endLine ?? ref.startLine) - 1, 0) : undefined;
-			const inserted = ref.uri && await Promise.resolve(vscode.commands.executeCommand<boolean>('_agentChat.insertReference', ref.text, ref.uri, range)).catch(() => false);
-			if (!inserted) {
-				await vscode.commands.executeCommand('workbench.action.chat.open', { query: `${ref.text} `, isPartialQuery: true });
-			}
+			await insertReference(ref);
 		}),
 		vscode.commands.registerCommand('agentChat.searchChats', () => searchChats(history, entry => chatResource(entry, builtins, DEFAULT_PROFILE.id))),
 		vscode.commands.registerCommand('agentChat.runNow', (id?: string) => {

@@ -14,6 +14,8 @@
 // reference in place, plus a reference with its range (a Location) for the extension.
 // - The Cmd/Ctrl+L keybinding itself (`AGENT_CHAT_CMD_L`), above every extension's default keybindings.
 
+import { raceTimeout } from '../../../../base/common/async.js';
+import { Event } from '../../../../base/common/event.js';
 import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
 import { Disposable, DisposableMap } from '../../../../base/common/lifecycle.js';
 import { autorun } from '../../../../base/common/observable.js';
@@ -54,11 +56,51 @@ CommandsRegistry.registerCommand('_agentChat.openChat', async (accessor, uri: Ur
 	return !!widget;
 });
 
+/** How long a chat view that is still opening may take to show its chat before a reference goes in anyway. */
+export const CHAT_BIND_TIMEOUT = 5000;
+
+/**
+ * Waits until `widget` shows a chat. A chat view that a reveal has just created (the chat was closed or hidden)
+ * shows its input at once but binds its chat (restored or new) a moment later, and binding replaces the input: with
+ * the chat's saved draft, which drops anything put in before, or with that text as plain text, which drops the pill.
+ * Returns the text typed into the input while it waited (it has focus meanwhile), taken out of the input if binding
+ * kept it, so the caller can put it after the reference.
+ */
+async function chatBound(widget: IChatWidget): Promise<string> {
+	if (widget.viewModel) {
+		return '';
+	}
+	const editor = widget.inputEditor;
+	const before = editor.getValue();
+	let typed = before;
+	const typing = editor.onDidChangeModelContent(e => {
+		if (!e.isFlush && !widget.viewModel) {
+			typed = editor.getValue();
+		}
+	});
+	const bound = Event.toPromise(widget.onDidChangeViewModel);
+	try {
+		await raceTimeout(bound, CHAT_BIND_TIMEOUT);
+	} finally {
+		bound.cancel();
+		typing.dispose();
+	}
+	const added = typed.startsWith(before) ? typed.slice(before.length) : typed;
+	const model = editor.getModel();
+	// Binding keeps what was typed only into a chat without a draft, as the whole input.
+	if (added && model && model.getValue() === typed) {
+		editor.executeEdits('agentChat.insertReference', [{ range: Range.fromPositions(model.getPositionAt(typed.length - added.length), model.getFullModelRange().getEndPosition()), text: '' }]);
+	}
+	return added;
+}
+
 /**
  * `_agentChat.insertReference(text, uri, range?)`: inserts `text` (e.g. `@main.tex:L16-18`) at the cursor of the
- * last focused chat input (revealing it), as a reference pill for `uri` (and `range`, 1-based lines), followed by
- * a space. A caret inside an existing pill inserts after that pill, so several references can sit in one sentence.
- * Returns whether it was inserted.
+ * last focused chat input (revealing it, and waiting for its chat when the reveal opened it), as a reference pill
+ * for `uri` (and `range`, 1-based lines), followed by a space. A caret inside an existing pill inserts after that
+ * pill, so several references can sit in one sentence. Keyboard focus ends in that input, with the caret right
+ * after the reference (and after anything typed while the chat was opening, which follows the reference). Returns
+ * whether it was inserted.
  */
 CommandsRegistry.registerCommand('_agentChat.insertReference', async (accessor, text: unknown, uri: UriComponents | undefined, range: IRange | undefined) => {
 	if (typeof text !== 'string' || !text || !uri) {
@@ -70,6 +112,7 @@ CommandsRegistry.registerCommand('_agentChat.insertReference', async (accessor, 
 	if (!widget) {
 		return false;
 	}
+	const typed = await chatBound(widget);
 	const editor = widget.inputEditor;
 	const model = editor.getModel();
 	const variables = widget.getContrib<ChatDynamicVariableModel>(ChatDynamicVariableModel.ID);
@@ -85,7 +128,7 @@ CommandsRegistry.registerCommand('_agentChat.insertReference', async (accessor, 
 	const insertAt = referenceInsertionOffset(value, model.getOffsetAt(at), pills);
 	const prefix = referencePrefix(value, insertAt);
 	const position = model.getPositionAt(insertAt);
-	if (!editor.executeEdits('agentChat.insertReference', [{ range: Range.fromPositions(position), text: `${prefix}${text} ` }])) {
+	if (!editor.executeEdits('agentChat.insertReference', [{ range: Range.fromPositions(position), text: `${prefix}${text} ${typed}` }])) {
 		return false;
 	}
 	// The pill covers exactly the inserted reference, read back from the model so a listener that
@@ -109,7 +152,7 @@ CommandsRegistry.registerCommand('_agentChat.insertReference', async (accessor, 
 		range: pill,
 		data: range ? { uri: resource, range: Range.lift(range) } : resource,
 	});
-	editor.setPosition(model.getPositionAt(Math.min(pillOffset + text.length + 1, model.getValueLength())));
+	editor.setPosition(model.getPositionAt(Math.min(pillOffset + text.length + 1 + typed.length, model.getValueLength())));
 	widget.focusInput();
 	widget.refreshParsedInput();
 	return true;

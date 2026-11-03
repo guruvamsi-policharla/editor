@@ -1,9 +1,9 @@
 diff --git a/src/vs/workbench/contrib/agentChat/browser/agentChat.contribution.ts b/src/vs/workbench/contrib/agentChat/browser/agentChat.contribution.ts
 new file mode 100644
-index 00000000..bc4802e4
+index 00000000..13882de2
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentChat/browser/agentChat.contribution.ts
-@@ -0,0 +1,164 @@
+@@ -0,0 +1,207 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -20,6 +20,8 @@ index 00000000..bc4802e4
 +// reference in place, plus a reference with its range (a Location) for the extension.
 +// - The Cmd/Ctrl+L keybinding itself (`AGENT_CHAT_CMD_L`), above every extension's default keybindings.
 +
++import { raceTimeout } from '../../../../base/common/async.js';
++import { Event } from '../../../../base/common/event.js';
 +import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
 +import { Disposable, DisposableMap } from '../../../../base/common/lifecycle.js';
 +import { autorun } from '../../../../base/common/observable.js';
@@ -60,11 +62,51 @@ index 00000000..bc4802e4
 +	return !!widget;
 +});
 +
++/** How long a chat view that is still opening may take to show its chat before a reference goes in anyway. */
++export const CHAT_BIND_TIMEOUT = 5000;
++
++/**
++ * Waits until `widget` shows a chat. A chat view that a reveal has just created (the chat was closed or hidden)
++ * shows its input at once but binds its chat (restored or new) a moment later, and binding replaces the input: with
++ * the chat's saved draft, which drops anything put in before, or with that text as plain text, which drops the pill.
++ * Returns the text typed into the input while it waited (it has focus meanwhile), taken out of the input if binding
++ * kept it, so the caller can put it after the reference.
++ */
++async function chatBound(widget: IChatWidget): Promise<string> {
++	if (widget.viewModel) {
++		return '';
++	}
++	const editor = widget.inputEditor;
++	const before = editor.getValue();
++	let typed = before;
++	const typing = editor.onDidChangeModelContent(e => {
++		if (!e.isFlush && !widget.viewModel) {
++			typed = editor.getValue();
++		}
++	});
++	const bound = Event.toPromise(widget.onDidChangeViewModel);
++	try {
++		await raceTimeout(bound, CHAT_BIND_TIMEOUT);
++	} finally {
++		bound.cancel();
++		typing.dispose();
++	}
++	const added = typed.startsWith(before) ? typed.slice(before.length) : typed;
++	const model = editor.getModel();
++	// Binding keeps what was typed only into a chat without a draft, as the whole input.
++	if (added && model && model.getValue() === typed) {
++		editor.executeEdits('agentChat.insertReference', [{ range: Range.fromPositions(model.getPositionAt(typed.length - added.length), model.getFullModelRange().getEndPosition()), text: '' }]);
++	}
++	return added;
++}
++
 +/**
 + * `_agentChat.insertReference(text, uri, range?)`: inserts `text` (e.g. `@main.tex:L16-18`) at the cursor of the
-+ * last focused chat input (revealing it), as a reference pill for `uri` (and `range`, 1-based lines), followed by
-+ * a space. A caret inside an existing pill inserts after that pill, so several references can sit in one sentence.
-+ * Returns whether it was inserted.
++ * last focused chat input (revealing it, and waiting for its chat when the reveal opened it), as a reference pill
++ * for `uri` (and `range`, 1-based lines), followed by a space. A caret inside an existing pill inserts after that
++ * pill, so several references can sit in one sentence. Keyboard focus ends in that input, with the caret right
++ * after the reference (and after anything typed while the chat was opening, which follows the reference). Returns
++ * whether it was inserted.
 + */
 +CommandsRegistry.registerCommand('_agentChat.insertReference', async (accessor, text: unknown, uri: UriComponents | undefined, range: IRange | undefined) => {
 +	if (typeof text !== 'string' || !text || !uri) {
@@ -76,6 +118,7 @@ index 00000000..bc4802e4
 +	if (!widget) {
 +		return false;
 +	}
++	const typed = await chatBound(widget);
 +	const editor = widget.inputEditor;
 +	const model = editor.getModel();
 +	const variables = widget.getContrib<ChatDynamicVariableModel>(ChatDynamicVariableModel.ID);
@@ -91,7 +134,7 @@ index 00000000..bc4802e4
 +	const insertAt = referenceInsertionOffset(value, model.getOffsetAt(at), pills);
 +	const prefix = referencePrefix(value, insertAt);
 +	const position = model.getPositionAt(insertAt);
-+	if (!editor.executeEdits('agentChat.insertReference', [{ range: Range.fromPositions(position), text: `${prefix}${text} ` }])) {
++	if (!editor.executeEdits('agentChat.insertReference', [{ range: Range.fromPositions(position), text: `${prefix}${text} ${typed}` }])) {
 +		return false;
 +	}
 +	// The pill covers exactly the inserted reference, read back from the model so a listener that
@@ -115,7 +158,7 @@ index 00000000..bc4802e4
 +		range: pill,
 +		data: range ? { uri: resource, range: Range.lift(range) } : resource,
 +	});
-+	editor.setPosition(model.getPositionAt(Math.min(pillOffset + text.length + 1, model.getValueLength())));
++	editor.setPosition(model.getPositionAt(Math.min(pillOffset + text.length + 1 + typed.length, model.getValueLength())));
 +	widget.focusInput();
 +	widget.refreshParsedInput();
 +	return true;
@@ -986,10 +1029,10 @@ index ac63192d..8b90f952 100644
  		}
 diff --git a/src/vs/workbench/contrib/agentChat/test/browser/agentChat.test.ts b/src/vs/workbench/contrib/agentChat/test/browser/agentChat.test.ts
 new file mode 100644
-index 00000000..f34b25d3
+index 00000000..807d6f98
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentChat/test/browser/agentChat.test.ts
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,280 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -998,14 +1041,19 @@ index 00000000..f34b25d3
 +// Agent chat's Cmd/Ctrl+L goes to a chat the user can see. Closing a chat's editor tab doesn't dispose its
 +// widget (the editor pane is kept for the next chat tab), so the last focused widget can be one that isn't shown
 +// anywhere: a reference inserted there is lost. The real ChatWidgetService decides.
++// Keyboard focus ends in that chat's input with the caret right after the reference, also when the chat was closed
++// or hidden: the chat view the reveal creates then binds its chat after a moment, which replaces the input.
 +
 +import assert from 'assert';
-+import { Emitter, Event } from '../../../../../base/common/event.js';
++import { timeout } from '../../../../../base/common/async.js';
++import { Emitter } from '../../../../../base/common/event.js';
 +import { DisposableStore } from '../../../../../base/common/lifecycle.js';
 +import { observableValue } from '../../../../../base/common/observable.js';
 +import { URI } from '../../../../../base/common/uri.js';
++import { runWithFakedTimers } from '../../../../../base/test/common/timeTravelScheduler.js';
 +import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-+import { IRange } from '../../../../../editor/common/core/range.js';
++import { IPosition } from '../../../../../editor/common/core/position.js';
++import { IRange, Range } from '../../../../../editor/common/core/range.js';
 +import { createTextModel } from '../../../../../editor/test/common/testTextModel.js';
 +import { CommandsRegistry } from '../../../../../platform/commands/common/commands.js';
 +import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
@@ -1014,14 +1062,24 @@ index 00000000..f34b25d3
 +import { ChatViewId, IChatWidget, IChatWidgetService } from '../../../chat/browser/chat.js';
 +import { ChatWidgetService } from '../../../chat/browser/widget/chatWidgetService.js';
 +import { chatSetUpForSessionsList } from '../../../chat/browser/widgetHosts/viewPane/chatViewPane.js';
-+import { AgentChatModelPicks, MODEL_PICKED_COMMAND } from '../../browser/agentChat.contribution.js';
++import { AgentChatModelPicks, CHAT_BIND_TIMEOUT, MODEL_PICKED_COMMAND } from '../../browser/agentChat.contribution.js';
 +
 +interface FakeWidget {
 +	readonly widget: IChatWidget;
 +	readonly references: string[];
 +	readonly sent: string[];
++	/** Where the caret was each time the input got keyboard focus (offset in its text). */
++	readonly focusedAt: number[];
 +	focus(): void;
 +	text(): string;
++	caret(): number;
++	/** The user types at the caret. */
++	type(text: string): void;
++	/**
++	 * The chat view binds its chat, as `ChatWidget.setModel` and `setModelPreservingInputTypedWhileLoading` do: the
++	 * input becomes the chat's draft (caret at its end), or, without a draft, what was typed meanwhile, as plain text.
++	 */
++	bind(draft?: string): void;
 +}
 +
 +suite('AgentChat: Cmd/Ctrl+L goes to a chat that is shown', () => {
@@ -1033,34 +1091,63 @@ index 00000000..f34b25d3
 +	let viewWidget: FakeWidget;
 +	let openedViews: string[];
 +
-+	/** A chat widget: in the chat view (`viewId`), or in an editor whose tab was closed (no session, not a view). */
-+	function fakeWidget(viewId?: string): FakeWidget {
++	/**
++	 * A chat widget: in the chat view (`viewId`), or in an editor whose tab was closed (no session, not a view).
++	 * `bound`: it shows a chat already (an open chat), rather than one the view binds after a moment.
++	 */
++	function fakeWidget(viewId?: string, bound = true): FakeWidget {
 +		const model = disposables.add(createTextModel(''));
 +		const focused = disposables.add(new Emitter<void>());
++		const viewModelChanged = disposables.add(new Emitter<unknown>());
 +		const references: string[] = [];
 +		const sent: string[] = [];
++		const focusedAt: number[] = [];
++		let caret: number | undefined;
++		const caretOffset = () => Math.min(caret ?? model.getValueLength(), model.getValueLength());
 +		const editor = {
 +			getModel: () => model,
-+			getPosition: () => model.getFullModelRange().getEndPosition(),
-+			setPosition: () => { },
++			getValue: () => model.getValue(),
++			getPosition: () => model.getPositionAt(caretOffset()),
++			setPosition: (position: IPosition) => { caret = model.getOffsetAt(position); },
 +			executeEdits: (_source: string, edits: { range: IRange; text: string }[]) => { model.applyEdits(edits); return true; },
++			onDidChangeModelContent: (listener: (e: { isFlush: boolean }) => void) => model.onDidChangeContent(listener),
 +		};
 +		const variables = { variables: [], addReference: (ref: { fullName: string }) => references.push(ref.fullName) };
 +		const widget = {
-+			viewModel: undefined,
++			viewModel: bound ? { sessionResource: URI.parse('agent-tact:/chat-1') } : undefined,
 +			viewContext: viewId ? { viewId } : {},
 +			inputEditor: editor,
 +			getContrib: (id: string) => (id === ChatDynamicVariableModel.ID ? variables : undefined),
-+			focusInput: () => { },
++			focusInput: () => { focusedAt.push(caretOffset()); },
 +			refreshParsedInput: () => { },
 +			acceptInput: async (text: string) => { sent.push(text); return {}; },
 +			onDidFocus: focused.event,
-+			onDidShow: Event.None,
-+			onDidHide: Event.None,
-+			onDidChangeViewModel: Event.None,
++			onDidShow: disposables.add(new Emitter<void>()).event,
++			onDidHide: disposables.add(new Emitter<void>()).event,
++			onDidChangeViewModel: viewModelChanged.event,
 +		} as unknown as IChatWidget;
 +		disposables.add(widgets.register(widget));
-+		return { widget, references, sent, focus: () => focused.fire(), text: () => model.getValue() };
++		return {
++			widget, references, sent, focusedAt,
++			focus: () => focused.fire(),
++			text: () => model.getValue(),
++			caret: caretOffset,
++			type: text => {
++				const at = caretOffset();
++				model.applyEdits([{ range: Range.fromPositions(model.getPositionAt(at)), text }]);
++				caret = at + text.length;
++			},
++			bind: draft => {
++				const typedWhileLoading = model.getValue();
++				model.setValue(draft ?? '');
++				(widget as { viewModel: unknown }).viewModel = { sessionResource: URI.parse('agent-tact:/chat-1') };
++				viewModelChanged.fire({});
++				if (typedWhileLoading && !draft) {
++					model.setValue(typedWhileLoading);
++				}
++				caret = undefined;
++			},
++		};
 +	}
 +
 +	setup(() => {
@@ -1076,14 +1163,20 @@ index 00000000..f34b25d3
 +			{ groups: [] } as never, views as never, { sessionResource: undefined } as never, {} as never, {} as never, { getSession: () => undefined } as never, new NullLogService(),
 +		));
 +		instantiationService.set(IChatWidgetService, widgets);
-+		viewWidget = fakeWidget(ChatViewId);
 +	});
++
++	/** The chat view's widget: showing a chat (open), or one that binds its chat after a moment (closed, hidden). */
++	function chatView(bound = true): FakeWidget {
++		viewWidget = fakeWidget(ChatViewId, bound);
++		return viewWidget;
++	}
 +
 +	function run(id: string, ...args: unknown[]): Promise<unknown> {
 +		return Promise.resolve(instantiationService.invokeFunction<unknown>(accessor => CommandsRegistry.getCommand(id)!.handler(accessor, ...args)));
 +	}
 +
 +	test('a reference goes to the chat view when the last focused chat was in a closed editor tab', async () => {
++		chatView();
 +		const closedTab = fakeWidget();
 +		closedTab.focus();
 +		assert.strictEqual(widgets.lastFocusedWidget, closedTab.widget);
@@ -1099,10 +1192,79 @@ index 00000000..f34b25d3
 +	});
 +
 +	test('a reference goes to the last focused chat when it is still shown', async () => {
-+		viewWidget.focus();
++		chatView().focus();
 +		await run('_agentChat.insertReference', '@notes.md:L2', URI.file('/ws/notes.md'));
 +		assert.strictEqual(viewWidget.text(), '@notes.md:L2 ');
 +	});
++
++	test('chat open: focus ends in its input, the caret right after the reference and its space', async () => {
++		chatView().focus();
++		viewWidget.type('in this part  fold in the argument');
++		const typed = viewWidget.widget.inputEditor.getModel()!;
++		viewWidget.widget.inputEditor.setPosition(typed.getPositionAt('in this part '.length));
++
++		assert.strictEqual(await run('_agentChat.insertReference', '@main.tex:L7-8', URI.file('/ws/main.tex')), true);
++
++		assert.strictEqual(viewWidget.text(), 'in this part @main.tex:L7-8  fold in the argument');
++		const end = 'in this part @main.tex:L7-8 '.length;
++		assert.strictEqual(viewWidget.caret(), end);
++		assert.strictEqual(viewWidget.focusedAt.at(-1), end);
++		assert.deepStrictEqual(openedViews, [ChatViewId]);
++	});
++
++	test('chat closed or hidden: the reference waits for the chat the view binds, then focus and caret follow it', async () => {
++		const view = chatView(false);
++
++		const inserted = run('_agentChat.insertReference', '@main.tex:L13-14', URI.file('/ws/main.tex'));
++		await timeout(0);
++		assert.strictEqual(view.text(), '', 'nothing goes into the input before its chat is bound');
++		view.bind();
++
++		assert.strictEqual(await inserted, true);
++		assert.deepStrictEqual(openedViews, [ChatViewId]);
++		assert.strictEqual(view.text(), '@main.tex:L13-14 ');
++		assert.deepStrictEqual(view.references, ['@main.tex:L13-14']);
++		assert.strictEqual(view.caret(), '@main.tex:L13-14 '.length);
++		assert.strictEqual(view.focusedAt.at(-1), '@main.tex:L13-14 '.length);
++	});
++
++	test('chat closed or hidden with a saved draft: the draft stays and the reference goes in at its caret', async () => {
++		const view = chatView(false);
++
++		const inserted = run('_agentChat.insertReference', '@main.tex:L13-14', URI.file('/ws/main.tex'));
++		await timeout(0);
++		view.bind('compare with');
++
++		assert.strictEqual(await inserted, true);
++		assert.strictEqual(view.text(), 'compare with @main.tex:L13-14 ');
++		assert.strictEqual(view.focusedAt.at(-1), view.text().length);
++	});
++
++	for (const draft of [undefined, 'draft']) {
++		test(`text typed while the chat opens follows the reference (${draft ? 'dropped by the bind, which keeps the draft' : 'kept by the bind'})`, async () => {
++			const view = chatView(false);
++			const inserted = run('_agentChat.insertReference', '@main.tex:L13-14', URI.file('/ws/main.tex'));
++			await timeout(0);
++			view.type('fix this');
++			view.bind(draft);
++
++			assert.strictEqual(await inserted, true);
++			const expected = `${draft ? `${draft} ` : ''}@main.tex:L13-14 fix this`;
++			assert.strictEqual(view.text(), expected);
++			assert.deepStrictEqual(view.references, ['@main.tex:L13-14']);
++			assert.strictEqual(view.caret(), expected.length);
++			assert.strictEqual(view.focusedAt.at(-1), expected.length);
++		});
++	}
++
++	test('a chat that never binds still gets the reference, after a while', () => runWithFakedTimers({ useFakeTimers: true }, async () => {
++		const view = chatView(false);
++		const inserted = run('_agentChat.insertReference', '@main.tex:L13-14', URI.file('/ws/main.tex'));
++		await timeout(CHAT_BIND_TIMEOUT + 1);
++		assert.strictEqual(await inserted, true);
++		assert.strictEqual(view.text(), '@main.tex:L13-14 ');
++		assert.strictEqual(view.focusedAt.at(-1), '@main.tex:L13-14 '.length);
++	}));
 +
 +});
 +
