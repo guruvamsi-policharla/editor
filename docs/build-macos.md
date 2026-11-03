@@ -1,6 +1,6 @@
-# Build Editor on macOS
+# Build editor on macOS
 
-One script builds a runnable, ad-hoc signed `Editor.app` from a fresh clone, on Apple Silicon or Intel.
+One script builds a runnable, ad-hoc signed `editor.app` from a fresh clone, on Apple Silicon or Intel.
 
 > **Status:** the script has been checked under bash 3.2 and with stubbed macOS tools on Linux. It has **not** been run on a real Mac yet. If it fails, the log path is printed at the end; see [Troubleshooting](#troubleshooting).
 
@@ -40,7 +40,7 @@ This does the following:
 6. Compiles and packages the app.
 7. Ad-hoc signs it (`codesign --force --deep --sign -`) and clears extended attributes, including quarantine.
 8. Runs a `--version` smoke test.
-9. With `--install`, copies the app to `/Applications/Editor.app`.
+9. With `--install`, copies the app to `/Applications/editor.app`.
 
 Leave out `--install` to keep the app in the build directory only.
 
@@ -50,28 +50,28 @@ Leave out `--install` to keep the app in the build directory only.
 | **Disk** | **~15 GB free** in the build directory (the tree is about 10 GB), plus ~2 GB of npm and Electron caches in `~/.npm` and `~/Library/Caches/electron`. The app itself is about 0.5–1 GB |
 | **Memory** | 16 GB is comfortable. With 8 GB it works but swaps, so close other apps |
 | **Build directory** | `~/.cache/editor-fork-build`. To use another one, pass it as the last argument; the path must not contain spaces |
-| **The app** | `~/.cache/editor-fork-build/vscodium/VSCode-darwin-arm64/Editor.app` (`-x64` on Intel), plus `/Applications/Editor.app` with `--install` |
+| **The app** | `~/.cache/editor-fork-build/vscodium/VSCode-darwin-arm64/editor.app` (`-x64` on Intel), plus `/Applications/editor.app` with `--install` |
 | **Log** | `~/.cache/editor-fork-build/build-macos.log` |
 
 When the build finishes, the script prints where the app is and how to launch it:
 
 ```bash
-open /Applications/Editor.app
+open /Applications/editor.app
 ```
 
-To install the `editor` shell command, which works like `code` (`editor .`, `editor paper/main.tex`), open the command palette in Editor (**Cmd+Shift+P**) and run **Shell Command: Install 'editor' command in PATH**. Or link it by hand into any directory on your `PATH`:
+To install the `editor` shell command, which works like `code` (`editor .`, `editor paper/main.tex`), open the command palette in editor (**Cmd+Shift+P**) and run **Shell Command: Install 'editor' command in PATH**. Or link it by hand into any directory on your `PATH`:
 
 ```bash
-ln -sf "/Applications/Editor.app/Contents/Resources/app/bin/editor" /opt/homebrew/bin/editor
+ln -sf "/Applications/editor.app/Contents/Resources/app/bin/editor" /opt/homebrew/bin/editor
 ```
 
-Editor keeps its settings in `~/Library/Application Support/Editor` and its extensions in `~/.editor`, so it runs side by side with VS Code and VSCodium.
+editor keeps its settings in `~/Library/Application Support/Editor` and its extensions in `~/.editor`, so it runs side by side with VS Code and VSCodium.
 
 ## 3. Rebuild after pulling
 
 ```bash
 git pull
-fork/scripts/build-macos.sh --install      # quit Editor first
+fork/scripts/build-macos.sh --install      # quit editor first
 ```
 
 The slow prepare step (clone, patches, `npm ci`) only runs again when the upstream pin, the branding or `patches/` changed. Otherwise the script reinstalls the extension and rebuilds the app. To force a full re-prepare, use `--clean`. To start over from nothing, `rm -rf ~/.cache/editor-fork-build`.
@@ -90,11 +90,11 @@ MAX_OLD_SPACE_SIZE=10240 fork/scripts/build-macos.sh --install
 
 If instead the whole Mac crawls or the process gets `Killed: 9`, it ran out of real memory. Close other apps (browsers, Docker) and run it again.
 
-**"Editor is damaged and can't be opened" / "cannot be opened because Apple cannot check it".** Gatekeeper blocks quarantined apps that aren't notarized. A local build isn't quarantined, but a copy that was downloaded, AirDropped or unzipped from a release is. Run:
+**"editor is damaged and can't be opened" / "cannot be opened because Apple cannot check it".** Gatekeeper blocks quarantined apps that aren't notarized. A local build isn't quarantined, but a copy that was downloaded, AirDropped or unzipped from a release is. Run:
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/Editor.app
-fork/scripts/sign-macos-adhoc.sh /Applications/Editor.app     # re-sign if it still won't open
+xattr -dr com.apple.quarantine /Applications/editor.app
+fork/scripts/sign-macos-adhoc.sh /Applications/editor.app     # re-sign if it still won't open
 ```
 
 Alternatively, right-click the app, choose **Open**, and confirm. You can also use System Settings › Privacy & Security › **Open Anyway**.

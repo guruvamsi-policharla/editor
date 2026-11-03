@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# One command from a fresh clone to a runnable, ad-hoc signed Editor.app on macOS (Apple Silicon or Intel).
+# One command from a fresh clone to a runnable, ad-hoc signed editor.app on macOS (Apple Silicon or Intel).
 #
 #   fork/scripts/build-macos.sh              check prerequisites, prepare VSCodium + our patches + the built-in
 #                                            extension, compile, package, sign; prints where the .app is
-#   fork/scripts/build-macos.sh --install    same, then copy the app to /Applications (quit Editor first)
+#   fork/scripts/build-macos.sh --install    same, then copy the app to /Applications (quit editor first)
 #   fork/scripts/build-macos.sh --check      only check prerequisites
 #   fork/scripts/build-macos.sh --dry-run    check, then print the steps it would run
 #   fork/scripts/build-macos.sh --clean      re-clone and re-prepare even if nothing changed
@@ -194,8 +194,9 @@ check_prerequisites() {
 
 # The slow prepare step depends only on these inputs; skip it when they are unchanged.
 prepare_stamp() {
-  cat "${REPO_ROOT}/fork/upstream.env" "${REPO_ROOT}/fork/branding.env" "${REPO_ROOT}"/patches/*.patch \
-    "${REPO_ROOT}/fork/scripts/prepare-vscodium.sh" | git hash-object --stdin
+  { cat "${REPO_ROOT}/fork/upstream.env" "${REPO_ROOT}/fork/branding.env" "${REPO_ROOT}"/patches/*.patch \
+      "${REPO_ROOT}/fork/scripts/prepare-vscodium.sh"
+    find "${REPO_ROOT}/branding/generated" -type f -print0 | LC_ALL=C sort -z | xargs -0 cat; } | git hash-object --stdin
   echo "${VSCODE_ARCH}"
 }
 
@@ -251,7 +252,7 @@ if [[ "${MODE}" == "dry-run" ]]; then
   exit 0
 fi
 
-if [[ "${INSTALL}" == "yes" ]] && pgrep -f "/Applications/${APP_NAME}.app/Contents/MacOS/" >/dev/null 2>&1; then
+if [[ "${INSTALL}" == "yes" ]] && pgrep -if "/Applications/${APP_NAME}.app/Contents/MacOS/" >/dev/null 2>&1; then
   echo "${APP_NAME} is running from /Applications; quit it first (Cmd+Q), then run this again." >&2
   exit 1
 fi

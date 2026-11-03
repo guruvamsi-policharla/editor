@@ -2,7 +2,7 @@
 # Prepare a patched VS Code tree the VSCodium way:
 #   1. fetch VSCodium at the pinned ref (fork/upstream.env)
 #   2. drop our core patches into its official downstream hook (patches/user/*.patch, applied last)
-#   3. merge our branding (fork/branding.env) into VSCodium's product.json overlay
+#   3. merge our branding (fork/branding.env) into VSCodium's product.json overlay, our icons (branding/generated) over its src/stable
 #   4. get_repo.sh + prepare_vscode.sh (VS Code at VSCodium's pinned commit, all patches, npm ci)
 #   5. install our built-in extension (fork/scripts/install-extension.sh)
 #
@@ -37,11 +37,16 @@ cd vscodium
 mkdir -p patches/user
 cp "${REPO_ROOT}"/patches/*.patch patches/user/
 
+# Icons: prepare_vscode.sh copies src/stable over the VS Code tree.
+cp -R "${REPO_ROOT}/branding/generated/." src/stable/
+
 # Branding: prepare_vscode.sh deep-merges ./product.json over the setpath'd values, so ours win.
 jq -n --arg name "${APP_NAME}" --arg bin "${BINARY_NAME}" --arg data "${DATA_FOLDER_NAME}" \
-  --arg proto "${URL_PROTOCOL}" --arg bundle "${DARWIN_BUNDLE_ID}" --arg repo "${GH_REPO_PATH}" '{
+  --arg userdata "${USER_DATA_FOLDER_NAME}" --arg proto "${URL_PROTOCOL}" --arg bundle "${DARWIN_BUNDLE_ID}" \
+  --arg repo "${GH_REPO_PATH}" '{
     nameShort: $name, nameLong: $name, applicationName: $bin, dataFolderName: $data,
-    linuxIconName: $bin, urlProtocol: $proto, darwinBundleIdentifier: $bundle,
+    userDataFolderName: $userdata, linuxIconName: $bin, urlProtocol: $proto, darwinBundleIdentifier: $bundle,
+    win32DirName: $name, win32NameVersion: $name, win32ShellNameShort: $name,
     serverApplicationName: ($bin + "-server"), serverDataFolderName: ($data + "-server"),
     tunnelApplicationName: ($bin + "-tunnel"),
     reportIssueUrl: ("https://github.com/" + $repo + "/issues/new"),
@@ -84,5 +89,8 @@ if [[ "${PATCHES_ONLY}" == "yes" ]]; then
 fi
 
 . prepare_vscode.sh
+# prepare_vscode.sh hardcodes this name after its product.json step.
+jq --arg name "${APP_NAME}" '.name = $name | .short_name = $name' vscode/resources/server/manifest.json > manifest.json.tmp
+mv manifest.json.tmp vscode/resources/server/manifest.json
 "${REPO_ROOT}/fork/scripts/install-extension.sh" "${WORKDIR}/vscodium/vscode"
 echo "Prepared: ${WORKDIR}/vscodium/vscode (VS Code ${MS_TAG} @ ${MS_COMMIT} + VSCodium patches + ours)"

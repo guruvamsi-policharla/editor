@@ -65,7 +65,7 @@ export class AgentConnection {
 
 	constructor(launch: AgentLaunch, options: { keepUpdates?: boolean; clientInfo?: ClientInfo } = {}) {
 		this.keepUpdates = options.keepUpdates ?? true;
-		this.clientInfo = options.clientInfo ?? { name: 'editor', title: 'Editor', version: '0.0.1' };
+		this.clientInfo = options.clientInfo ?? { name: 'editor', title: 'editor', version: '0.0.1' };
 		this.child = spawn(launch.command, [...(launch.args ?? [])], {
 			cwd: launch.cwd,
 			env: { ...process.env, ...launch.env },

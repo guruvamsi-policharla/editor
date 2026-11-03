@@ -233,7 +233,7 @@ Design consequence: keep a **protocol-neutral session view model** (messages by 
 
 ```jsonc
 { "protocolVersion": 1,
-  "clientInfo": { "name": "editor", "title": "Editor", "version": "<app version>" },
+  "clientInfo": { "name": "editor", "title": "editor", "version": "<app version>" },
   "clientCapabilities": {
     // NO "fs", NO "terminal": the harness reads/writes/executes itself.
     "auth": { "terminal": true },            // we can run login commands in the integrated terminal

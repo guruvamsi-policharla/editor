@@ -1,0 +1,41 @@
+diff --git a/src/main.ts b/src/main.ts
+index 89a38a6..c96973c 100644
+--- a/src/main.ts
++++ b/src/main.ts
+@@ -57,7 +57,7 @@ if (args['sandbox'] &&
+ }
+ 
+ // Set userData path before app 'ready' event
+-const userDataPath = getUserDataPath(args, product.nameShort ?? 'code-oss-dev');
++const userDataPath = getUserDataPath(args, product.userDataFolderName ?? product.nameShort ?? 'code-oss-dev');
+ if (process.platform === 'win32') {
+ 	const userDataUNCHost = getUNCHost(userDataPath);
+ 	if (userDataUNCHost) {
+diff --git a/src/vs/base/common/product.ts b/src/vs/base/common/product.ts
+index 44207cd..e987b79 100644
+--- a/src/vs/base/common/product.ts
++++ b/src/vs/base/common/product.ts
+@@ -103,6 +103,8 @@ export interface IProductConfiguration {
+ 	readonly commit?: string;
+ 
+ 	readonly nameShort: string;
++	/** Folder name for user data and user state. Defaults to nameShort, but stays put when that is renamed. */
++	readonly userDataFolderName?: string;
+ 	readonly nameLong: string;
+ 
+ 	readonly win32AppUserModelId?: string;
+diff --git a/src/vs/platform/environment/node/environmentService.ts b/src/vs/platform/environment/node/environmentService.ts
+index 62fc4ea..d2ba05e 100644
+--- a/src/vs/platform/environment/node/environmentService.ts
++++ b/src/vs/platform/environment/node/environmentService.ts
+@@ -18,8 +18,8 @@ export class NativeEnvironmentService extends AbstractNativeEnvironmentService {
+ 		super(args, {
+ 			homeDir,
+ 			tmpDir: tmpdir(),
+-			userDataDir: getUserDataPath(args, productService.nameShort),
+-			userStateDir: getUserStatePath(args, productService.nameShort),
++			userDataDir: getUserDataPath(args, productService.userDataFolderName ?? productService.nameShort),
++			userStateDir: getUserStatePath(args, productService.userDataFolderName ?? productService.nameShort),
+ 		}, productService);
+ 	}
+ }

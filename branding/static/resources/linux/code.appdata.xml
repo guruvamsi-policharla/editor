@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop">
+	<id>@@NAME@@.desktop</id>
+	<metadata_license>@@LICENSE@@</metadata_license>
+	<project_license>@@LICENSE@@</project_license>
+	<name>@@NAME_LONG@@</name>
+	<url type="homepage">https://github.com/guruvamsi-policharla/editor</url>
+	<summary>Review what a coding agent changed, inline.</summary>
+	<description>
+		<p>A VSCodium-based editor that shows the changes a coding agent makes inline, so you can keep or undo them.</p>
+	</description>
+</component>

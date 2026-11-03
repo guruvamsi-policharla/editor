@@ -7,7 +7,7 @@
 #                                       reword a sentence, delete a line, add a paragraph, create a file
 #   --no-wait                           (run) don't wait for Enter before editing
 #
-# Open DIR in Editor *before* `run`: the editor records the files as they are when the folder opens,
+# Open DIR in editor *before* `run`: the editor records the files as they are when the folder opens,
 # and every later change on disk shows up for review.
 # Works with macOS's stock bash 3.2 and BSD tools (awk, cp, mktemp); the repo's files are never touched.
 set -euo pipefail
@@ -35,9 +35,9 @@ open_hint() {
   if command -v editor >/dev/null 2>&1; then
     echo "  editor \"${DIR}\""
   elif [[ "$(uname -s)" == "Darwin" ]]; then
-    echo "  open -a Editor \"${DIR}\"        (or File > Open Folder... in Editor)"
+    echo "  open -a editor \"${DIR}\"        (or File > Open Folder... in editor)"
   else
-    echo "  <path to VSCode-linux-x64>/bin/editor \"${DIR}\"   (or File > Open Folder... in Editor)"
+    echo "  <path to VSCode-linux-x64>/bin/editor \"${DIR}\"   (or File > Open Folder... in editor)"
   fi
 }
 
@@ -52,7 +52,7 @@ setup() {
   fi
   echo "Demo paper ready: ${DIR}"
   echo
-  echo "1. Open it in Editor:"
+  echo "1. Open it in editor:"
   open_hint
   echo "2. Then start the fake agent:"
   echo "  ${REPO_ROOT}/scripts/demo-agent.sh run \"${DIR}\""
@@ -88,7 +88,7 @@ run() {
     exit 1
   }
   if [[ "${WAIT}" == "yes" && -t 0 ]]; then
-    echo "Open ${DIR} in Editor (main.tex and sections/intro.tex), then press Enter to start editing."
+    echo "Open ${DIR} in editor (main.tex and sections/intro.tex), then press Enter to start editing."
     open_hint
     read -r _
   fi
@@ -127,7 +127,7 @@ TEX
   say "created sections/related.tex and added it to main.tex"
 
   echo
-  echo "Done. In Editor, each change has Keep / Undo buttons (Ctrl/Cmd+Y keeps, Ctrl/Cmd+N undoes the change at"
+  echo "Done. In editor, each change has Keep / Undo buttons (Ctrl/Cmd+Y keeps, Ctrl/Cmd+N undoes the change at"
   echo "the cursor). The Agent Changes list in the Explorer has all files, including the new one."
   echo "Start over with: $0 setup \"${DIR}\""
 }

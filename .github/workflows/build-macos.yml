@@ -4,7 +4,7 @@ name: Full build - macOS
 # It does not run on PRs or in the merge queue, because macOS minutes bill at 10x on private repos.
 # Default runner: macos-latest (Apple Silicon). It runs the same fork/scripts/build-macos.sh as a local build.
 # The app is ad-hoc signed (no Developer ID yet) and not notarized: after downloading the zip, users must run
-# `xattr -dr com.apple.quarantine Editor.app` (docs/build-macos.md). macOS minutes count 10x on private repos.
+# `xattr -dr com.apple.quarantine editor.app` (docs/build-macos.md). macOS minutes count 10x on private repos.
 #
 # Memory: the first run (macos-26-arm64 image, which reported 5 CPU / 14 GB) died in gulp compile-src with
 # "JavaScript heap out of memory" at the 6144 MB V8 heap cap while 4.8 GB of RAM was still available and no
@@ -138,5 +138,5 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --draft --title "$TAG" --notes "Unsigned (Linux) / ad-hoc signed, not notarized (macOS) build of $TAG. On macOS run: xattr -dr com.apple.quarantine Editor.app"
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --draft --title "$TAG" --notes "Unsigned (Linux) / ad-hoc signed, not notarized (macOS) build of $TAG. On macOS run: xattr -dr com.apple.quarantine editor.app"
           gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber ./*.zip
