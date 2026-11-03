@@ -1,69 +1,24 @@
 name: CI
 
-# Lightweight checks on every push and PR (fit the free private-repo runner: 2 vCPU, 8 GB).
-# The full packaged build lives in build-linux.yml / build-macos.yml and only runs before a merge.
+# One cheap Linux job on PRs: the patch series for macOS and Linux, and the repo's lint. Nothing runs on plain
+# pushes. GitHub minutes are expensive, so the rest runs locally (fork/scripts/check-local.sh) or by hand
+# (full-checks.yml, build-linux.yml, build-macos.yml).
 
 on:
-  push:
-    branches: ["**"]
   pull_request:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Engine + extension (${{ matrix.os }}, Node ${{ matrix.node }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            node: 22
-          - os: ubuntu-latest
-            node: 24
-          - os: macos-latest
-            node: 24
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: ${{ matrix.node }}
-          cache: npm
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm run build
-      - run: npm test
-      - name: macOS build script runs under the stock bash 3.2 (syntax + prerequisite check)
-        if: runner.os == 'macOS'
-        env:
-          MIN_FREE_GB: "0"
-        run: |
-          /bin/bash --version | head -1
-          for f in fork/scripts/*.sh fork/ci/*.sh scripts/*.sh; do /bin/bash -n "$f"; done
-          /bin/bash fork/scripts/build-macos.sh --check
-
-  shellcheck:
-    name: shellcheck
+  check:
+    name: Patch series + lint
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - run: shellcheck --version && shellcheck -x fork/scripts/*.sh fork/ci/*.sh scripts/*.sh
-
-  patches:
-    name: Patches apply + core typecheck
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -73,37 +28,11 @@ jobs:
         run: |
           . fork/upstream.env
           echo "node=${NODE_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "vscodium=${VSCODIUM_REF}" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ steps.pins.outputs.node }}
-      - name: Patch series applies for macOS and Linux (no npm ci; leaves the Linux tree)
-        run: fork/scripts/check-patches.sh "$RUNNER_TEMP/fork"
-      - name: fork/src matches what the patches create
-        run: |
-          for d in agentReview agentChat; do
-            diff -ru "fork/src/vs/workbench/contrib/$d" "$RUNNER_TEMP/fork/vscodium/vscode/src/vs/workbench/contrib/$d"
-          done
-      - name: Patch size report
-        run: |
-          {
-            echo "### Core patches"
-            for p in patches/*.patch patches/*/*.patch; do
-              echo "- \`${p#patches/}\`: $(grep -c '^+[^+]' "$p") added / $(grep -c '^-[^-]' "$p") removed lines, $(grep -c '^diff --git' "$p") files"
-            done
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Add swap
-        run: fork/ci/add-swap.sh 6
-      - name: Cache npm
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.npm
-          key: typecheck-${{ steps.pins.outputs.vscodium }}
-      - name: Install VS Code dev dependencies (no install scripts)
-        working-directory: ${{ runner.temp }}/fork/vscodium/vscode
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Typecheck patched src/ (tsgo)
-        working-directory: ${{ runner.temp }}/fork/vscodium/vscode
-        run: npm run typecheck-client
-      - name: Lint the core files our patches touch (VS Code's eslint config)
-        run: fork/scripts/lint-core.sh "$RUNNER_TEMP/fork"
+          cache: npm
+      - name: Patch series applies for macOS and Linux, fork/src matches
+        run: fork/scripts/check-patches.sh
+      - run: npm ci
+      - run: npm run lint

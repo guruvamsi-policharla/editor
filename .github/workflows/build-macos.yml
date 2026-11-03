@@ -1,7 +1,7 @@
 name: Full build - macOS
 
-# Release-only: runs on a v* tag push, or manually (workflow_dispatch) with a configurable runner label.
-# It does not run on PRs or in the merge queue, because macOS minutes bill at 10x on private repos.
+# Manual only (workflow_dispatch), with a configurable runner label, because macOS minutes bill at 10x on private
+# repos. Run it on a v* tag to also publish a GitHub Release: gh workflow run build-macos.yml --ref v1.2.3
 # Default runner: macos-latest (Apple Silicon). It runs the same fork/scripts/build-macos.sh as a local build.
 # The app is ad-hoc signed (no Developer ID yet) and not notarized: after downloading the zip, users must run
 # `xattr -dr com.apple.quarantine editor.app` (docs/build-macos.md). macOS minutes count 10x on private repos.
@@ -26,8 +26,6 @@ on:
         description: Node heap cap for gulp, in MB
         type: string
         default: "8192"
-  push:
-    tags: ["v*"]
 
 permissions: {}
 
@@ -35,7 +33,7 @@ permissions: {}
 jobs:
   build:
     concurrency:
-      group: build-macos-${{ github.event.pull_request.number || github.ref }}
+      group: build-macos-${{ github.ref }}
       cancel-in-progress: true
     runs-on: ${{ inputs.runner || vars.BUILD_RUNNER_MACOS || 'macos-latest' }}
     timeout-minutes: 150 # macOS minutes bill at 10x on private repos

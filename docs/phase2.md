@@ -159,7 +159,7 @@ If the save after an Undo fails or is cancelled (disk full, permissions, a newer
 
 ## Core patches (`patches/`)
 
-They're applied after VSCodium's patches, in this order. Readable copies of the new files live in `fork/src/`, and CI checks that they match.
+They're applied after VSCodium's patches, in this order. Readable copies of the new files live in `fork/src/`, and `check-patches.sh` checks that they match.
 
 | Patch | Lines | Upstream files touched |
 |---|---|---|
@@ -206,13 +206,15 @@ They're applied after VSCodium's patches, in this order. Readable copies of the 
 | Core typecheck of the patched tree (tsgo) | 0 errors | `npm run typecheck-client` (CI `patches` job) |
 | Packaged build + smoke (`editor --version`) | ok | `fork/scripts/build.sh` |
 | Lint: repo TypeScript (VS Code's generic rules) / core files (VS Code's own config) | 0 problems / 0 warnings | `npm run lint` / `fork/scripts/lint-core.sh` |
-| Shell scripts (shellcheck; bash 3.2 syntax on macOS) | clean | CI `shellcheck` job, macOS `test` job |
+| Shell scripts (shellcheck; bash 3.2 syntax on macOS) | clean | `check-local.sh`; `full-checks.yml` `shellcheck` and macOS `test` jobs |
 
 ## CI
 
-- **`ci.yml` (every push and PR, free runners).** Engine + extension typecheck/build/tests on ubuntu (Node 22 and 24) and macOS (Node 24). The `patches` job runs `prepare-vscodium.sh --patches-only` (our patches apply on top of VSCodium's), checks that `fork/src` matches what the patches create, and typechecks the whole patched `src/` with tsgo after `npm ci --ignore-scripts`. All green on this PR.
-- **`build-linux.yml` (full packaged build, pre-merge).** It runs on `workflow_dispatch` (runner label input), when a PR is marked ready for review or labeled `ready-to-merge`, `full-build` or `full-build-linux`, in `merge_group`, and on `v*` tags (which also create a draft GitHub Release with the tarball).
-- **`build-macos.yml` (full packaged build, release-only).** It runs only on `v*` tags (creating a draft GitHub Release with the zip) and on `workflow_dispatch`, never on PRs or in the merge queue, because macOS minutes bill at 10x on private repos. Default runners are `ubuntu-latest` / `macos-latest`, overridable via input or `vars.BUILD_RUNNER_LINUX|MACOS`.
+GitHub minutes are expensive, so PRs get one cheap job and everything else runs locally or by hand. `fork/scripts/check-local.sh` runs lint, typecheck, build, unit tests, shellcheck and the patch series on your machine; run it before merging.
+
+- **`ci.yml` (PRs only, one Linux job).** `fork/scripts/check-patches.sh` (the whole patch series for macOS and Linux, and that `fork/src` matches what the patches create) and `npm run lint`. Nothing runs on plain pushes.
+- **`full-checks.yml` (manual).** Engine + extension typecheck/build/tests on ubuntu (Node 22 and 24) and macOS (Node 24), the stock bash 3.2 check on macOS, shellcheck, and the patched `src/` typechecked with tsgo after `npm ci --ignore-scripts`, plus `lint-core.sh`.
+- **`build-linux.yml`, `build-macos.yml` (full packaged builds, manual).** Default runners are `ubuntu-latest` / `macos-latest`, overridable via the `runner` input or `vars.BUILD_RUNNER_LINUX|MACOS`. Pushing a `v*` tag no longer builds anything: run them on the tag (`gh workflow run build-linux.yml --ref v1.2.3`, same for macOS) to create a draft GitHub Release with the tarball and zip.
 - **`upstream-bump.yml` (monthly + manual).** Moves `fork/upstream.env` to the latest VSCodium release, runs the patch check, and opens a PR saying whether the patches apply.
 
 ### Does the full build fit the free private-repo runner? Yes, with mitigations
