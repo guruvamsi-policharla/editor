@@ -14,7 +14,7 @@ describe('setting defaults', () => {
 		expect(defaults['chat.implicitContext.enabled']).toEqual({ panel: 'never' });
 	});
 
-	it('chat text is a bit bigger than VS Code\'s 13 px, through chat.fontSize, which the transcript and (patch 94) the input follow', () => {
+	it('chat text is a bit bigger than VS Code\'s 13 px, through chat.fontSize, which the transcript follows (the input stays VS Code\'s 13 px)', () => {
 		expect(defaults['chat.fontSize']).toBe(14);
 	});
 });

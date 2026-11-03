@@ -310,65 +310,6 @@ diff --git a/src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts
 index 6ba765d1..b0a54f7b 100644
 --- a/src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts
 +++ b/src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts
-@@ -180,6 +180,15 @@ const $ = dom.$;
- 
- const INPUT_EDITOR_MAX_HEIGHT = 250;
- const INPUT_EDITOR_LINE_HEIGHT = 20;
-+/** The input's font size when `chat.fontSize` isn't a number; its line height keeps INPUT_EDITOR_LINE_HEIGHT's ratio. */
-+const INPUT_EDITOR_FONT_SIZE = 13;
-+
-+/** agent-chat: the input editor's font size and line height, from `chat.fontSize` (the transcript's), so both scale. */
-+function inputEditorFont(configurationService: IConfigurationService): { fontSize: number; lineHeight: number } {
-+	const configured = configurationService.getValue<unknown>('chat.fontSize');
-+	const fontSize = typeof configured === 'number' && configured >= 6 && configured <= 100 ? configured : INPUT_EDITOR_FONT_SIZE;
-+	return { fontSize, lineHeight: Math.round(fontSize * INPUT_EDITOR_LINE_HEIGHT / INPUT_EDITOR_FONT_SIZE) };
-+}
- const INPUT_EDITOR_PADDING = { compact: { top: 2, bottom: 2 }, default: { top: 12, bottom: 12 } };
- const CachedLanguageModelsKey = 'chat.cachedLanguageModels.v2';
- const CHAT_INPUT_PICKER_COLLAPSE_WIDTH = 280;
-@@ -419,8 +428,8 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
- 	private readonly _contextResourceLabels: ResourceLabels;
- 
- 	private readonly inputEditorMaxHeight: number;
--	private readonly inputEditorMinHeight: number | undefined;
--	private readonly singleLineInputEditorHeight: number;
-+	private inputEditorMinHeight: number | undefined;
-+	private singleLineInputEditorHeight: number;
- 	private inputEditorHeight: number = 0;
- 	private _maxHeight: number | undefined;
- 	private container!: HTMLElement;
-@@ -989,8 +998,9 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
- 
- 		this.inputEditorMaxHeight = this.options.renderStyle === 'compact' ? INPUT_EDITOR_MAX_HEIGHT / 3 : INPUT_EDITOR_MAX_HEIGHT;
- 		const padding = this.options.renderStyle === 'compact' ? INPUT_EDITOR_PADDING.compact : INPUT_EDITOR_PADDING.default;
--		this.singleLineInputEditorHeight = INPUT_EDITOR_LINE_HEIGHT + padding.top + padding.bottom;
--		this.inputEditorMinHeight = this.options.inputEditorMinLines ? this.options.inputEditorMinLines * INPUT_EDITOR_LINE_HEIGHT + padding.top + padding.bottom : undefined;
-+		const { lineHeight } = inputEditorFont(this.configurationService);
-+		this.singleLineInputEditorHeight = lineHeight + padding.top + padding.bottom;
-+		this.inputEditorMinHeight = this.options.inputEditorMinLines ? this.options.inputEditorMinLines * lineHeight + padding.top + padding.bottom : undefined;
- 
- 		this.inputEditorHasText = ChatContextKeys.inputHasText.bindTo(contextKeyService);
- 		this.inputEditorHasSendableContent = ChatContextKeys.inputHasSendableContent.bindTo(contextKeyService);
-@@ -1056,8 +1066,19 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
- 			if (e.affectsConfiguration('editor.autoSurround')) {
- 				newOptions.autoSurround = this.configurationService.getValue('editor.autoSurround');
- 			}
-+			if (e.affectsConfiguration('chat.fontSize')) {
-+				const { fontSize, lineHeight } = inputEditorFont(this.configurationService);
-+				newOptions.fontSize = fontSize;
-+				newOptions.lineHeight = lineHeight;
-+				const padding = this.options.renderStyle === 'compact' ? INPUT_EDITOR_PADDING.compact : INPUT_EDITOR_PADDING.default;
-+				this.singleLineInputEditorHeight = lineHeight + padding.top + padding.bottom;
-+				this.inputEditorMinHeight = this.options.inputEditorMinLines ? this.options.inputEditorMinLines * lineHeight + padding.top + padding.bottom : undefined;
-+			}
- 
- 			this.inputEditor.updateOptions(newOptions);
-+			if (newOptions.fontSize !== undefined && this.cachedWidth) {
-+				this.layout(this.cachedWidth);
-+			}
- 		}));
- 
- 		this._chatEditsListPool = this._register(this.instantiationService.createInstance(CollapsibleListPool, this._onDidChangeVisibility.event, MenuId.ChatEditingWidgetModifiedFilesToolbar, { verticalScrollMode: ScrollbarVisibility.Visible }));
 @@ -1109,6 +1130,13 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
  			if (reconcileSelection) {
  				this._modelSelectionController.reconcileModelListChange(models);
@@ -383,18 +324,6 @@ index 6ba765d1..b0a54f7b 100644
  			// The available-model set changed: re-evaluate whether sending is
  			// possible (a `requiresCustomModels` session may now have, or have
  			// lost, its models).
-@@ -3222,8 +3250,9 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
- 		options.readOnly = false;
- 		options.ariaLabel = this._getAriaLabel();
- 		options.fontFamily = DEFAULT_FONT_FAMILY;
--		options.fontSize = 13;
--		options.lineHeight = INPUT_EDITOR_LINE_HEIGHT;
-+		const font = inputEditorFont(this.configurationService);
-+		options.fontSize = font.fontSize;
-+		options.lineHeight = font.lineHeight;
- 		options.padding = this.options.renderStyle === 'compact' ? INPUT_EDITOR_PADDING.compact : INPUT_EDITOR_PADDING.default;
- 		options.cursorWidth = 1;
- 		options.wrappingStrategy = 'advanced';
 @@ -4051,10 +4080,12 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
  	 * The attachments that are rendered as pills in the input. Agent-host
  	 * completion entries (skills/commands) live in the model so their `_meta`
