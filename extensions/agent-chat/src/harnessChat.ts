@@ -324,6 +324,8 @@ export class HarnessChat implements vscode.Disposable {
 		const item = this.items.get(entry.resource) ?? this.controller.createChatSessionItem(vscode.Uri.parse(entry.resource), entry.title);
 		item.label = entry.title;
 		item.iconPath = this.icon();
+		// A session the agent listed is one of ours once it's opened here.
+		item.description = undefined;
 		item.timing = { created: entry.created, lastRequestStarted: entry.updated, lastRequestEnded: entry.updated };
 		this.items.set(entry.resource, item);
 		return item;
@@ -421,7 +423,14 @@ export class HarnessChat implements vscode.Disposable {
 		return t;
 	}
 
-	private saveChat(key: string, session: AcpSession | undefined, title?: string): void {
+	/**
+	 * Saves the chat: its entry and transcript. `withSettings: false` keeps the settings saved before (a turn that is
+	 * starting: its session may not have the chat's settings yet).
+	 */
+	private saveChat(key: string, session: AcpSession | undefined, title?: string, withSettings = true): void {
+		if (!this.owns(vscode.Uri.parse(key))) {
+			return; // no chat resource (`untitled:`): nothing could open it again
+		}
 		const transcript = this.transcripts.get(key);
 		const prev = this.env.history.get(key);
 		const item = this.items.get(key);
@@ -434,7 +443,7 @@ export class HarnessChat implements vscode.Disposable {
 			updated: Date.now(),
 			turns: transcript?.turns.length ?? prev?.turns ?? 0,
 			// Never Bypass: a chat in it is saved with the mode it had before (AcpSession.keptValues).
-			...(session && !this.reconciling.has(key) ? { settings: session.keptValues() } : prev?.settings ? { settings: prev.settings } : {}),
+			...(session && withSettings && !this.reconciling.has(key) ? { settings: session.keptValues() } : prev?.settings ? { settings: prev.settings } : {}),
 		};
 		try {
 			this.env.history.save(entry, transcript?.turns, transcript?.text());
@@ -704,7 +713,7 @@ export class HarnessChat implements vscode.Disposable {
 	 * is confirmed first. A permission value that can't be set falls back to the strictest one (AcpSession), and
 	 * when even that fails the message isn't sent (returns false). The pickers then show what the session has.
 	 */
-	private async reconcile(key: string, session: AcpSession, shown: Record<string, string>, stream: vscode.ChatResponseStream, settings: SettingsResult | undefined): Promise<boolean> {
+	private async reconcile(key: string, session: AcpSession, shown: Record<string, string>, warn: (text: string) => void, settings: SettingsResult | undefined): Promise<boolean> {
 		const controls = this.controlsFor(session);
 		const wanted = { ...shown };
 		// A dangerous value confirmed in the picker before the chat had a session isn't asked again (once).
@@ -737,11 +746,11 @@ export class HarnessChat implements vscode.Disposable {
 		const held = (settings?.permissionHeld ?? true) && (applied?.permissionHeld ?? true);
 		const fellBack = applied?.fellBackTo ?? settings?.fellBackTo;
 		if (!held) {
-			stream.warning(`${this.label} couldn't put this chat back in ${name(was)}: it's in ${name(fellBack)}, which asks less often. Nothing was sent. Pick a mode and send again, or restart ${this.label}.`);
+			warn(`${this.label} couldn't put this chat back in ${name(was)}: it's in ${name(fellBack)}, which asks less often. Nothing was sent. Pick a mode and send again, or restart ${this.label}.`);
 			return false;
 		}
 		if (fellBack) {
-			stream.warning(`${this.label} couldn't put this chat in ${name(was)}, so it's in ${name(fellBack)}, the strictest mode it offers.`);
+			warn(`${this.label} couldn't put this chat in ${name(was)}, so it's in ${name(fellBack)}, the strictest mode it offers.`);
 		}
 		return true;
 	}
@@ -795,6 +804,16 @@ export class HarnessChat implements vscode.Disposable {
 		// What this chat's pickers show (core keeps them per chat; it reports them to the other chats too).
 		const shown = shownSettings(context.chatSessionContext?.initialSessionOptions);
 		this.pushed(undefined, key, shown);
+		// The message is in the chat's history before anything starts: a reload, a closed window or a failed start
+		// mid-turn doesn't lose the chat.
+		const transcript = this.transcriptFor(key);
+		transcript.startTurn(request.command ? `/${request.command}${request.prompt ? ` ${request.prompt}` : ''}` : request.prompt);
+		/** A notice about this turn: shown, and kept with it. */
+		const warn = (text: string) => {
+			stream.warning(text);
+			transcript.add([{ op: 'warning', text }]);
+		};
+		this.saveChat(key, undefined, undefined, false);
 		let session = this.sessions.get(key);
 		const firstMessage = !session;
 		const entry = session ? undefined : this.env.history.get(key);
@@ -808,19 +827,21 @@ export class HarnessChat implements vscode.Disposable {
 				stream.progress(this.client?.supervisor.running ? `Starting a ${this.label} session…` : `Starting ${this.label}…`);
 				session = await this.takeSession();
 			} catch (e) {
-				return this.startError(e, stream);
+				const result = this.startError(e, stream, warn);
+				this.saveChat(key, undefined);
+				return result;
 			}
 			this.auth = 'unknown';
 			this.remember(session);
 			this.attach(key, session, item);
+			// With its session: reopened after a reload, the chat resumes it.
+			this.saveChat(key, session, undefined, false);
 		}
 
 		this.turns++;
 		const turnId = `${Date.now().toString(36)}`;
 		const writer = new StreamWriter(stream, request, token, this.env.log);
 		const renderer = new TurnRenderer(turnId);
-		const transcript = this.transcriptFor(key);
-		transcript.startTurn(request.command ? `/${request.command}${request.prompt ? ` ${request.prompt}` : ''}` : request.prompt);
 		const show = (ops: ReturnType<TurnRenderer['render']>) => {
 			writer.write(ops);
 			transcript.add(ops);
@@ -861,7 +882,11 @@ export class HarnessChat implements vscode.Disposable {
 				notice = saved && firstMessage
 					? `${this.label} couldn't reopen the earlier session, so this chat continues in a new one: earlier messages aren't in its context.`
 					: `${this.label} restarted, and this chat continues in a new session: earlier messages aren't in its context.`;
-				stream.warning(notice);
+				warn(notice);
+				if (saved && saved !== session.id) {
+					// The chat has the earlier session's messages: the agent's list doesn't show that one again.
+					this.env.history.forgetSession(this.profile.id, saved);
+				}
 			}
 			// Bypass ends with the session it was chosen in: the recovered one is back in the mode from before, and
 			// this message runs in it (the picker still showing Bypass doesn't put it back without a new choice).
@@ -869,12 +894,12 @@ export class HarnessChat implements vscode.Disposable {
 				delete shown[l.id];
 				const names = this.controlsFor(session).find(c => c.id === l.id)?.choices;
 				const name = (v: string | undefined) => names?.find(c => c.id === v)?.name.replace(' ⚠', '') ?? v ?? 'another mode';
-				stream.warning(`${this.label} restarted, and this chat left ${name(l.value)}: it's in ${name(l.to)} again. Choose ${name(l.value)} again to go back to it.`);
+				warn(`${this.label} restarted, and this chat left ${name(l.value)}: it's in ${name(l.to)} again. Choose ${name(l.value)} again to go back to it.`);
 			}
 
 			// The chat's pickers (a new chat's picks before its first message too; the agent's own switches, leaving
 			// plan mode, are shown in them), then the model picker.
-			if (!await this.reconcile(key, session, shown, stream, settings)) {
+			if (!await this.reconcile(key, session, shown, warn, settings)) {
 				transcript.endTurn(true);
 				return { metadata: { error: 'permission' } };
 			}
@@ -971,14 +996,14 @@ export class HarnessChat implements vscode.Disposable {
 			// The contract guard, in the app too: the agent must never call fs/* or terminal/* (we don't serve them).
 			const forbidden = this.client?.supervisor.running?.connection.forbiddenInbound() ?? [];
 			this.env.log[forbidden.length ? 'error' : 'info'](`[${this.profile.id}] turn ended: ${result.stopReason}; fs/terminal requests from the agent: ${forbidden.length ? forbidden.join(', ') : 'none'}`);
-			return this.result(result, stream, session);
+			return this.result(result, warn, session);
 		} catch (e) {
 			close(token.isCancellationRequested ? 'stopped' : 'interrupted');
 			transcript.endTurn(token.isCancellationRequested);
 			if (token.isCancellationRequested) {
 				return { metadata: { stopReason: 'cancelled' }, ...this.details(session, true) };
 			}
-			return await this.turnError(e, stream, { resource, text: retryText(request) });
+			return await this.turnError(e, stream, warn, { resource, text: retryText(request) });
 		} finally {
 			this.reconciling.delete(key);
 			this.running.delete(key);
@@ -1001,9 +1026,17 @@ export class HarnessChat implements vscode.Disposable {
 	private attach(key: string, session: AcpSession, item: vscode.ChatSessionItem | undefined): void {
 		this.sessions.set(key, session);
 		session.onChange(c => {
-			if (c.kind === 'info' && c.title && item && item.label !== c.title) {
-				item.label = c.title;
-				this.controller.items.add(item);
+			if (c.kind === 'info' && c.title && !session.replaying) {
+				if (item && item.label !== c.title) {
+					item.label = c.title;
+					this.controller.items.add(item);
+				}
+				// It comes after the turn it names is saved: the list, Search Chats and a restart show it too.
+				try {
+					this.env.history.rename(key, c.title);
+				} catch (e) {
+					this.env.log.warn(`[${this.profile.id}] couldn't save the chat's title: ${errorMessage(e)}`);
+				}
 			}
 			if ((c.kind === 'config' || c.kind === 'mode') && !session.replaying && !this.reconciling.has(key)) {
 				this.remember(session);
@@ -1044,16 +1077,16 @@ export class HarnessChat implements vscode.Disposable {
 		return this.controlsFor(session).some(c => this.profile.readOnlyValues?.[c.id]?.includes(c.current));
 	}
 
-	private result(result: acp.PromptResponse, stream: vscode.ChatResponseStream, session: AcpSession): vscode.ChatResult {
+	private result(result: acp.PromptResponse, warn: (text: string) => void, session: AcpSession): vscode.ChatResult {
 		switch (result.stopReason) {
 			case 'max_tokens':
-				stream.warning(`${this.label} stopped: it reached its output limit.`);
+				warn(`${this.label} stopped: it reached its output limit.`);
 				break;
 			case 'max_turn_requests':
-				stream.warning(`${this.label} stopped: it reached its limit of steps for one message. Send "continue" to go on.`);
+				warn(`${this.label} stopped: it reached its limit of steps for one message. Send "continue" to go on.`);
 				break;
 			case 'refusal':
-				stream.warning(`${this.label} declined to continue.`);
+				warn(`${this.label} declined to continue.`);
 				break;
 		}
 		return { metadata: { stopReason: result.stopReason }, ...this.details(session, result.stopReason === 'cancelled') };
@@ -1098,13 +1131,13 @@ export class HarnessChat implements vscode.Disposable {
 		item.show();
 	}
 
-	private startError(e: unknown, stream: vscode.ChatResponseStream): vscode.ChatResult {
+	private startError(e: unknown, stream: vscode.ChatResponseStream, warn: (text: string) => void): vscode.ChatResult {
 		if (isAuthRequired(e)) {
 			this.needsLogin();
 			// The harness's own reason when it says more than "auth required" (tact: its sign-in was refused).
 			const reason = firstLine(errorMessage(e));
 			const said = reason && !/^(internal error: )?auth(entication)? required\.?$/i.test(reason) ? `\n\n${reason}` : '';
-			stream.warning(`You're not signed in to ${this.label}. Sign in once, in a terminal; then send your message again.${said}`);
+			warn(`You're not signed in to ${this.label}. Sign in once, in a terminal; then send your message again.${said}`);
 			stream.button({ command: 'agentChat.login', title: `Sign in to ${this.label}`, arguments: [this.profile.id] });
 			stream.button({ command: 'agentChat.restart', title: 'I\'ve signed in: try again', arguments: [this.profile.id] });
 			return { metadata: { error: 'auth' } };
@@ -1112,7 +1145,7 @@ export class HarnessChat implements vscode.Disposable {
 		if (e instanceof HarnessMissingError) {
 			const elsewhere = (this.profile.harness.fallbackPaths ?? []).map(p => `\`${p}\``).join(' or ');
 			this.env.log.warn(`[${this.profile.id}] not installed`);
-			stream.warning(`${this.label} isn't installed: \`${this.profile.harness.binary}\` isn't on PATH${elsewhere ? ` or at ${elsewhere}` : ''}.`);
+			warn(`${this.label} isn't installed: \`${this.profile.harness.binary}\` isn't on PATH${elsewhere ? ` or at ${elsewhere}` : ''}.`);
 			if (this.profile.installCommand) {
 				stream.markdown(`Install it with\n\n\`\`\`sh\n${this.profile.installCommand}\n\`\`\`\n\nthen sign in with \`${this.profile.harness.binary} ${this.profile.login.args.join(' ')}\`. Or set \`agentChat.harnesses.${this.profile.id}.harnessPath\` to the one you have.`);
 			} else if (this.profile.install) {
@@ -1126,16 +1159,16 @@ export class HarnessChat implements vscode.Disposable {
 		}
 		const message = errorMessage(e);
 		this.env.log.error(`[${this.profile.id}] start failed: ${message}`);
-		stream.warning(`${this.label} couldn't start: ${firstLine(message)}`);
+		warn(`${this.label} couldn't start: ${firstLine(message)}`);
 		stream.button({ command: 'agentChat.showLog', title: 'Show Log' });
 		stream.button({ command: 'agentChat.restart', title: `Restart ${this.label}`, arguments: [this.profile.id] });
 		return { metadata: { error: 'start' } };
 	}
 
 	/** A failed turn's card. `retry` is the chat and the text to send again for a Claude-side hiccup's Retry button. */
-	private async turnError(e: unknown, stream: vscode.ChatResponseStream, retry?: { resource: vscode.Uri | undefined; text: string }): Promise<vscode.ChatResult> {
+	private async turnError(e: unknown, stream: vscode.ChatResponseStream, warn: (text: string) => void, retry?: { resource: vscode.Uri | undefined; text: string }): Promise<vscode.ChatResult> {
 		if (isAuthRequired(e)) {
-			return this.startError(e, stream);
+			return this.startError(e, stream, warn);
 		}
 		const supervisor = this.client?.supervisor;
 		// The stream closes a moment before the process's exit is reported: wait for it, to show the exit code.
@@ -1151,9 +1184,9 @@ export class HarnessChat implements vscode.Disposable {
 		this.env.log.error(`[${this.profile.id}] turn failed: ${message}`);
 		if (crashed) {
 			const how = status?.state === 'exited' ? ` (${status.signal ?? `exit code ${status.code}`})` : '';
-			stream.warning(`${this.label} stopped unexpectedly${how}. Your next message restarts it and resumes this chat.`);
+			warn(`${this.label} stopped unexpectedly${how}. Your next message restarts it and resumes this chat.`);
 		} else {
-			stream.warning(turnFailureText(this.label, message));
+			warn(turnFailureText(this.label, message));
 		}
 		if (!crashed && retry && isServerToolHiccup(message)) {
 			stream.button({ command: 'agentChat.retry', title: 'Retry', arguments: [retry.resource?.toString(), retry.text] });

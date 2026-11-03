@@ -34,7 +34,9 @@ export type RenderOp =
 	| { op: 'thinking'; id: string; text: string }
 	| { op: 'thinkingDone'; id: string }
 	| { op: 'tool'; card: ToolCard }
-	| { op: 'todo'; items: { id: number; title: string; status: TodoStatus }[] };
+	| { op: 'todo'; items: { id: number; title: string; status: TodoStatus }[] }
+	/** A notice about the turn (an error, a restart): shown as a warning, and kept with the turn. */
+	| { op: 'warning'; text: string };
 
 export function fileLink(path: string, line?: number | null): string {
 	const uri = `file://${path.split('/').map(encodeURIComponent).join('/')}`;

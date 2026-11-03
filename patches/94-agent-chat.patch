@@ -1,9 +1,9 @@
 diff --git a/src/vs/workbench/contrib/agentChat/browser/agentChat.contribution.ts b/src/vs/workbench/contrib/agentChat/browser/agentChat.contribution.ts
 new file mode 100644
-index 00000000..59a0794a
+index 00000000..053072ce
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentChat/browser/agentChat.contribution.ts
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,113 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -38,7 +38,8 @@ index 00000000..59a0794a
 +/**
 + * `_agentChat.resend(uri, text)`: sends `text` again in the chat session `uri` (its open widget, in the side bar or an
 + * editor tab; opened in the side bar when it isn't open), as if the user typed it: Retry on a failed turn's card.
-+ * Without `uri` (a chat that has no resource yet), the last focused chat. Returns whether it was sent.
++ * Without `uri` (a chat that has no resource yet), the last focused chat if it can be shown, else the side bar's.
++ * Returns whether it was sent.
 + */
 +CommandsRegistry.registerCommand('_agentChat.resend', async (accessor, uri: UriComponents | undefined, text: unknown) => {
 +	if (typeof text !== 'string' || !text) {
@@ -46,13 +47,13 @@ index 00000000..59a0794a
 +	}
 +	const widgetService = accessor.get(IChatWidgetService);
 +	const resource = uri ? URI.revive(uri) : undefined;
-+	const widget = resource
-+		? widgetService.getWidgetBySessionResource(resource) ?? await widgetService.openSession(resource, ChatViewPaneTarget)
-+		: widgetService.lastFocusedWidget;
++	const open = resource && widgetService.getWidgetBySessionResource(resource);
++	const widget = open && await widgetService.reveal(open)
++		? open
++		: resource ? await widgetService.openSession(resource, ChatViewPaneTarget) : await widgetService.revealWidget();
 +	if (!widget) {
 +		return false;
 +	}
-+	await widgetService.reveal(widget);
 +	return !!await widget.acceptInput(text);
 +});
 +
@@ -66,12 +67,12 @@ index 00000000..59a0794a
 +	if (typeof text !== 'string' || !text || !uri) {
 +		return false;
 +	}
-+	const widgetService = accessor.get(IChatWidgetService);
-+	const widget = widgetService.lastFocusedWidget ?? await widgetService.revealWidget();
++	// The last focused chat when it can be shown, else the chat view's. (A chat whose editor tab was closed keeps its
++	// widget, with no chat in it, as the last focused one: a reference inserted there would be lost.)
++	const widget = await accessor.get(IChatWidgetService).revealWidget();
 +	if (!widget) {
 +		return false;
 +	}
-+	await widgetService.reveal(widget);
 +	const editor = widget.inputEditor;
 +	const model = editor.getModel();
 +	const variables = widget.getContrib<ChatDynamicVariableModel>(ChatDynamicVariableModel.ID);
@@ -932,3 +933,198 @@ index ac63192d..8b90f952 100644
  		if (this._badgeIcon) {
  			nameChildren.push(this._badgeIcon);
  		}
+diff --git a/src/vs/workbench/contrib/agentChat/test/browser/agentChat.test.ts b/src/vs/workbench/contrib/agentChat/test/browser/agentChat.test.ts
+new file mode 100644
+index 00000000..328d04fc
+--- /dev/null
++++ b/src/vs/workbench/contrib/agentChat/test/browser/agentChat.test.ts
+@@ -0,0 +1,139 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++// Agent chat's Cmd/Ctrl+L and Retry go to a chat the user can see. Closing a chat's editor tab doesn't dispose its
++// widget (the editor pane is kept for the next chat tab), so the last focused widget can be one that isn't shown
++// anywhere: a reference inserted there, or a message sent there, is lost. The real ChatWidgetService decides.
++
++import assert from 'assert';
++import { Emitter, Event } from '../../../../../base/common/event.js';
++import { DisposableStore } from '../../../../../base/common/lifecycle.js';
++import { URI } from '../../../../../base/common/uri.js';
++import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
++import { IRange } from '../../../../../editor/common/core/range.js';
++import { createTextModel } from '../../../../../editor/test/common/testTextModel.js';
++import { CommandsRegistry } from '../../../../../platform/commands/common/commands.js';
++import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
++import { NullLogService } from '../../../../../platform/log/common/log.js';
++import { ChatDynamicVariableModel } from '../../../chat/browser/attachments/chatDynamicVariables.js';
++import { ChatViewId, IChatWidget, IChatWidgetService } from '../../../chat/browser/chat.js';
++import { ChatWidgetService } from '../../../chat/browser/widget/chatWidgetService.js';
++import { chatSetUpForSessionsList } from '../../../chat/browser/widgetHosts/viewPane/chatViewPane.js';
++import '../../browser/agentChat.contribution.js';
++
++interface FakeWidget {
++	readonly widget: IChatWidget;
++	readonly references: string[];
++	readonly sent: string[];
++	focus(): void;
++	text(): string;
++}
++
++suite('AgentChat: Cmd/Ctrl+L and Retry go to a chat that is shown', () => {
++
++	const store = ensureNoDisposablesAreLeakedInTestSuite();
++	let disposables: DisposableStore;
++	let instantiationService: TestInstantiationService;
++	let widgets: ChatWidgetService;
++	let viewWidget: FakeWidget;
++	let openedViews: string[];
++
++	/** A chat widget: in the chat view (`viewId`), or in an editor whose tab was closed (no session, not a view). */
++	function fakeWidget(viewId?: string): FakeWidget {
++		const model = disposables.add(createTextModel(''));
++		const focused = disposables.add(new Emitter<void>());
++		const references: string[] = [];
++		const sent: string[] = [];
++		const editor = {
++			getModel: () => model,
++			getPosition: () => model.getFullModelRange().getEndPosition(),
++			setPosition: () => { },
++			executeEdits: (_source: string, edits: { range: IRange; text: string }[]) => { model.applyEdits(edits); return true; },
++		};
++		const variables = { variables: [], addReference: (ref: { fullName: string }) => references.push(ref.fullName) };
++		const widget = {
++			viewModel: undefined,
++			viewContext: viewId ? { viewId } : {},
++			inputEditor: editor,
++			getContrib: (id: string) => (id === ChatDynamicVariableModel.ID ? variables : undefined),
++			focusInput: () => { },
++			refreshParsedInput: () => { },
++			acceptInput: async (text: string) => { sent.push(text); return {}; },
++			onDidFocus: focused.event,
++			onDidShow: Event.None,
++			onDidHide: Event.None,
++			onDidChangeViewModel: Event.None,
++		} as unknown as IChatWidget;
++		disposables.add(widgets.register(widget));
++		return { widget, references, sent, focus: () => focused.fire(), text: () => model.getValue() };
++	}
++
++	setup(() => {
++		disposables = store.add(new DisposableStore());
++		openedViews = [];
++		instantiationService = disposables.add(new TestInstantiationService());
++		instantiationService.stub(IChatWidgetService, {});
++		const views = {
++			openView: async (id: string) => { openedViews.push(id); return id === ChatViewId ? { widget: viewWidget.widget, focus: () => { } } : undefined; },
++			getViewWithId: () => undefined,
++		};
++		widgets = disposables.add(new ChatWidgetService(
++			{ groups: [] } as never, views as never, { sessionResource: undefined } as never, {} as never, {} as never, { getSession: () => undefined } as never, new NullLogService(),
++		));
++		instantiationService.set(IChatWidgetService, widgets);
++		viewWidget = fakeWidget(ChatViewId);
++	});
++
++	function run(id: string, ...args: unknown[]): Promise<unknown> {
++		return Promise.resolve(instantiationService.invokeFunction<unknown>(accessor => CommandsRegistry.getCommand(id)!.handler(accessor, ...args)));
++	}
++
++	test('a reference goes to the chat view when the last focused chat was in a closed editor tab', async () => {
++		const closedTab = fakeWidget();
++		closedTab.focus();
++		assert.strictEqual(widgets.lastFocusedWidget, closedTab.widget);
++
++		const inserted = await run('_agentChat.insertReference', '@notes.md:L1', URI.file('/ws/notes.md'), { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 1 });
++
++		assert.strictEqual(inserted, true);
++		assert.deepStrictEqual(openedViews, [ChatViewId]);
++		assert.strictEqual(viewWidget.text(), '@notes.md:L1 ');
++		assert.deepStrictEqual(viewWidget.references, ['@notes.md:L1']);
++		assert.strictEqual(closedTab.text(), '');
++		assert.deepStrictEqual(closedTab.references, []);
++	});
++
++	test('a reference goes to the last focused chat when it is still shown', async () => {
++		viewWidget.focus();
++		await run('_agentChat.insertReference', '@notes.md:L2', URI.file('/ws/notes.md'));
++		assert.strictEqual(viewWidget.text(), '@notes.md:L2 ');
++	});
++
++	test('Retry without a chat resource sends in the chat view, not in a closed editor tab', async () => {
++		const closedTab = fakeWidget();
++		closedTab.focus();
++
++		const sent = await run('_agentChat.resend', undefined, 'try again');
++
++		assert.strictEqual(sent, true);
++		assert.deepStrictEqual(viewWidget.sent, ['try again']);
++		assert.deepStrictEqual(closedTab.sent, []);
++	});
++});
++
++suite('AgentChat: the chat view lists past chats', () => {
++
++	ensureNoDisposablesAreLeakedInTestSuite();
++
++	test('with Copilot hidden (our chat, no Copilot setup), the empty chat view shows the sessions list', () => {
++		assert.strictEqual(chatSetUpForSessionsList({ hidden: true }, false), true);
++	});
++
++	test('while Copilot setup is pending, it still makes room for setup', () => {
++		assert.strictEqual(chatSetUpForSessionsList({}, false), false);
++		assert.strictEqual(chatSetUpForSessionsList({ completed: true }, false), true);
++		assert.strictEqual(chatSetUpForSessionsList({}, true), true);
++	});
++});
+diff --git a/src/vs/workbench/contrib/chat/browser/widgetHosts/viewPane/chatViewPane.ts b/src/vs/workbench/contrib/chat/browser/widgetHosts/viewPane/chatViewPane.ts
+index 53f072d7..5f407c11 100644
+--- a/src/vs/workbench/contrib/chat/browser/widgetHosts/viewPane/chatViewPane.ts
++++ b/src/vs/workbench/contrib/chat/browser/widgetHosts/viewPane/chatViewPane.ts
+@@ -73,7 +73,7 @@ import { IAgentSessionsService } from '../../agentSessions/agentSessionsService.
+ import { IAgentHostEnablementService } from '../../../../../../platform/agentHost/common/agentHostEnablementService.js';
+ import { HoverPosition } from '../../../../../../base/browser/ui/hover/hoverWidget.js';
+ import { IAgentSession } from '../../agentSessions/agentSessionsModel.js';
+-import { ChatEntitlementContextKeys, IChatEntitlementService } from '../../../../../services/chat/common/chatEntitlementService.js';
++import { ChatEntitlementContextKeys, IChatEntitlementService, IChatSentiment } from '../../../../../services/chat/common/chatEntitlementService.js';
+ import { toErrorMessage } from '../../../../../../base/common/errorMessage.js';
+ import { IHostService } from '../../../../../services/host/browser/host.js';
+ import { IMicCaptureService } from '../../voiceClient/micCaptureService.js';
+@@ -89,6 +89,15 @@ import { IVoicePlaybackService } from '../../../common/voicePlaybackService.js';
+ import { VOICE_AGENT_PROGRESS_SETTING } from '../../../common/voiceClient/voiceClientService.js';
+ import { IWorkbenchEnvironmentService } from '../../../../../services/environment/common/environmentService.js';
+ 
++/**
++ * Whether chat is set up, so the stacked sessions list can show (otherwise it makes room for setup's terms and
++ * welcome). Agent chat: with Copilot's setup hidden, a chat shown here is another extension's, which has neither;
++ * its sessions (the history of past chats) show too.
++ */
++export function chatSetUpForSessionsList(sentiment: IChatSentiment, hasByokModels: boolean): boolean {
++	return !!sentiment.completed || hasByokModels || !!sentiment.hidden;
++}
++
+ interface IChatViewPaneState extends Partial<IChatModelInputState> {
+ 	/**
+ 	 * @deprecated This is kept around to support old view states. However it should not be set on new states and `sessionResource` should be used instead.
+@@ -1002,7 +1011,7 @@ export class ChatViewPane extends ViewPane implements IViewWelcomeDelegate {
+ 			// Sessions control: stacked
+ 			if (this.sessionsViewerOrientation === AgentSessionsViewerOrientation.Stacked) {
+ 				newSessionsContainerVisible =
+-					(!!this.chatEntitlementService.sentiment.completed || this.chatEntitlementService.hasByokModels) &&					// chat is setup (otherwise make room for terms and welcome)
++					chatSetUpForSessionsList(this.chatEntitlementService.sentiment, this.chatEntitlementService.hasByokModels) &&		// chat is setup (otherwise make room for terms and welcome)
+ 					(!this._widget || (this._widget.isEmpty() && !!this._widget.viewModel && !this._widget.viewModel.model.title)) &&	// chat widget empty (but not when model is loading or has a title)
+ 					this._sessionsListSuppressionCount === 0 &&																			// not mid-transition (a slow session transiently shows an empty widget)
+ 					!this.welcomeController?.isShowingWelcome.get();																	// welcome not showing
+@@ -1163,6 +1172,11 @@ export class ChatViewPane extends ViewPane implements IViewWelcomeDelegate {
+ 			const model = chatWidget.viewModel?.model;
+ 			this.titleControl?.update(model);
+ 			this._currentSessionResource.set(chatWidget.viewModel?.sessionResource, undefined);
++			// Agent chat: the widget swaps a new chat's untitled session for the real one itself (its first message):
++			// remember that one, so a reload or restart reopens this chat instead of an empty untitled one.
++			if (chatWidget.viewModel?.sessionResource) {
++				this.viewState.sessionResource = chatWidget.viewModel.sessionResource;
++			}
+ 
+ 			if (this.sessionsViewerOrientation === AgentSessionsViewerOrientation.Stacked) {
+ 				return; // only reveal in side-by-side mode

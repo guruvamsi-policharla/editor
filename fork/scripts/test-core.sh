@@ -14,6 +14,7 @@ npm run electron                  # fetch the dev Electron into .build/electron
 
 RUN=(./scripts/test.sh)
 for f in src/vs/workbench/contrib/agentReview/test/browser/*.test.ts \
+         src/vs/workbench/contrib/agentChat/test/browser/*.test.ts \
          src/vs/workbench/contrib/chat/test/browser/chatEditing/chatEditingService.test.ts \
          src/vs/workbench/contrib/chat/test/browser/chatEditing/chatEditingActions.test.ts \
          src/vs/workbench/contrib/chat/test/browser/chatEditing/chatEditingModifiedNotebookEntry.test.ts \

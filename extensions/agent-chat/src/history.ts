@@ -1,8 +1,9 @@
 // Chat history for one workspace: an index of chats (harness, ACP session id, title, times) plus one transcript
 // file per chat, in the extension's global storage under a hash of the folder. It outlives window reloads and
 // app restarts; core's own cache of session items doesn't (each refresh replaces it with what the extension
-// reports). No vscode import.
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+// reports). Several windows can share it (the same folder twice, or windows without a folder): each change is
+// made to the index as it is on disk, and a list read after another window's change sees it. No vscode import.
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { matchChat, type TranscriptTurn } from './transcript.js';
 
@@ -43,27 +44,53 @@ function safeName(resource: string): string {
 
 export class ChatHistory {
 	private entries: ChatEntry[] | undefined;
+	/** The index file as `entries` were read from it (another window's write changes it). */
+	private entriesStamp = '';
 	private removedIds: string[] | undefined;
+	private removedStamp = '';
 	private readonly texts = new Map<string, string>();
+	/** Chats removed in this window: a turn still running in one doesn't save it again when it ends. */
+	private readonly removedChats = new Set<string>();
 
 	constructor(private readonly dir: string) { }
 
-	private index(): ChatEntry[] {
-		if (!this.entries) {
+	private stamp(name: string): string {
+		try {
+			const s = statSync(join(this.dir, name));
+			return `${s.ino}:${s.mtimeMs}:${s.size}`;
+		} catch {
+			return '';
+		}
+	}
+
+	/** The index; read again when it changed on disk (`fresh`: always, before a change is written). */
+	private index(fresh = false): ChatEntry[] {
+		const stamp = this.stamp(INDEX);
+		if (!this.entries || fresh || stamp !== this.entriesStamp) {
 			try {
 				this.entries = (JSON.parse(readFileSync(join(this.dir, INDEX), 'utf8')) as ChatEntry[]).filter(e => e && typeof e.resource === 'string');
 			} catch {
 				this.entries = [];
 			}
+			if (stamp !== this.entriesStamp) {
+				this.texts.clear();
+			}
+			this.entriesStamp = stamp;
 		}
 		return this.entries;
 	}
 
 	private write(name: string, data: unknown): void {
 		mkdirSync(this.dir, { recursive: true });
-		const tmp = join(this.dir, `.${name}.tmp`);
+		const tmp = join(this.dir, `.${name}.${process.pid}.tmp`);
 		writeFileSync(tmp, JSON.stringify(data));
 		renameSync(tmp, join(this.dir, name));
+	}
+
+	private writeIndex(entries: ChatEntry[]): void {
+		this.entries = entries;
+		this.write(INDEX, entries);
+		this.entriesStamp = this.stamp(INDEX);
 	}
 
 	/** Newest first. */
@@ -87,28 +114,42 @@ export class ChatHistory {
 		}
 	}
 
-	/** Saves the chat's entry and (when given) its transcript and searchable text. */
+	/** Saves the chat's entry and (when given) its transcript and searchable text. A removed chat isn't saved again. */
 	save(entry: ChatEntry, turns?: readonly TranscriptTurn[], text?: string): void {
-		const entries = this.index().filter(e => e.resource !== entry.resource);
+		if (this.removedChats.has(entry.resource)) {
+			return;
+		}
+		const entries = this.index(true).filter(e => e.resource !== entry.resource);
 		entries.push(entry);
 		entries.sort((a, b) => b.updated - a.updated);
 		for (const dropped of entries.splice(MAX_CHATS)) {
 			this.remove(dropped.resource, false);
 		}
-		this.entries = entries;
 		if (turns) {
 			this.write(safeName(entry.resource), { turns, text: text ?? '' });
+		}
+		this.writeIndex(entries);
+		if (turns) {
 			this.texts.set(entry.resource, text ?? '');
 		}
-		this.write(INDEX, entries);
 	}
 
 	/** Updates a saved chat's settings (no-op for a chat that isn't saved yet). */
 	saveSettings(resource: string, settings: Record<string, string>): void {
-		const entry = this.get(resource);
-		if (entry && JSON.stringify(entry.settings) !== JSON.stringify(settings)) {
-			this.entries = this.index().map(e => (e === entry ? { ...e, settings } : e));
-			this.write(INDEX, this.entries);
+		this.update(resource, e => (JSON.stringify(e.settings) !== JSON.stringify(settings) ? { ...e, settings } : e));
+	}
+
+	/** A saved chat's new title (the agent's own, which comes after the turn it names is saved). */
+	rename(resource: string, title: string): void {
+		this.update(resource, e => (e.title !== title ? { ...e, title } : e));
+	}
+
+	private update(resource: string, change: (e: ChatEntry) => ChatEntry): void {
+		const entries = this.index(true);
+		const i = entries.findIndex(e => e.resource === resource);
+		const changed = i >= 0 ? change(entries[i]!) : undefined;
+		if (changed && changed !== entries[i]) {
+			this.writeIndex(entries.map((e, j) => (j === i ? changed : e)));
 		}
 	}
 
@@ -120,9 +161,10 @@ export class ChatHistory {
 		rmSync(join(this.dir, safeName(resource)), { force: true });
 		this.texts.delete(resource);
 		if (writeIndex) {
-			const entry = this.get(resource);
-			this.entries = this.index().filter(e => e.resource !== resource);
-			this.write(INDEX, this.entries);
+			this.removedChats.add(resource);
+			const entries = this.index(true);
+			const entry = entries.find(e => e.resource === resource);
+			this.writeIndex(entries.filter(e => e.resource !== resource));
 			if (entry?.sessionId) {
 				this.forgetSession(entry.harness, entry.sessionId);
 			}
@@ -132,10 +174,11 @@ export class ChatHistory {
 	/** Remembers an agent session as removed from history (one the agent lists, or a removed chat's). */
 	forgetSession(harness: string, sessionId: string): void {
 		const id = `${harness}:${sessionId}`;
-		const removed = this.removed();
+		const removed = this.removed(true);
 		if (!removed.includes(id)) {
 			this.removedIds = [...removed, id].slice(-MAX_REMOVED);
 			this.write(REMOVED, this.removedIds);
+			this.removedStamp = this.stamp(REMOVED);
 		}
 	}
 
@@ -143,13 +186,15 @@ export class ChatHistory {
 		return this.removed().includes(`${harness}:${sessionId}`);
 	}
 
-	private removed(): string[] {
-		if (!this.removedIds) {
+	private removed(fresh = false): string[] {
+		const stamp = this.stamp(REMOVED);
+		if (!this.removedIds || fresh || stamp !== this.removedStamp) {
 			try {
 				this.removedIds = (JSON.parse(readFileSync(join(this.dir, REMOVED), 'utf8')) as unknown[]).filter((x): x is string => typeof x === 'string');
 			} catch {
 				this.removedIds = [];
 			}
+			this.removedStamp = stamp;
 		}
 		return this.removedIds;
 	}
