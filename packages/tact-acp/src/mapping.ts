@@ -166,28 +166,92 @@ export function settingsOf(s: SessionSnapshot): TactSettings {
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
-/** tact's pickers as ACP config options, in tact's order: model, effort, reasoning mode (Pro), speed. Only those. */
+type CatalogModel = ModelCatalog['models'][number];
+
+const PROVIDER_NAMES: Record<string, string> = { openai: 'OpenAI', anthropic: 'Anthropic' };
+
+/** A catalog provider id as people write it (`anthropic` → Anthropic; one tact adds later, capitalized). */
+export function providerName(provider: string): string {
+	return PROVIDER_NAMES[provider] ?? cap(provider);
+}
+
+/** The session's model in the catalog (a session's model id can carry a prefix, `…-gpt-6.1-sol`). */
+export function catalogModel(model: string, catalog: ModelCatalog | undefined): CatalogModel | undefined {
+	return catalog?.models.find(m => m.id === model || model.endsWith(`-${m.id}`));
+}
+
+/**
+ * The speeds `model` really runs at: the catalog's speed tiers whose `effective_speeds` entry is the tier itself
+ * (tact runs Opus 5.5's Ultrafast as Fast, every speed of Haiku 5.5 as Standard). Without the model's entry, none.
+ */
+export function supportedSpeeds(model: CatalogModel | undefined, catalog: ModelCatalog | undefined): string[] {
+	const speeds = catalog?.speeds ?? [];
+	return model ? speeds.filter((speed, i) => model.effective_speeds[i] === speed) : [];
+}
+
+/** The speed `model` runs `speed` at (tact accepts every tier on every model and runs a lower one when it must). */
+export function effectiveSpeed(model: CatalogModel | undefined, catalog: ModelCatalog | undefined, speed: string): string {
+	const i = catalog?.speeds.indexOf(speed) ?? -1;
+	return (model && i >= 0 ? model.effective_speeds[i] : undefined) ?? speed;
+}
+
+const FIXED = 'Fixed once the chat has started';
+
+/**
+ * tact's pickers as ACP config options, in tact's order: model, effort, reasoning mode (Pro), speed. Only those, and
+ * each with exactly the choices the session's model has in tact's `models` catalog (nothing is hard-coded here):
+ * - a setting the model doesn't have a choice in (one reasoning mode, one speed) isn't offered at all;
+ * - a setting tact fixes once the chat has started (the model, the reasoning mode, a Claude model's effort) offers
+ *   only its value, which the chat shows locked;
+ * - speed shows the tier the model really runs at (`effective_speeds`), never one it would quietly run lower.
+ */
 export function configOptions(s: TactSettings, catalog: ModelCatalog | undefined): acp.SessionConfigOption[] {
 	const models = catalog?.models ?? [];
-	const model = models.find(m => m.id === s.model || s.model.endsWith(`-${m.id}`));
+	const model = catalogModel(s.model, catalog);
 	const modelChoices = s.started
-		? [{ value: s.model, name: model?.label ?? s.model, description: 'The model is fixed once the chat has started' }]
-		: (models.length ? models.map(m => ({ value: m.id, name: m.label })) : [{ value: s.model, name: s.model }]);
+		? [{ value: s.model, name: model?.label ?? s.model, description: FIXED }]
+		: (models.length ? models.map(m => ({ value: m.id, name: m.label, description: providerName(m.provider) })) : [{ value: s.model, name: s.model }]);
 	const current = s.started ? s.model : (model?.id ?? s.model);
+	const effortFixed = s.started && !!model?.effort_fixed_after_start;
+	const efforts = effortFixed ? [s.effort] : (catalog?.efforts ?? [s.effort]);
 	const options: acp.SessionConfigOption[] = [
 		{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: current, options: modelChoices.some(c => c.value === current) ? modelChoices : [...modelChoices, { value: current, name: current }] },
-		{ id: 'effort', name: 'Thinking', category: 'thought_level', type: 'select', currentValue: s.effort, options: (catalog?.efforts ?? [s.effort]).map(e => ({ value: e, name: EFFORT_NAMES[e] ?? e })) },
+		{
+			id: 'effort', name: 'Thinking', category: 'thought_level', type: 'select', currentValue: s.effort,
+			...(effortFixed ? { description: `${FIXED} on ${model!.label}` } : {}),
+			options: (efforts.includes(s.effort) ? efforts : [...efforts, s.effort]).map(e => ({ value: e, name: EFFORT_NAMES[e] ?? cap(e) })),
+		},
 	];
 	const modes = model?.reasoning_modes ?? [];
-	if (modes.length > 1 && !s.started) {
-		options.push({ id: 'reasoning_mode', name: 'Reasoning', category: '_reasoning_mode', type: 'select', currentValue: s.reasoning_mode, options: modes.map(m => ({ value: m, name: m === 'pro' ? 'Pro reasoning' : 'Standard reasoning' })) });
+	if (modes.length > 1) {
+		const offered = s.started ? [s.reasoning_mode] : modes;
+		options.push({
+			id: 'reasoning_mode', name: 'Reasoning', category: '_reasoning_mode', type: 'select', currentValue: s.reasoning_mode,
+			...(s.started ? { description: FIXED } : {}),
+			options: offered.map(m => ({ value: m, name: m === 'pro' ? 'Pro reasoning' : `${cap(m)} reasoning` })),
+		});
 	}
-	const speeds = catalog?.speeds ?? [];
+	const speeds = supportedSpeeds(model, catalog);
 	if (speeds.length > 1) {
-		options.push({ id: 'speed', name: 'Speed', category: 'model_config', type: 'select', currentValue: s.speed, options: speeds.map(v => ({ value: v, name: v === 'standard' ? 'Standard speed' : cap(v) })) });
+		const speed = effectiveSpeed(model, catalog, s.speed);
+		options.push({ id: 'speed', name: 'Speed', category: 'model_config', type: 'select', currentValue: speeds.includes(speed) ? speed : speeds[0]!, options: speeds.map(v => ({ value: v, name: v === 'standard' ? 'Standard speed' : cap(v) })) });
 	}
 	// No approvals picker: tact has no approval mode (Nanocodex runs every command and edit without asking).
 	return options;
+}
+
+/**
+ * The speed to set so the session's speed is one its model really runs at (after a model change, Ultrafast on Opus
+ * 5.5 becomes Fast; on Haiku 5.5, Standard), or undefined when it already is.
+ */
+export function speedFix(s: TactSettings, catalog: ModelCatalog | undefined): string | undefined {
+	const model = catalogModel(s.model, catalog);
+	const speeds = supportedSpeeds(model, catalog);
+	if (!model || !speeds.length || speeds.includes(s.speed)) {
+		return undefined;
+	}
+	const effective = effectiveSpeed(model, catalog, s.speed);
+	return speeds.includes(effective) ? effective : speeds[0];
 }
 
 /** ACP config id → tact command and argument name. */

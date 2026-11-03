@@ -7,7 +7,7 @@
  *   until the turn's `turn_completed` / `interrupted` / `error` entry.
  * - `session/cancel` → `interrupt`. Config options → `set_model` / `set_effort` / `set_reasoning_mode` /
  *   `set_speed`; tact's `settings` events → `config_option_update`. A model (or reasoning mode) change before the
- *   first turn makes tact replace the session with a new one (a new id, `claude-…` for Claude): the ACP session
+ *   first turn makes tact replace the session with a new one (a new id): the ACP session
  *   keeps its id and follows tact's (remembered in `$TACT_HOME/editor-sessions.json`, for `--resume`).
  * - `$TACT_HOME/config.toml` changes (a Claude key added) → `reload_config` and the `models` catalog again.
  * - tact's refusals (HTTP status, code, message) are the ACP errors' messages, never a bare "Internal error".
@@ -17,7 +17,7 @@
 import { mkdirSync, readFileSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import * as acp from '@agentclientprotocol/sdk';
-import { configOptions, EntryMapper, isAuthError, promptText, sessionStartFailure, SET_COMMAND, settingsOf, toolDetail, type TactSettings, type TurnEnd } from './mapping.js';
+import { catalogModel, configOptions, EntryMapper, isAuthError, promptText, sessionStartFailure, SET_COMMAND, settingsOf, speedFix, toolDetail, type TactSettings, type TurnEnd } from './mapping.js';
 import { hasWebApi, launchTact, tactHome, TactStartError, type TactInstance, type TactLaunch } from './process.js';
 import { TactApiError, TactWeb, type ModelCatalog, type SessionSnapshot, type StreamEvent, type WireEntry } from './web.js';
 
@@ -180,18 +180,28 @@ class TactSession {
 	async set(configId: string, value: string): Promise<void> {
 		const set = SET_COMMAND[configId];
 		if (!set) {
-			return;
+			throw failure(`tact has no ${configId} setting`);
 		}
 		await this.switching?.catch(() => undefined);
 		if (configId === 'model' && !this.catalog?.models.some(m => m.id === value)) {
 			// A model the catalog didn't have when tact started (a key added since): tact's config, again.
 			await this.refreshCatalog(true);
 		}
+		const option = this.options().find(o => o.id === configId);
+		const offered = option?.type === 'select' ? option.options.flatMap(x => ('options' in x ? x.options : [x])) : [];
+		if (!offered.some(c => c.value === value)) {
+			// Never a choice tact would quietly run differently (Ultrafast on a model whose fastest tier is Fast).
+			const model = catalogModel(this.settings.model, this.catalog)?.label ?? this.settings.model;
+			throw failure(option
+				? `${model} doesn't offer ${value} for ${option.name.toLowerCase()}${offered.length === 1 ? ` (${option.description ?? 'it has one choice'})` : `: ${offered.map(c => c.name).join(', ')}`}`
+				: `${model} has no ${configId} setting`);
+		}
 		const args = { session: this.sessionId, [set.arg]: value };
-		const current = this.options().find(o => o.id === configId)?.currentValue;
+		const current = option?.currentValue;
 		if ((configId === 'model' || configId === 'reasoning_mode') && !this.settings.started && current !== value) {
 			const label = configId === 'model' ? this.catalog?.models.find(m => m.id === value)?.label ?? value : `${value} reasoning`;
-			const switching = this.switching = this.replace(set.cmd, args, `the ${label} session`);
+			const before = this.settings;
+			const switching = this.switching = this.replace(set.cmd, args, `the ${label} session`).then(() => this.carryOver(before));
 			try {
 				await switching;
 			} finally {
@@ -199,10 +209,47 @@ class TactSession {
 					this.switching = undefined;
 				}
 			}
+			await this.normalize();
 			return;
 		}
 		await this.command(set.cmd, args);
 		this.settings = { ...this.settings, [configId]: value };
+	}
+
+	/**
+	 * tact's new session (a model or reasoning mode change) starts from tact's defaults: the chat's effort and speed
+	 * go over to it, the speed as the tier the new model runs it at (normalize).
+	 */
+	private async carryOver(before: TactSettings): Promise<void> {
+		for (const [configId, value] of [['effort', before.effort], ['speed', before.speed]] as const) {
+			if (this.settings[configId] !== value) {
+				try {
+					await this.web.command(SET_COMMAND[configId]!.cmd, { session: this.sessionId, [SET_COMMAND[configId]!.arg]: value });
+					this.settings = { ...this.settings, [configId]: value };
+				} catch {
+					// tact's own value stays, and the pickers show it
+				}
+			}
+		}
+		await this.notify({ sessionUpdate: 'config_option_update', configOptions: this.options() });
+	}
+
+	/**
+	 * Puts the session's speed on a tier its model really runs at (tact keeps a speed the model doesn't have and runs
+	 * a lower one): after a model change, at start, and when the catalog changes. The pickers then show it.
+	 */
+	async normalize(): Promise<void> {
+		const speed = speedFix(this.settings, this.catalog);
+		if (speed === undefined || !this.sessionId) {
+			return;
+		}
+		try {
+			await this.web.command('set_speed', { session: this.sessionId, speed });
+			this.settings = { ...this.settings, speed };
+			await this.notify({ sessionUpdate: 'config_option_update', configOptions: this.options() });
+		} catch {
+			// The picker still shows the tier the model runs at (configOptions).
+		}
 	}
 
 	/**
@@ -248,6 +295,7 @@ class TactSession {
 		if (catalog && JSON.stringify(catalog) !== JSON.stringify(this.catalog)) {
 			this.catalog = catalog;
 			await this.notify({ sessionUpdate: 'config_option_update', configOptions: this.options() });
+			await this.normalize();
 		}
 	}
 
@@ -407,6 +455,7 @@ export class TactAgent {
 		const acpId = sessionId = id ?? snapshot.session;
 		session.onReplaced = tactId => this.alias(acpId, tactId);
 		session.catalog = await web.query<ModelCatalog>('models').catch(() => undefined);
+		await session.normalize();
 		for (const entry of snapshot.entries) {
 			const updates = session.mapper.map(entry, true);
 			if (replay) {

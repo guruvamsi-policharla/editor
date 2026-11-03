@@ -6,7 +6,7 @@ An ACP agent for [tact](https://github.com/clabby/tact) ("A terminal interface f
 - is that pty's terminal: tact asks its terminal what it supports when it starts (kitty keyboard `CSI ? u`, kitty graphics `APC G … a=q`, cell size `CSI 16t`, device status `CSI 5n`, then DA1 `CSI c`) and waits for the answers. Unanswered, that cost 2 s per start on Linux and hung past the 30 s start timeout on macOS ("tact started, but its web server didn't come up within 30 s"). The adapter answers like a plain VT220-class terminal (DA1 without sixel, so tact uses no kitty protocol), through `script`'s stdin (`src/terminal.ts`, `src/process.ts`): on Linux a FIFO only the adapter writes to; on macOS a real pipe, because BSD `script` refuses a socket stdin and a Node pipe and a macOS FIFO are both sockets ("tcgetattr/ioctl: Operation not supported on socket"), so bash execs `script` with a process substitution `cat` feeds from the adapter's stdin. The pty is 160×48 (`stty`), and tact's output, kept for error messages, has every escape sequence removed;
 - ends tact when the adapter goes: `script` reads EOF on the FIFO, and a watcher in the pty's shell ends tact once the adapter's pid is gone (macOS `script` ignores EOF), so a killed adapter never leaves a tact behind;
 - finds the instance through tact's registry (`$TACT_HOME/web/instances/<pid>.json`) and machine token (`$TACT_HOME/web/token`);
-- bridges ACP to tact's local web API (protocol 9, tact `docs/web.md`, on tact's main branch after v0.8.3).
+- bridges ACP to tact's local web API (protocol 10, tact `docs/web.md`, on tact's main branch after v0.8.3).
 
 | ACP | tact web API |
 |---|---|

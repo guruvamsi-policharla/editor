@@ -1,5 +1,5 @@
 /**
- * tact's local web API (tact `docs/web.md`, protocol 9): commands and queries over POST, state over one SSE
+ * tact's local web API (tact `docs/web.md`, protocol 10): commands and queries over POST, state over one SSE
  * stream that follows the instance's active session. Authenticated with the machine token as the `tact` cookie;
  * every POST carries `X-Tact: 1`.
  */
