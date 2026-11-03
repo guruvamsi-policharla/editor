@@ -1,0 +1,46 @@
+diff --git a/src/vs/workbench/contrib/chat/browser/actions/chatExecuteActions.ts b/src/vs/workbench/contrib/chat/browser/actions/chatExecuteActions.ts
+index 1882af7..0e390aa 100644
+--- a/src/vs/workbench/contrib/chat/browser/actions/chatExecuteActions.ts
++++ b/src/vs/workbench/contrib/chat/browser/actions/chatExecuteActions.ts
+@@ -533,17 +533,7 @@ export class OpenSessionTargetPickerAction extends Action2 {
+ 						IsSessionsWindowContext),
+ 					group: 'navigation',
+ 				},
+-				{
+-					id: MenuId.ChatInputSecondary,
+-					order: 0,
+-					when: ContextKeyExpr.and(
+-						ChatContextKeys.enabled,
+-						ChatContextKeys.location.isEqualTo(ChatAgentLocation.Chat),
+-						ChatContextKeys.inQuickChat.negate(),
+-						IsSessionsWindowContext.negate(),
+-						ChatContextKeys.chatSessionIsEmpty),
+-					group: 'navigation',
+-				},
++				// Agent chat: no session target pill under the chat input (tact is the only harness).
+ 			]
+ 		});
+ 	}
+@@ -568,21 +558,7 @@ export class OpenDelegationPickerAction extends Action2 {
+ 			category: CHAT_CATEGORY,
+ 			f1: false,
+ 			precondition: ContextKeyExpr.and(ChatContextKeys.enabled, ChatContextKeys.chatSessionIsEmpty.negate(), ChatContextKeys.currentlyEditingInput.negate(), ChatContextKeys.currentlyEditing.negate()),
+-			menu: [
+-				{
+-					id: MenuId.ChatInputSecondary,
+-					order: 0.5,
+-					when: ContextKeyExpr.and(
+-						ChatContextKeys.enabled,
+-						ChatContextKeys.location.isEqualTo(ChatAgentLocation.Chat),
+-						ChatContextKeys.inQuickChat.negate(),
+-						ChatContextKeys.chatSessionSupportsDelegation,
+-						ChatContextKeys.chatSessionIsEmpty.negate(),
+-						IsSessionsWindowContext.negate()
+-					),
+-					group: 'navigation',
+-				},
+-			]
++			// Agent chat: no delegation pill under the chat input (tact is the only harness).
+ 		});
+ 	}
+ 
