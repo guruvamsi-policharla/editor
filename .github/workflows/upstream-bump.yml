@@ -3,7 +3,7 @@ name: Upstream bump
 # Monthly: move fork/upstream.env to VSCodium's latest stable release, check that our patches still apply,
 # and open a PR with the result. A failing patch check still opens the PR (marked as such) so a human can
 # fix the patch on that branch.
-# Note: PRs opened with GITHUB_TOKEN don't trigger other workflows; re-run CI on the PR by pushing to it,
+# Note: PRs opened with GITHUB_TOKEN don't trigger other workflows; run CI on the PR by pushing to it,
 # or set a BUMP_TOKEN secret (fine-grained PAT: contents + pull requests) to open it under a user.
 
 on:
@@ -17,6 +17,10 @@ on:
         default: ""
 
 permissions: {}
+
+concurrency:
+  group: upstream-bump
+  cancel-in-progress: true
 
 jobs:
   bump:
