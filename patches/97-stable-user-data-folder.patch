@@ -24,18 +24,3 @@ index 44207cd..e987b79 100644
  	readonly nameLong: string;
  
  	readonly win32AppUserModelId?: string;
-diff --git a/src/vs/platform/environment/node/environmentService.ts b/src/vs/platform/environment/node/environmentService.ts
-index 62fc4ea..d2ba05e 100644
---- a/src/vs/platform/environment/node/environmentService.ts
-+++ b/src/vs/platform/environment/node/environmentService.ts
-@@ -18,8 +18,8 @@ export class NativeEnvironmentService extends AbstractNativeEnvironmentService {
- 		super(args, {
- 			homeDir,
- 			tmpDir: tmpdir(),
--			userDataDir: getUserDataPath(args, productService.nameShort),
--			userStateDir: getUserStatePath(args, productService.nameShort),
-+			userDataDir: getUserDataPath(args, productService.userDataFolderName ?? productService.nameShort),
-+			userStateDir: getUserStatePath(args, productService.userDataFolderName ?? productService.nameShort),
- 		}, productService);
- 	}
- }

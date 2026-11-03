@@ -59,7 +59,7 @@ jobs:
         env:
           VSCODIUM_REF_OVERRIDE: ${{ steps.target.outputs.sha }}
         run: |
-          if fork/scripts/prepare-vscodium.sh --patches-only "$RUNNER_TEMP/fork" > "$RUNNER_TEMP/check.log" 2>&1; then
+          if fork/scripts/check-patches.sh "$RUNNER_TEMP/fork" > "$RUNNER_TEMP/check.log" 2>&1; then
             echo "result=pass" >> "$GITHUB_OUTPUT"
           else
             echo "result=fail" >> "$GITHUB_OUTPUT"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prepare a patched VS Code tree the VSCodium way:
 #   1. fetch VSCodium at the pinned ref (fork/upstream.env)
-#   2. drop our core patches into its official downstream hook (patches/user/*.patch, applied last)
+#   2. drop our core patches, shared and for this OS, into its official downstream hook (patches/user/*.patch, applied last)
 #   3. merge our branding (fork/branding.env) into VSCodium's product.json overlay, our icons (branding/generated) over its src/stable
 #   4. get_repo.sh + prepare_vscode.sh (VS Code at VSCodium's pinned commit, all patches, npm ci)
 #   5. install our built-in extension (fork/scripts/install-extension.sh)
@@ -24,6 +24,14 @@ WORKDIR="${1:-${XDG_CACHE_HOME:-$HOME/.cache}/editor-fork-build}"
 . "${REPO_ROOT}/fork/branding.env"
 VSCODIUM_REF="${VSCODIUM_REF_OVERRIDE:-${VSCODIUM_REF}}"
 
+# Host defaults. (No `case` inside `$(...)`: bash 3.2 can't parse its `)` there.)
+if [[ -z "${OS_NAME:-}" ]]; then
+  if [[ "$(uname -s)" == "Darwin" ]]; then OS_NAME=osx; else OS_NAME=linux; fi
+fi
+if [[ -z "${VSCODE_ARCH:-}" ]]; then
+  if [[ "$(uname -m)" == "arm64" || "$(uname -m)" == "aarch64" ]]; then VSCODE_ARCH=arm64; else VSCODE_ARCH=x64; fi
+fi
+
 mkdir -p "${WORKDIR}"
 cd "${WORKDIR}"
 rm -rf vscodium
@@ -33,9 +41,9 @@ git -C vscodium fetch -q --depth 1 "${VSCODIUM_REPO}" "${VSCODIUM_REF}"
 git -C vscodium checkout -q FETCH_HEAD
 cd vscodium
 
-# Our patches go last, on top of VSCodium's.
+# Our patches go last, on top of VSCodium's. patches/<os>/ holds the ones whose context differs per OS.
 mkdir -p patches/user
-cp "${REPO_ROOT}"/patches/*.patch patches/user/
+cp "${REPO_ROOT}"/patches/*.patch "${REPO_ROOT}/patches/${OS_NAME}"/*.patch patches/user/
 
 # Icons: prepare_vscode.sh copies src/stable over the VS Code tree.
 cp -R "${REPO_ROOT}/branding/generated/." src/stable/
@@ -54,13 +62,6 @@ jq -n --arg name "${APP_NAME}" --arg bin "${BINARY_NAME}" --arg data "${DATA_FOL
   }' > ../product.overlay.json
 jq -s '.[0] * .[1]' product.json ../product.overlay.json > product.json.tmp && mv product.json.tmp product.json
 
-# Host defaults. (No `case` inside `$(...)`: bash 3.2 can't parse its `)` there.)
-if [[ -z "${OS_NAME:-}" ]]; then
-  if [[ "$(uname -s)" == "Darwin" ]]; then OS_NAME=osx; else OS_NAME=linux; fi
-fi
-if [[ -z "${VSCODE_ARCH:-}" ]]; then
-  if [[ "$(uname -m)" == "arm64" || "$(uname -m)" == "aarch64" ]]; then VSCODE_ARCH=arm64; else VSCODE_ARCH=x64; fi
-fi
 export APP_NAME BINARY_NAME ORG_NAME GH_REPO_PATH
 export ASSETS_REPOSITORY="${GH_REPO_PATH}" CI_BUILD="${CI_BUILD:-no}" SHOULD_BUILD="yes" SKIP_ASSETS="yes" \
   VSCODE_LATEST="no" VSCODE_QUALITY="stable" VSCODE_SKIP_NODE_VERSION_CHECK="yes" DISABLE_UPDATE="yes" \
