@@ -67,7 +67,7 @@ function resolve(os: OperatingSystem, ours: Binding[], context: Record<string, C
 	const defaults = [...fromExtension(LATEX_WORKSHOP, os, false), ...CORE.flatMap(r => fromRule(r, os)), ...ours]
 		.sort((a, b) => a.weight - b.weight);
 	const resolver = new KeybindingResolver(defaults.map(b => item(b, os, true)), user.map(b => item(b, os, false)), () => { });
-	const cmdL = USLayoutResolvedKeybinding.getDispatchStr(decodeKeybinding(KeyMod.CtrlCmd | KeyCode.KeyL, os)!.chords[0])!;
+	const cmdL = USLayoutResolvedKeybinding.resolveKeybinding(decodeKeybinding(KeyMod.CtrlCmd | KeyCode.KeyL, os)!, os)[0].getDispatchChords()[0]!;
 	const ctx: IContext = { getValue: <T extends ContextKeyValue>(key: string) => context[key] as T | undefined };
 	return resolver.resolve(ctx, [], cmdL);
 }
