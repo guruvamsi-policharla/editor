@@ -12,9 +12,12 @@ describe('Ctrl/Cmd+L reference', () => {
     expect(formatReference('${absolutePath}#${startLine}-${endLine} ${nope}', sel)).toBe('/w/paper/main.tex#42-58 ${nope}');
   });
   it('excludes the next line for a full-line selection', () => {
-    expect(selectionLines({ line: 41 }, { line: 58, character: 0 }, false)).toEqual([42, 58]);
-    expect(selectionLines({ line: 41 }, { line: 57, character: 3 }, false)).toEqual([42, 58]);
-    expect(selectionLines({ line: 9 }, { line: 9, character: 0 }, true)).toEqual([10, 10]);
+    expect(selectionLines({ line: 41 }, { line: 58, character: 0 })).toEqual([42, 58]);
+    expect(selectionLines({ line: 41 }, { line: 57, character: 3 })).toEqual([42, 58]);
+    expect(selectionLines({ line: 9 }, { line: 9, character: 4 })).toEqual([10, 10]);
+  });
+  it('formats a whole-file reference without lines', () => {
+    expect(formatReference('@${relativePath}', { relativePath: 'paper/main.tex', absolutePath: '/w/paper/main.tex' })).toBe('@paper/main.tex');
   });
 });
 

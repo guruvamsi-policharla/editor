@@ -65,7 +65,12 @@
         "agentReview.agent.referenceFormat": {
           "type": "string",
           "default": "@${relativePath}:${range}",
-          "markdownDescription": "Text that **Send Selection to Agent** (`Ctrl/Cmd+L`) inserts into the agent chat's input. Placeholders: `${relativePath}`, `${absolutePath}`, `${range}` (`L42-58`, or `L42` for one line), `${startLine}`, `${endLine}`."
+          "markdownDescription": "Text that **Send Selection to Agent** (`Ctrl/Cmd+L`) inserts into the agent chat's input for the selected lines. Placeholders: `${relativePath}`, `${absolutePath}`, `${range}` (`L42-58`, or `L42` for one line), `${startLine}`, `${endLine}`. With no selection, `#agentReview.agent.fileReferenceFormat#` is used."
+        },
+        "agentReview.agent.fileReferenceFormat": {
+          "type": "string",
+          "default": "@${relativePath}",
+          "markdownDescription": "Text that **Send Selection to Agent** (`Ctrl/Cmd+L`) inserts into the agent chat's input with nothing selected: a reference to the whole file. Placeholders: `${relativePath}`, `${absolutePath}`."
         }
       }
     },
@@ -323,15 +328,7 @@
           "group": "navigation@2"
         }
       ]
-    },
-    "keybindings": [
-      {
-        "command": "agentReview.sendSelectionToAgent",
-        "key": "ctrl+l",
-        "mac": "cmd+l",
-        "when": "editorTextFocus"
-      }
-    ]
+    }
   },
   "scripts": {
     "build": "node build.mjs",

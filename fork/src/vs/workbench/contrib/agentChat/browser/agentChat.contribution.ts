@@ -11,14 +11,34 @@
 // of the last focused chat input, as an inline pill (core's dynamic variable, the same as `#selection`), so a
 // message can say "in this part <ref>, fold in this argument <ref>". The request then carries the text with the
 // reference in place, plus a reference with its range (a Location) for the extension.
+// - The Cmd/Ctrl+L keybinding itself (`AGENT_CHAT_CMD_L`), above every extension's default keybindings.
 
+import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
 import { URI, UriComponents } from '../../../../base/common/uri.js';
 import { IRange, Range } from '../../../../editor/common/core/range.js';
+import { EditorContextKeys } from '../../../../editor/common/editorContextKeys.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
+import { IKeybindingRule, KeybindingsRegistry, KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
 import { ChatDynamicVariableModel } from '../../chat/browser/attachments/chatDynamicVariables.js';
 import { ChatViewPaneTarget, IChatWidgetService } from '../../chat/browser/chat.js';
 import { ACTIVE_GROUP } from '../../../services/editor/common/editorService.js';
 import { referenceInsertionOffset, referencePrefix } from './insertPlan.js';
+
+/**
+ * Cmd+L (Ctrl+L on Windows/Linux) in a text editor: agent-review's "Send Selection to Agent", which inserts the
+ * reference into the agent chat. Registered here rather than in the extension's package.json: a built-in
+ * extension's keybindings rank below every installed extension's, and LaTeX Workshop binds `cmd+l cmd+b` (`ctrl+l
+ * ctrl+b` on Linux) and a dozen more chords in LaTeX files by default, so Cmd+L in a .tex file only started a
+ * chord. This weight is above any extension default (`ExternalExtension` + the binding's index in its
+ * extension); the user's keybindings.json still overrides it.
+ */
+export const AGENT_CHAT_CMD_L: IKeybindingRule = {
+	id: 'agentReview.sendSelectionToAgent',
+	weight: KeybindingWeight.ExternalExtension + 100_000,
+	when: EditorContextKeys.editorTextFocus,
+	primary: KeyMod.CtrlCmd | KeyCode.KeyL,
+};
+KeybindingsRegistry.registerKeybindingRule(AGENT_CHAT_CMD_L);
 
 CommandsRegistry.registerCommand('_agentChat.openChat', async (accessor, uri: UriComponents | undefined, where: unknown) => {
 	if (!uri) {
