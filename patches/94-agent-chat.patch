@@ -1,9 +1,9 @@
 diff --git a/src/vs/workbench/contrib/agentChat/browser/agentChat.contribution.ts b/src/vs/workbench/contrib/agentChat/browser/agentChat.contribution.ts
 new file mode 100644
-index 00000000..3e17eb43
+index 00000000..bc4802e4
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentChat/browser/agentChat.contribution.ts
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,164 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -12,7 +12,8 @@ index 00000000..3e17eb43
 +// Agent chat (the built-in agent-chat extension), through internal commands:
 +// - `_agentChat.openChat(uri, where)` opens a chat session (from the extension's chat search) in the chat view in
 +//   the side bar, or in an editor tab.
-+// - `_agentChat.resend(uri, text)` sends a message again in a chat session (Retry on a failed turn's card).
++// - A model picked in an extension's chat session (one of the models it targets at the session's type) is reported
++//   to the extension at once (`agentChat.modelPicked`), so it can apply it and show the pickers that model has.
 +// - Cmd/Ctrl+L inserts a reference to the selection at the cursor
 +// of the last focused chat input, as an inline pill (core's dynamic variable, the same as `#selection`), so a
 +// message can say "in this part <ref>, fold in this argument <ref>". The request then carries the text with the
@@ -20,13 +21,17 @@ index 00000000..3e17eb43
 +// - The Cmd/Ctrl+L keybinding itself (`AGENT_CHAT_CMD_L`), above every extension's default keybindings.
 +
 +import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
++import { Disposable, DisposableMap } from '../../../../base/common/lifecycle.js';
++import { autorun } from '../../../../base/common/observable.js';
 +import { URI, UriComponents } from '../../../../base/common/uri.js';
 +import { IRange, Range } from '../../../../editor/common/core/range.js';
 +import { EditorContextKeys } from '../../../../editor/common/editorContextKeys.js';
-+import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
++import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 +import { IKeybindingRule, KeybindingsRegistry, KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
 +import { ChatDynamicVariableModel } from '../../chat/browser/attachments/chatDynamicVariables.js';
-+import { ChatViewPaneTarget, IChatWidgetService } from '../../chat/browser/chat.js';
++import { ChatViewPaneTarget, IChatWidget, IChatWidgetService } from '../../chat/browser/chat.js';
++import { getChatSessionType } from '../../chat/common/model/chatUri.js';
++import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 +import { ACTIVE_GROUP } from '../../../services/editor/common/editorService.js';
 +import { referenceInsertionOffset, referencePrefix } from './insertPlan.js';
 +
@@ -53,28 +58,6 @@ index 00000000..3e17eb43
 +	const widget = await accessor.get(IChatWidgetService).openSession(URI.revive(uri), where === 'editor' ? ACTIVE_GROUP : ChatViewPaneTarget);
 +	widget?.focusInput();
 +	return !!widget;
-+});
-+
-+/**
-+ * `_agentChat.resend(uri, text)`: sends `text` again in the chat session `uri` (its open widget, in the side bar or an
-+ * editor tab; opened in the side bar when it isn't open), as if the user typed it: Retry on a failed turn's card.
-+ * Without `uri` (a chat that has no resource yet), the last focused chat if it can be shown, else the side bar's.
-+ * Returns whether it was sent.
-+ */
-+CommandsRegistry.registerCommand('_agentChat.resend', async (accessor, uri: UriComponents | undefined, text: unknown) => {
-+	if (typeof text !== 'string' || !text) {
-+		return false;
-+	}
-+	const widgetService = accessor.get(IChatWidgetService);
-+	const resource = uri ? URI.revive(uri) : undefined;
-+	const open = resource && widgetService.getWidgetBySessionResource(resource);
-+	const widget = open && await widgetService.reveal(open)
-+		? open
-+		: resource ? await widgetService.openSession(resource, ChatViewPaneTarget) : await widgetService.revealWidget();
-+	if (!widget) {
-+		return false;
-+	}
-+	return !!await widget.acceptInput(text);
 +});
 +
 +/**
@@ -137,6 +120,54 @@ index 00000000..3e17eb43
 +	widget.refreshParsedInput();
 +	return true;
 +});
++
++/** The extension command a model pick is reported to: `(sessionResource, modelIdentifier)`. */
++export const MODEL_PICKED_COMMAND = 'agentChat.modelPicked';
++
++/**
++ * Reports each chat input's selected model to the agent-chat extension when it changes to a model the extension
++ * targets at the chat's session type (`targetChatSessionType`): a tact chat's thinking and speed pickers depend on
++ * its model, so the extension applies the model at once instead of at the next message. Models of other session
++ * types (and core's own) aren't reported. A pick that repeats the last one reported for the same chat isn't either.
++ */
++export class AgentChatModelPicks extends Disposable implements IWorkbenchContribution {
++	static readonly ID = 'workbench.contrib.agentChatModelPicks';
++
++	private readonly widgets = this._register(new DisposableMap<IChatWidget>());
++
++	constructor(
++		@IChatWidgetService widgetService: IChatWidgetService,
++		@ICommandService private readonly commandService: ICommandService,
++	) {
++		super();
++		widgetService.getAllWidgets().forEach(w => this.watch(w));
++		this._register(widgetService.onDidAddWidget(w => this.watch(w)));
++	}
++
++	private watch(widget: IChatWidget): void {
++		if (this.widgets.has(widget)) {
++			return;
++		}
++		let last: string | undefined;
++		this.widgets.set(widget, autorun(reader => {
++			const model = widget.input.selectedLanguageModel.read(reader);
++			const resource = widget.viewModel?.model.sessionResource;
++			const type = model?.metadata.targetChatSessionType;
++			if (!model || !resource || !type || getChatSessionType(resource) !== type) {
++				return;
++			}
++			const key = `${resource.toString()} ${model.identifier}`;
++			if (key === last || !CommandsRegistry.getCommand(MODEL_PICKED_COMMAND)) {
++				return;
++			}
++			last = key;
++			this.commandService.executeCommand(MODEL_PICKED_COMMAND, resource, model.identifier).catch(() => undefined);
++		}));
++	}
++}
++
++registerWorkbenchContribution2(AgentChatModelPicks.ID, AgentChatModelPicks, WorkbenchPhase.AfterRestored);
++
 diff --git a/src/vs/workbench/contrib/agentChat/browser/insertPlan.ts b/src/vs/workbench/contrib/agentChat/browser/insertPlan.ts
 new file mode 100644
 index 00000000..cc411273
@@ -276,10 +307,69 @@ index 550b01e7..1632a19e 100644
  
  		let resolver = this.resolvers.get(provider);
 diff --git a/src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts b/src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts
-index 6ba765d1..051bd5b8 100644
+index 6ba765d1..b0a54f7b 100644
 --- a/src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts
 +++ b/src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts
-@@ -1109,6 +1109,13 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
+@@ -180,6 +180,15 @@ const $ = dom.$;
+ 
+ const INPUT_EDITOR_MAX_HEIGHT = 250;
+ const INPUT_EDITOR_LINE_HEIGHT = 20;
++/** The input's font size when `chat.fontSize` isn't a number; its line height keeps INPUT_EDITOR_LINE_HEIGHT's ratio. */
++const INPUT_EDITOR_FONT_SIZE = 13;
++
++/** agent-chat: the input editor's font size and line height, from `chat.fontSize` (the transcript's), so both scale. */
++function inputEditorFont(configurationService: IConfigurationService): { fontSize: number; lineHeight: number } {
++	const configured = configurationService.getValue<unknown>('chat.fontSize');
++	const fontSize = typeof configured === 'number' && configured >= 6 && configured <= 100 ? configured : INPUT_EDITOR_FONT_SIZE;
++	return { fontSize, lineHeight: Math.round(fontSize * INPUT_EDITOR_LINE_HEIGHT / INPUT_EDITOR_FONT_SIZE) };
++}
+ const INPUT_EDITOR_PADDING = { compact: { top: 2, bottom: 2 }, default: { top: 12, bottom: 12 } };
+ const CachedLanguageModelsKey = 'chat.cachedLanguageModels.v2';
+ const CHAT_INPUT_PICKER_COLLAPSE_WIDTH = 280;
+@@ -419,8 +428,8 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
+ 	private readonly _contextResourceLabels: ResourceLabels;
+ 
+ 	private readonly inputEditorMaxHeight: number;
+-	private readonly inputEditorMinHeight: number | undefined;
+-	private readonly singleLineInputEditorHeight: number;
++	private inputEditorMinHeight: number | undefined;
++	private singleLineInputEditorHeight: number;
+ 	private inputEditorHeight: number = 0;
+ 	private _maxHeight: number | undefined;
+ 	private container!: HTMLElement;
+@@ -989,8 +998,9 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
+ 
+ 		this.inputEditorMaxHeight = this.options.renderStyle === 'compact' ? INPUT_EDITOR_MAX_HEIGHT / 3 : INPUT_EDITOR_MAX_HEIGHT;
+ 		const padding = this.options.renderStyle === 'compact' ? INPUT_EDITOR_PADDING.compact : INPUT_EDITOR_PADDING.default;
+-		this.singleLineInputEditorHeight = INPUT_EDITOR_LINE_HEIGHT + padding.top + padding.bottom;
+-		this.inputEditorMinHeight = this.options.inputEditorMinLines ? this.options.inputEditorMinLines * INPUT_EDITOR_LINE_HEIGHT + padding.top + padding.bottom : undefined;
++		const { lineHeight } = inputEditorFont(this.configurationService);
++		this.singleLineInputEditorHeight = lineHeight + padding.top + padding.bottom;
++		this.inputEditorMinHeight = this.options.inputEditorMinLines ? this.options.inputEditorMinLines * lineHeight + padding.top + padding.bottom : undefined;
+ 
+ 		this.inputEditorHasText = ChatContextKeys.inputHasText.bindTo(contextKeyService);
+ 		this.inputEditorHasSendableContent = ChatContextKeys.inputHasSendableContent.bindTo(contextKeyService);
+@@ -1056,8 +1066,19 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
+ 			if (e.affectsConfiguration('editor.autoSurround')) {
+ 				newOptions.autoSurround = this.configurationService.getValue('editor.autoSurround');
+ 			}
++			if (e.affectsConfiguration('chat.fontSize')) {
++				const { fontSize, lineHeight } = inputEditorFont(this.configurationService);
++				newOptions.fontSize = fontSize;
++				newOptions.lineHeight = lineHeight;
++				const padding = this.options.renderStyle === 'compact' ? INPUT_EDITOR_PADDING.compact : INPUT_EDITOR_PADDING.default;
++				this.singleLineInputEditorHeight = lineHeight + padding.top + padding.bottom;
++				this.inputEditorMinHeight = this.options.inputEditorMinLines ? this.options.inputEditorMinLines * lineHeight + padding.top + padding.bottom : undefined;
++			}
+ 
+ 			this.inputEditor.updateOptions(newOptions);
++			if (newOptions.fontSize !== undefined && this.cachedWidth) {
++				this.layout(this.cachedWidth);
++			}
+ 		}));
+ 
+ 		this._chatEditsListPool = this._register(this.instantiationService.createInstance(CollapsibleListPool, this._onDidChangeVisibility.event, MenuId.ChatEditingWidgetModifiedFilesToolbar, { verticalScrollMode: ScrollbarVisibility.Visible }));
+@@ -1109,6 +1130,13 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
  			if (reconcileSelection) {
  				this._modelSelectionController.reconcileModelListChange(models);
  			}
@@ -293,7 +383,19 @@ index 6ba765d1..051bd5b8 100644
  			// The available-model set changed: re-evaluate whether sending is
  			// possible (a `requiresCustomModels` session may now have, or have
  			// lost, its models).
-@@ -4051,10 +4058,12 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
+@@ -3222,8 +3250,9 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
+ 		options.readOnly = false;
+ 		options.ariaLabel = this._getAriaLabel();
+ 		options.fontFamily = DEFAULT_FONT_FAMILY;
+-		options.fontSize = 13;
+-		options.lineHeight = INPUT_EDITOR_LINE_HEIGHT;
++		const font = inputEditorFont(this.configurationService);
++		options.fontSize = font.fontSize;
++		options.lineHeight = font.lineHeight;
+ 		options.padding = this.options.renderStyle === 'compact' ? INPUT_EDITOR_PADDING.compact : INPUT_EDITOR_PADDING.default;
+ 		options.cursorWidth = 1;
+ 		options.wrappingStrategy = 'advanced';
+@@ -4051,10 +4080,12 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
  	 * The attachments that are rendered as pills in the input. Agent-host
  	 * completion entries (skills/commands) live in the model so their `_meta`
  	 * reaches the outgoing message, but they are shown as inline decorations
@@ -955,22 +1057,23 @@ index ac63192d..8b90f952 100644
  		}
 diff --git a/src/vs/workbench/contrib/agentChat/test/browser/agentChat.test.ts b/src/vs/workbench/contrib/agentChat/test/browser/agentChat.test.ts
 new file mode 100644
-index 00000000..328d04fc
+index 00000000..f34b25d3
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentChat/test/browser/agentChat.test.ts
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,161 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
 + *--------------------------------------------------------------------------------------------*/
 +
-+// Agent chat's Cmd/Ctrl+L and Retry go to a chat the user can see. Closing a chat's editor tab doesn't dispose its
++// Agent chat's Cmd/Ctrl+L goes to a chat the user can see. Closing a chat's editor tab doesn't dispose its
 +// widget (the editor pane is kept for the next chat tab), so the last focused widget can be one that isn't shown
-+// anywhere: a reference inserted there, or a message sent there, is lost. The real ChatWidgetService decides.
++// anywhere: a reference inserted there is lost. The real ChatWidgetService decides.
 +
 +import assert from 'assert';
 +import { Emitter, Event } from '../../../../../base/common/event.js';
 +import { DisposableStore } from '../../../../../base/common/lifecycle.js';
++import { observableValue } from '../../../../../base/common/observable.js';
 +import { URI } from '../../../../../base/common/uri.js';
 +import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 +import { IRange } from '../../../../../editor/common/core/range.js';
@@ -982,7 +1085,7 @@ index 00000000..328d04fc
 +import { ChatViewId, IChatWidget, IChatWidgetService } from '../../../chat/browser/chat.js';
 +import { ChatWidgetService } from '../../../chat/browser/widget/chatWidgetService.js';
 +import { chatSetUpForSessionsList } from '../../../chat/browser/widgetHosts/viewPane/chatViewPane.js';
-+import '../../browser/agentChat.contribution.js';
++import { AgentChatModelPicks, MODEL_PICKED_COMMAND } from '../../browser/agentChat.contribution.js';
 +
 +interface FakeWidget {
 +	readonly widget: IChatWidget;
@@ -992,7 +1095,7 @@ index 00000000..328d04fc
 +	text(): string;
 +}
 +
-+suite('AgentChat: Cmd/Ctrl+L and Retry go to a chat that is shown', () => {
++suite('AgentChat: Cmd/Ctrl+L goes to a chat that is shown', () => {
 +
 +	const store = ensureNoDisposablesAreLeakedInTestSuite();
 +	let disposables: DisposableStore;
@@ -1072,16 +1175,6 @@ index 00000000..328d04fc
 +		assert.strictEqual(viewWidget.text(), '@notes.md:L2 ');
 +	});
 +
-+	test('Retry without a chat resource sends in the chat view, not in a closed editor tab', async () => {
-+		const closedTab = fakeWidget();
-+		closedTab.focus();
-+
-+		const sent = await run('_agentChat.resend', undefined, 'try again');
-+
-+		assert.strictEqual(sent, true);
-+		assert.deepStrictEqual(viewWidget.sent, ['try again']);
-+		assert.deepStrictEqual(closedTab.sent, []);
-+	});
 +});
 +
 +suite('AgentChat: the chat view lists past chats', () => {
@@ -1096,6 +1189,37 @@ index 00000000..328d04fc
 +		assert.strictEqual(chatSetUpForSessionsList({}, false), false);
 +		assert.strictEqual(chatSetUpForSessionsList({ completed: true }, false), true);
 +		assert.strictEqual(chatSetUpForSessionsList({}, true), true);
++	});
++});
++
++suite('AgentChat: a model picked in an extension\'s chat is reported at once', () => {
++
++	const store = ensureNoDisposablesAreLeakedInTestSuite();
++
++	type Model = { identifier: string; metadata: { targetChatSessionType?: string } };
++
++	test('only models the extension targets at the chat\'s session type, once per pick', () => {
++		const disposables = store.add(new DisposableStore());
++		const reported: [string, string][] = [];
++		disposables.add(CommandsRegistry.registerCommand(MODEL_PICKED_COMMAND, () => undefined));
++		const commands = { executeCommand: async (id: string, resource: URI, model: string) => { reported.push([resource.toString(), model]); return undefined; } };
++		const selected = observableValue<Model | undefined>('model', undefined);
++		const added = disposables.add(new Emitter<IChatWidget>());
++		const widget = { input: { selectedLanguageModel: selected }, viewModel: { model: { sessionResource: URI.parse('agent-tact:/untitled-1') } } } as unknown as IChatWidget;
++		const widgetService = { getAllWidgets: () => [], onDidAddWidget: added.event } as unknown as IChatWidgetService;
++		disposables.add(new AgentChatModelPicks(widgetService, commands as never));
++		added.fire(widget);
++
++		selected.set({ identifier: 'agent-chat/agent-tact:claude-opus-5-5', metadata: { targetChatSessionType: 'agent-tact' } }, undefined);
++		selected.set({ identifier: 'agent-chat/agent-tact:claude-opus-5-5', metadata: { targetChatSessionType: 'agent-tact' } }, undefined);
++		selected.set({ identifier: 'copilot/gpt', metadata: {} }, undefined);
++		selected.set({ identifier: 'other/x', metadata: { targetChatSessionType: 'other-type' } }, undefined);
++		selected.set({ identifier: 'agent-chat/agent-tact:gpt-6.1-sol', metadata: { targetChatSessionType: 'agent-tact' } }, undefined);
++
++		assert.deepStrictEqual(reported, [
++			['agent-tact:/untitled-1', 'agent-chat/agent-tact:claude-opus-5-5'],
++			['agent-tact:/untitled-1', 'agent-chat/agent-tact:gpt-6.1-sol'],
++		]);
 +	});
 +});
 diff --git a/src/vs/workbench/contrib/agentChat/test/browser/agentChatKeybinding.test.ts b/src/vs/workbench/contrib/agentChat/test/browser/agentChatKeybinding.test.ts

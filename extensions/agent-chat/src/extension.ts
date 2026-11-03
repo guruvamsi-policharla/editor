@@ -81,6 +81,11 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 		}),
 		vscode.commands.registerCommand('agentChat.lastUsed', () => lastUsed),
+		// Core (patch 94) reports a model picked in a chat's model picker at once: the chat applies it.
+		vscode.commands.registerCommand('agentChat.modelPicked', async (resource?: vscode.Uri, identifier?: string) => {
+			const chat = resource && typeof identifier === 'string' ? [...chats.values()].find(c => c.owns(resource)) : undefined;
+			await chat?.modelPicked(resource!, identifier!);
+		}),
 		// Cmd/Ctrl+L to chat: insert the reference at the cursor of the last focused chat input, as an inline pill,
 		// without sending it. Without the core command (an older core), the reference replaces the input.
 		vscode.commands.registerCommand('agentChat.insertReference', async (text?: string, uri?: vscode.Uri, startLine?: number, endLine?: number) => {

@@ -28,7 +28,7 @@ import {
 import { changedSelections, groupsFromControls, signInGroup, SIGN_IN_GROUP } from './groups.js';
 import { archivedKey, archivedResource, harnessName, type ChatEntry, type ChatHistory } from './history.js';
 import { HarnessMissingError, loginCommand, resolveLaunch } from './launch.js';
-import { HarnessModels } from './models.js';
+import { HarnessModels, MODEL_VENDOR } from './models.js';
 import { promptBlocks, type PromptReference } from './prompt.js';
 import { footer, permissionButtons, turnFailureText, TurnRenderer } from './render.js';
 import type { Lease, TurnScheduler } from './scheduler.js';
@@ -642,7 +642,9 @@ export class HarnessChat implements vscode.Disposable {
 	}
 
 	private async applyPickerChange(state: vscode.ChatSessionInputState, groups: vscode.ChatSessionProviderOptionGroup[]): Promise<void> {
-		const session = this.sessionFor(state.sessionResource);
+		// A new chat's picks go to the session started for it ahead of its first message (warmUp), so what a later model
+		// pick resets is seen and said.
+		const session = this.sessionFor(state.sessionResource) ?? (state.sessionResource ? undefined : this.warmSession);
 		if (session) {
 			await this.applySelections(session, { groups }, state);
 			return;
@@ -695,6 +697,46 @@ export class HarnessChat implements vscode.Disposable {
 			void vscode.window.showInformationMessage(`${this.label}: ${text}.`);
 		}
 		return true;
+	}
+
+	/**
+	 * A model picked in a chat's model picker (core reports it at once, patch 94): the chat's session gets it now, so
+	 * the other pickers show what that model has (a speed it lacks is reset, and said). A new chat's goes to the session
+	 * started for it (started now if need be); a saved chat that isn't running gets it with its next message.
+	 */
+	async modelPicked(resource: vscode.Uri, identifier: string): Promise<void> {
+		const prefix = `${MODEL_VENDOR}/${this.type}:`;
+		if (!identifier.startsWith(prefix)) {
+			return;
+		}
+		const value = identifier.slice(prefix.length);
+		const key = resource.toString();
+		let session = this.sessions.get(key);
+		if (!session && !this.env.history.get(key) && !archivedKey(resource.path)) {
+			this.warmUp();
+			session = await this.warm?.catch(() => undefined);
+		}
+		const model = session && this.controlsFor(session).find(c => c.placement === 'model');
+		if (!session || !model || model.current === value || !model.choices.some(c => c.id === value)) {
+			return;
+		}
+		this.env.log.info(`[${this.profile.id}] model picked: ${value} (${resource.path})`);
+		if (!this.sessions.has(key)) {
+			// A new chat: core doesn't report its picker changes (it has no resource yet), but its pickers show them. They go
+			// to its session first, so what the model change resets is measured against what the user chose, and said.
+			for (const state of [...this.inputStates].filter(s => !s.sessionResource)) {
+				for (const change of changedSelections(state.groups, this.controlsFor(session))) {
+					await this.setOption(session, change.id, change.value);
+				}
+				// Its session has them now: from here on its pickers show the session's values.
+				this.own.delete(state);
+			}
+		}
+		if (await this.setOption(session, model.id, value)) {
+			this.pickedModels.set(key, value);
+		}
+		this.remember(session);
+		this.refresh();
 	}
 
 	/**

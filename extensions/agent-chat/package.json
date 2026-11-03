@@ -75,7 +75,8 @@
       "chat.saveBeforeSend": false,
       "chat.implicitContext.enabled": {
         "panel": "never"
-      }
+      },
+      "chat.fontSize": 14
     },
     "commands": [
       {
