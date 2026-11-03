@@ -5,7 +5,7 @@
 # An ad-hoc signature ("-") is enough for an app built on the same Mac. It is not notarized, so a copy
 # that was downloaded (quarantined) still needs `xattr -dr com.apple.quarantine` (see docs/build-macos.md).
 #
-# Usage: fork/scripts/sign-macos-adhoc.sh /path/to/Editor.app
+# Usage: fork/scripts/sign-macos-adhoc.sh /path/to/editor.app
 # bash 3.2 / BSD userland compatible (macOS stock tools only: xattr, codesign).
 set -euo pipefail
 

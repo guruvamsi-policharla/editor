@@ -1,8 +1,8 @@
-# Editor
+# editor
 
 *Placeholder name.*
 
-Editor is a VSCodium-based editor that lets you review what a coding agent changed, inline, the way Cursor does, but with **any** CLI agent: Claude Code, Codex, tact, or anything else that writes files. It contains no AI and calls no models: you run your own agent, in a terminal or (tact) from a chat panel. It watches your files, and whatever changed on disk since you last accepted it shows up in the editor as a pending change. Deleted text is shown as real red lines, rewritten words are highlighted, and every change has its own **Keep** / **Undo**. It's built mainly for writing LaTeX papers with an agent, and works for code too.
+editor is a VSCodium-based editor that lets you review what a coding agent changed, inline, the way Cursor does, but with **any** CLI agent: Claude Code, Codex, tact, or anything else that writes files. It contains no AI and calls no models: you run your own agent, in a terminal or (tact) from a chat panel. It watches your files, and whatever changed on disk since you last accepted it shows up in the editor as a pending change. Deleted text is shown as real red lines, rewritten words are highlighted, and every change has its own **Keep** / **Undo**. It's built mainly for writing LaTeX papers with an agent, and works for code too.
 
 ![Agent edits to a LaTeX paper, shown inline with Keep/Undo](docs/img/polish-1/after-prose.png)
 
@@ -16,12 +16,12 @@ brew install node@24 jq                   # once: Node 24 and jq
 export PATH="$(brew --prefix node@24)/bin:$PATH"
 git clone <this repo> editor && cd editor
 fork/scripts/build-macos.sh --install     # ~20-40 min the first time; ~15 GB of disk
-open /Applications/Editor.app
+open /Applications/editor.app
 ```
 
-The script checks the prerequisites first and tells you exactly what's missing. It builds an ad-hoc signed `Editor.app`; no Apple developer account is needed. To rebuild after `git pull`, run the same command. The details and fixes for the usual problems (Node version, out of memory, "Editor is damaged") are in **[docs/build-macos.md](docs/build-macos.md)**.
+The script checks the prerequisites first and tells you exactly what's missing. It builds an ad-hoc signed `editor.app`; no Apple developer account is needed. To rebuild after `git pull`, run the same command. The details and fixes for the usual problems (Node version, out of memory, "Editor is damaged") are in **[docs/build-macos.md](docs/build-macos.md)**.
 
-To get the `editor` shell command, open the command palette in Editor (**Cmd+Shift+P**) and run **Shell Command: Install 'editor' command in PATH**.
+To get the `editor` shell command, open the command palette in editor (**Cmd+Shift+P**) and run **Shell Command: Install 'editor' command in PATH**.
 
 ### Linux (x64)
 
@@ -39,7 +39,7 @@ fork/scripts/build.sh                     # compile and package (~8 min on 8 cor
 
 ```bash
 scripts/demo-agent.sh setup            # copies examples/paper to /tmp/editor-demo/paper
-editor /tmp/editor-demo/paper          # or: open -a Editor /tmp/editor-demo/paper  (File > Open Folder... works too)
+editor /tmp/editor-demo/paper          # or: open -a editor /tmp/editor-demo/paper  (File > Open Folder... works too)
 scripts/demo-agent.sh run              # press Enter once the folder is open
 ```
 
@@ -53,8 +53,8 @@ To start over, run `scripts/demo-agent.sh setup` again.
 
 ## Use it with Claude Code, Codex, or any CLI agent
 
-1. **Open your project folder** in Editor. Whatever is on disk at that point is the accepted state, so nothing is pending yet.
-2. **Run your agent.** You can run it in the integrated terminal (`claude`, `codex`, ...) or anywhere else, such as another terminal or tmux. Editor only watches the files. Alternatively, use the **Agent Terminal** docked to the right of the editor: run **Agent Review: Open Agent Terminal** from the command palette. It starts the command in the `agentReview.agent.command` setting (default `tact`; set it to `claude` or `codex`).
+1. **Open your project folder** in editor. Whatever is on disk at that point is the accepted state, so nothing is pending yet.
+2. **Run your agent.** You can run it in the integrated terminal (`claude`, `codex`, ...) or anywhere else, such as another terminal or tmux. editor only watches the files. Alternatively, use the **Agent Terminal** docked to the right of the editor: run **Agent Review: Open Agent Terminal** from the command palette. It starts the command in the `agentReview.agent.command` setting (default `tact`; set it to `claude` or `codex`).
    Or **chat with it** (tact): **Agent Chat: New tact Chat** (or the **+** menu in the chat's title) opens a chat in the secondary side bar, or as an editor tab with **New Chat Editor**. It runs your own `tact` (found on PATH; its ACP adapter ships with the editor) over [ACP](https://agentclientprotocol.com); tact edits files itself, so its edits are reviewed below like any other. The input bar has tact's own pickers, exactly as tact's model catalog has them for the chosen model: model (every model tact offers, until the first message), thinking, Pro reasoning (models that have it) and speed (only the tiers the model really runs; none for models with one). A setting tact fixes once a chat has started is shown locked; changing the model resets anything the new model lacks and says so. They're kept per chat: a reopened chat, also after a restart, is back in its own model and settings. tact runs commands and edits without asking; **Stop** cancels the turn. Not signed in? The chat says so and **Sign in** runs `tact auth login` in a terminal. Several chats can run at once; while one agent is working, a message in another chat waits for it to finish (**Run now** skips the wait; **Stop** or closing that chat's tab drops it). Old chats are in the sessions list and in **Search Chats** (the magnifier in the chat's title; it searches what was said, too), and pick up where they left off, also after a restart; chats from Claude Code and Codex, which the chat ran until Nov 2026, are still there, read-only. Details: [extensions/agent-chat](extensions/agent-chat).
 3. **Review the changes** as they appear:
    - **Each change:** **Keep** / **Undo** at its end (or under it when its last line is full), or **Ctrl/Cmd+Y** / **Ctrl/Cmd+N** with the cursor in it. **Ctrl/Cmd+Z** takes a Keep or an Undo back (the change is pending again, exactly as it was, on disk too), and **Ctrl/Cmd+Shift+Z** does it again; that works for a whole file, for the Agent Changes list, and for **Keep Deletion** / **Restore File** as well (in the file's editor, or with the Agent Changes list or the Explorer focused). Deleted text is struck through: deleted lines in their red rows, and deleted words. A few changed words in a long line show as track changes (deleted words struck through in red, in the line), also when the agent deleted or added a paragraph right next to it.
@@ -79,6 +79,7 @@ Phase 2 (the fork with the built-in review) is done and runs as a packaged Linux
 | [`packages/acp-client`](packages/acp-client) | Editor-independent ACP client: adapter supervision, session reducer, permission broker, the harness profile (tact). No fs/terminal capabilities |
 | [`packages/tact-acp`](packages/tact-acp) | An ACP adapter for tact: runs its terminal UI in a hidden pty and bridges ACP to tact's local web API |
 | [`extensions/agent-chat`](extensions/agent-chat) | The built-in chat panel: tact in VS Code's native chat, over `acp-client` |
+| [`branding/`](branding) | The logo and every icon generated from it |
 | [`patches/`](patches) | Core patches on top of VSCodium (inline rendering hooks, hunk toolbar, the `agentReview` contribution) |
 | [`fork/`](fork) | Build scripts, branding (`fork/branding.env`), pins, readable copies of the new core files |
 | [`docs/`](docs) | [Phase 2 details](docs/phase2.md), [macOS build](docs/build-macos.md), [fork build notes](docs/fork-build.md), [ACP design](docs/acp-design.md) |
