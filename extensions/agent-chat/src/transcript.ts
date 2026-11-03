@@ -88,6 +88,9 @@ export class TranscriptBuilder {
 					turn.ops.push(op);
 					break;
 				}
+				case 'warning':
+					turn.ops.push(op);
+					break;
 			}
 		}
 	}

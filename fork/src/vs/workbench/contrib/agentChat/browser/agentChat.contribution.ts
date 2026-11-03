@@ -32,7 +32,8 @@ CommandsRegistry.registerCommand('_agentChat.openChat', async (accessor, uri: Ur
 /**
  * `_agentChat.resend(uri, text)`: sends `text` again in the chat session `uri` (its open widget, in the side bar or an
  * editor tab; opened in the side bar when it isn't open), as if the user typed it: Retry on a failed turn's card.
- * Without `uri` (a chat that has no resource yet), the last focused chat. Returns whether it was sent.
+ * Without `uri` (a chat that has no resource yet), the last focused chat if it can be shown, else the side bar's.
+ * Returns whether it was sent.
  */
 CommandsRegistry.registerCommand('_agentChat.resend', async (accessor, uri: UriComponents | undefined, text: unknown) => {
 	if (typeof text !== 'string' || !text) {
@@ -40,13 +41,13 @@ CommandsRegistry.registerCommand('_agentChat.resend', async (accessor, uri: UriC
 	}
 	const widgetService = accessor.get(IChatWidgetService);
 	const resource = uri ? URI.revive(uri) : undefined;
-	const widget = resource
-		? widgetService.getWidgetBySessionResource(resource) ?? await widgetService.openSession(resource, ChatViewPaneTarget)
-		: widgetService.lastFocusedWidget;
+	const open = resource && widgetService.getWidgetBySessionResource(resource);
+	const widget = open && await widgetService.reveal(open)
+		? open
+		: resource ? await widgetService.openSession(resource, ChatViewPaneTarget) : await widgetService.revealWidget();
 	if (!widget) {
 		return false;
 	}
-	await widgetService.reveal(widget);
 	return !!await widget.acceptInput(text);
 });
 
@@ -60,12 +61,12 @@ CommandsRegistry.registerCommand('_agentChat.insertReference', async (accessor, 
 	if (typeof text !== 'string' || !text || !uri) {
 		return false;
 	}
-	const widgetService = accessor.get(IChatWidgetService);
-	const widget = widgetService.lastFocusedWidget ?? await widgetService.revealWidget();
+	// The last focused chat when it can be shown, else the chat view's. (A chat whose editor tab was closed keeps its
+	// widget, with no chat in it, as the last focused one: a reference inserted there would be lost.)
+	const widget = await accessor.get(IChatWidgetService).revealWidget();
 	if (!widget) {
 		return false;
 	}
-	await widgetService.reveal(widget);
 	const editor = widget.inputEditor;
 	const model = editor.getModel();
 	const variables = widget.getContrib<ChatDynamicVariableModel>(ChatDynamicVariableModel.ID);

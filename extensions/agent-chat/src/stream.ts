@@ -34,6 +34,9 @@ export class StreamWriter {
 					vscode.lm.invokeTool(TODO_TOOL, { input: { operation: 'write', todoList: op.items }, toolInvocationToken: this.request.toolInvocationToken }, this.token)
 						.then(undefined, e => this.log.warn(`todo list: ${String(e)}`));
 					break;
+				case 'warning':
+					this.stream.warning(op.text);
+					break;
 			}
 		}
 	}
@@ -72,7 +75,7 @@ export function historyTurns(turns: readonly TranscriptTurn[], participant: stri
 	turns.forEach((turn, i) => {
 		// Request ids must be unique across chats.
 		out.push(new vscode.ChatRequestTurn2(turn.prompt, undefined, [], participant, [], undefined, `${chatId}#${i}`, turn.model ? modelId(turn.model) : undefined, undefined));
-		const parts: (vscode.ChatResponseMarkdownPart | vscode.ChatResponseThinkingProgressPart | vscode.ChatToolInvocationPart)[] = [];
+		const parts: (vscode.ChatResponseMarkdownPart | vscode.ChatResponseThinkingProgressPart | vscode.ChatToolInvocationPart | vscode.ChatResponseWarningPart)[] = [];
 		for (const op of turn.ops) {
 			switch (op.op) {
 				case 'markdown':
@@ -86,6 +89,9 @@ export function historyTurns(turns: readonly TranscriptTurn[], participant: stri
 					break;
 				case 'todo':
 					parts.push(new vscode.ChatResponseMarkdownPart(new vscode.MarkdownString(op.items.map(t => `- [${t.status === 'completed' ? 'x' : ' '}] ${t.title}`).join('\n'))));
+					break;
+				case 'warning':
+					parts.push(new vscode.ChatResponseWarningPart(op.text));
 					break;
 			}
 		}

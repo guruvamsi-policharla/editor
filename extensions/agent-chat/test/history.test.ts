@@ -142,6 +142,56 @@ describe('chat history store', () => {
 		expect(b.isRemoved('claude', 's2')).toBe(false);
 	});
 
+	it('the agent\'s title for a chat (it comes after the turn is saved) is saved, so the list, search and a restart show it', () => {
+		const a = new ChatHistory(dir);
+		a.save(entry(1, { title: 'first chat about apples' }), [{ prompt: 'first chat about apples', ops: [] }], 'first chat about apples');
+		a.rename('agent-claude:/c1', 'Apple varieties');
+		a.rename('agent-claude:/nope', 'Not a saved chat');
+		const b = new ChatHistory(dir);
+		expect(b.get('agent-claude:/c1')!.title).toBe('Apple varieties');
+		expect(b.search('varieties').map(h => h.entry.resource)).toEqual(['agent-claude:/c1']);
+		expect(b.get('agent-claude:/nope')).toBeUndefined();
+	});
+
+	it('a removed chat stays removed when its running turn ends and saves it again', () => {
+		const a = new ChatHistory(dir);
+		a.save(entry(1), [{ prompt: 'p', ops: [] }], 'p');
+		a.remove('agent-claude:/c1');
+		a.save(entry(1, { title: 'Claude Code', updated: 9 }), [{ prompt: 'p', ops: [] }], 'p');
+		expect(a.list()).toEqual([]);
+		expect(new ChatHistory(dir).list()).toEqual([]);
+		expect(a.transcript('agent-claude:/c1')).toBeUndefined();
+	});
+
+	it('two windows on the same folder keep each other\'s chats (each writes the index it read before)', () => {
+		const one = new ChatHistory(dir);
+		const two = new ChatHistory(dir);
+		one.save(entry(1), [{ prompt: 'p1', ops: [] }], 'p1');
+		expect(two.list().map(e => e.resource)).toEqual(['agent-claude:/c1']);
+		two.save(entry(2), [{ prompt: 'p2', ops: [] }], 'p2');
+		one.save(entry(3));
+		one.saveSettings('agent-claude:/c2', { mode: 'plan' });
+		const later = new ChatHistory(dir);
+		expect(later.list().map(e => e.resource)).toEqual(['agent-claude:/c3', 'agent-claude:/c2', 'agent-claude:/c1']);
+		expect(later.get('agent-claude:/c2')!.settings).toEqual({ mode: 'plan' });
+		two.remove('agent-claude:/c1');
+		expect(one.list().map(e => e.resource)).toEqual(['agent-claude:/c3', 'agent-claude:/c2']);
+		expect(one.isRemoved('claude', 's1')).toBe(true);
+	});
+
+	it('a turn\'s warnings (an error, a restart notice) are part of its transcript, so a reopened chat shows them', () => {
+		const t = new TranscriptBuilder();
+		t.startTurn('hello');
+		t.add([{ op: 'markdown', text: 'partial answer' }]);
+		t.add([{ op: 'warning', text: 'Claude Code stopped unexpectedly (exit code 1).' }]);
+		const a = new ChatHistory(dir);
+		a.save(entry(1), t.turns, t.text());
+		expect(new ChatHistory(dir).transcript('agent-claude:/c1')![0]!.ops).toEqual([
+			{ op: 'markdown', text: 'partial answer' },
+			{ op: 'warning', text: 'Claude Code stopped unexpectedly (exit code 1).' },
+		]);
+	});
+
 	it('the sessions list\'s context menu argument, in each shape it arrives in (#22)', () => {
 		const resource = { scheme: 'agent-claude', path: '/c1' };
 		expect(menuTarget({ resource, label: 'Chat 1' })).toBe(resource); // our item, found by the extension host
