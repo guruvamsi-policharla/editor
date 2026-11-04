@@ -1,3 +1,16 @@
+diff --git a/src/cli.ts b/src/cli.ts
+index 2f228ef..a9ad899 100644
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -32,7 +32,7 @@
+ await import('./vs/code/node/cli.js');
+ 
+ function resolveUserProduct() {
+-	const userDataPath = getUserDataPath({_:[]}, product.nameShort ?? 'code-oss-dev');
++	const userDataPath = getUserDataPath({_:[]}, product.userDataFolderName ?? product.nameShort ?? 'code-oss-dev');
+ 	const userProductPath = path.join(userDataPath, 'product.json');
+ 
+ 	try {
 diff --git a/src/main.ts b/src/main.ts
 index 89a38a6..c96973c 100644
 --- a/src/main.ts
