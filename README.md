@@ -23,13 +23,9 @@ editor contains no AI and calls no models: you bring your own agent. Review work
 
 ## Install
 
-### macOS with Homebrew (Apple Silicon or Intel)
+### macOS (Apple Silicon or Intel)
 
-```bash
-brew install --cask guruvamsi-policharla/tap/editor
-```
-
-Or download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel) from [Releases](https://github.com/guruvamsi-policharla/editor/releases), open it and drag editor into Applications.
+Download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel) from [Releases](https://github.com/guruvamsi-policharla/editor/releases), open it and drag editor into Applications.
 
 **One-time step on first launch:** editor isn't signed with an Apple Developer ID or notarized, so macOS blocks it the first time you open it. Go to **System Settings > Privacy & Security** and click **Open Anyway**, or run:
 
@@ -41,7 +37,7 @@ You only do this once per install or update.
 
 ### How releases are cut
 
-Releases are made only on purpose, never by merging to main. Either push a version tag (`git tag v0.1.0 && git push origin v0.1.0`), or open **Actions > Release > Run workflow** and type the version. The [Release workflow](.github/workflows/release.yml) builds both Mac architectures, ad-hoc signs them, attaches the `.dmg`, `.zip` and checksums to a GitHub Release, and updates the Homebrew cask in [homebrew-tap](https://github.com/guruvamsi-policharla/homebrew-tap).
+Releases are made only on purpose, never by merging to main. Either push a version tag (`git tag v0.1.0 && git push origin v0.1.0`), or open **Actions > Release > Run workflow** and type the version. The [Release workflow](.github/workflows/release.yml) builds both Mac architectures, ad-hoc signs them, and attaches the `.dmg`, `.zip` and checksums to a GitHub Release.
 
 ### Build from source on macOS
 
