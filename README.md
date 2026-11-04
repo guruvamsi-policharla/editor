@@ -23,25 +23,17 @@ editor contains no AI and calls no models: you bring your own agent. Review work
 
 ## Install
 
-### macOS (Apple Silicon or Intel)
+### macOS (Apple Silicon)
 
-Download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel) from [Releases](https://github.com/guruvamsi-policharla/editor/releases), open it and drag editor into Applications.
-
-**One-time step on first launch:** editor isn't signed with an Apple Developer ID or notarized, so macOS blocks it the first time you open it. Go to **System Settings > Privacy & Security** and click **Open Anyway**, or run:
-
-```bash
-xattr -dr com.apple.quarantine /Applications/editor.app
-```
-
-You only do this once per install or update.
+Download the `.dmg` from [Releases](https://github.com/guruvamsi-policharla/editor/releases) (Apple Silicon), open it and drag editor into Applications. On an Intel Mac, [build from source](#build-from-source-on-macos).
 
 ### How releases are cut
 
-Releases are made only on purpose, never by merging to main. Either push a version tag (`git tag v0.1.0 && git push origin v0.1.0`), or open **Actions > Release > Run workflow** and type the version. The [Release workflow](.github/workflows/release.yml) builds both Mac architectures, ad-hoc signs them, and attaches the `.dmg`, `.zip` and checksums to a GitHub Release.
+Releases are made only on purpose, never by merging to main. Either push a version tag (`git tag v0.1.0 && git push origin v0.1.0`), or open **Actions > Release > Run workflow** and type the version. The [Release workflow](.github/workflows/release.yml) builds the Apple Silicon app and attaches the `.dmg`, `.zip` and checksums to a GitHub Release.
 
 ### Build from source on macOS
 
-macOS and Linux (x64) can also be built from source.
+macOS (Apple Silicon or Intel) and Linux (x64) can also be built from source.
 
 You need:
 
@@ -61,8 +53,6 @@ open /Applications/editor.app
 ```
 
 The script checks the prerequisites first and prints the exact command for anything that's missing. To rebuild after `git pull`, quit editor and run the same command.
-
-**First launch:** the app is ad-hoc signed, without a Developer ID signature or notarization. If macOS blocks it, go to **System Settings > Privacy & Security** and click **Open Anyway**. This stays necessary until the app gets Developer ID signing.
 
 For the `editor` shell command, press **Cmd+Shift+P** in editor and run **Shell Command: Install 'editor' command in PATH**.
 
