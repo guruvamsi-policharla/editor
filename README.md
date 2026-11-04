@@ -25,11 +25,11 @@ editor contains no AI and calls no models: you bring your own agent. Review work
 
 ### macOS (Apple Silicon)
 
-Download the `.dmg` from [Releases](https://github.com/guruvamsi-policharla/editor/releases) (Apple Silicon), open it and drag editor into Applications. On an Intel Mac, [build from source](#build-from-source-on-macos).
+Apple Silicon `.dmg`: [Releases](https://github.com/guruvamsi-policharla/editor/releases). Intel: [build from source](#build-from-source-on-macos).
 
 ### How releases are cut
 
-Releases are made only on purpose, never by merging to main. Either push a version tag (`git tag v0.1.0 && git push origin v0.1.0`), or open **Actions > Release > Run workflow** and type the version. The [Release workflow](.github/workflows/release.yml) builds the Apple Silicon app and attaches the `.dmg`, `.zip` and checksums to a GitHub Release.
+Push a `v*` tag or run **Actions > Release** with a version. [release.yml](.github/workflows/release.yml) builds the arm64 `.dmg`/`.zip` into a **draft** release; test it, then publish the draft.
 
 ### Build from source on macOS
 

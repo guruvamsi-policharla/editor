@@ -2,7 +2,8 @@ name: Full build - macOS
 
 # Manual only (workflow_dispatch), with a configurable runner label, because macOS minutes bill at 10x on private
 # repos. Run it on a v* tag to also publish a GitHub Release: gh workflow run build-macos.yml --ref v1.2.3
-# Default runner: macos-latest (Apple Silicon). It runs the same fork/scripts/build-macos.sh as a local build.
+# Default runner: macos-15-intel (~14 GB RAM), cross-compiling arm64 (build-macos.sh sets npm_config_arch); the
+# 7 GB arm64 macos-latest runner ran out of memory. It runs the same fork/scripts/build-macos.sh as a local build.
 # The app is ad-hoc signed (no Developer ID yet) and not notarized: after downloading the zip, users must run
 # `xattr -dr com.apple.quarantine editor.app` (docs/build-macos.md). macOS minutes count 10x on private repos.
 #
@@ -21,7 +22,7 @@ on:
       runner:
         description: Runner label (macos-latest, a larger-runner label, or self-hosted)
         type: string
-        default: macos-latest
+        default: macos-15-intel
       max_old_space_size:
         description: Node heap cap for gulp, in MB
         type: string
@@ -35,7 +36,7 @@ jobs:
     concurrency:
       group: build-macos-${{ github.ref }}
       cancel-in-progress: true
-    runs-on: ${{ inputs.runner || vars.BUILD_RUNNER_MACOS || 'macos-latest' }}
+    runs-on: ${{ inputs.runner || vars.BUILD_RUNNER_MACOS || 'macos-15-intel' }}
     timeout-minutes: 150 # macOS minutes bill at 10x on private repos
     permissions:
       contents: read
@@ -115,7 +116,7 @@ jobs:
         run: |
           {
             echo "### macOS build resources"
-            echo "- runner: \`${{ inputs.runner || vars.BUILD_RUNNER_MACOS || 'macos-latest' }}\`, $(sysctl -n hw.ncpu) CPU, $(( $(sysctl -n hw.memsize) / 1073741824 )) GB RAM, heap cap ${MAX_OLD_SPACE_SIZE} MB"
+            echo "- runner: \`${{ inputs.runner || vars.BUILD_RUNNER_MACOS || 'macos-15-intel' }}\`, $(sysctl -n hw.ncpu) CPU, $(( $(sysctl -n hw.memsize) / 1073741824 )) GB RAM, heap cap ${MAX_OLD_SPACE_SIZE} MB"
             echo "- prepare + build: ${BUILD_S:-n/a} s"
             echo "- $(fork/ci/monitor.sh summary "$RUNNER_TEMP/resources.log")"
           } | tee -a "$GITHUB_STEP_SUMMARY"

@@ -139,7 +139,12 @@ check_prerequisites() {
         "brew install node@${node_major} && export PATH=\"\$(brew --prefix node@${node_major})/bin:\$PATH\"" \
         "(add that export line to ~/.zprofile to keep it), or with nvm: nvm install ${node_major} && nvm use ${node_major}"
     fi
-    if [[ "${node_arch}" != "unknown" && -n "${VSCODE_ARCH:-}" && "${node_arch}" != "${VSCODE_ARCH}" ]]; then
+    if [[ "${node_arch}" == "x64" && "${VSCODE_ARCH:-}" == "arm64" && "${hw_arm64}" != "1" ]]; then
+      # Intel Mac (e.g. the macos-15-intel CI runner) cross-compiling Apple Silicon, as VS Code's own CI does:
+      # npm_config_arch=arm64 makes npm/node-gyp fetch and build the arm64 Electron headers and native modules.
+      export npm_config_arch=arm64
+      ok "cross-compiling arm64 on an Intel Mac (npm_config_arch=arm64; the built app can't be run here)"
+    elif [[ "${node_arch}" != "unknown" && -n "${VSCODE_ARCH:-}" && "${node_arch}" != "${VSCODE_ARCH}" ]]; then
       fail "Node is an ${node_arch} build but the target is ${VSCODE_ARCH}: native modules would be built for the wrong CPU." \
         "On Apple Silicon use the arm64 Homebrew in /opt/homebrew (not /usr/local), or an arm64 Node from nodejs.org / nvm."
     fi
