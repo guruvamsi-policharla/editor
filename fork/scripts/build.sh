@@ -64,6 +64,8 @@ find "${OUT}" -print0 | xargs -0 touch -c
 du -sh "${OUT}"
 
 if [[ "${OS}" == "darwin" ]]; then
+  echo "== prune other-arch prebuilt binaries (e.g. @vscode/ripgrep-universal/bin/darwin-x64)"
+  "${REPO_ROOT}/fork/scripts/prune-macos-arch.sh" "${OUT}/${APP_NAME}.app" "${VSCODE_ARCH}"
   echo "== ad-hoc code signing"
   "${REPO_ROOT}/fork/scripts/sign-macos-adhoc.sh" "${OUT}/${APP_NAME}.app"
 fi
