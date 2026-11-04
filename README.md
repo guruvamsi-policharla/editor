@@ -29,7 +29,7 @@ Apple Silicon `.dmg`: [Releases](https://github.com/guruvamsi-policharla/editor/
 
 ### How releases are cut
 
-Push a `v*` tag or run **Actions > Release** with a version. [release.yml](.github/workflows/release.yml) builds the arm64 `.dmg`/`.zip` into a **draft** release; test it, then publish the draft.
+Push a `v*` tag or run **Actions > Release** with a version. [release.yml](.github/workflows/release.yml) builds the arm64 `.dmg` into a **draft** release; test it, then publish the draft.
 
 ### Build from source on macOS
 
