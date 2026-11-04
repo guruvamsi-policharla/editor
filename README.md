@@ -8,7 +8,7 @@
 
 editor is a code editor built on [VSCodium](https://vscodium.com). It shows an agent's edits inline, in the file, with **Keep** and **Undo** on every change. It works by watching your files, so it doesn't matter which CLI agent made the edit or where it ran. It's built mainly for writing LaTeX papers with an agent, and it works for code too.
 
-editor contains no AI and calls no models: you bring your own agent. Review works with anything that writes files. The built-in chat panel currently runs [tact](https://github.com/clabby/tact).
+editor contains no AI and calls no models: you bring your own agent. Review works with anything that writes files, including the official [Codex](https://marketplace.visualstudio.com/items?itemName=openai.chatgpt) and [Claude Code](https://marketplace.visualstudio.com/items?itemName=anthropic.claude-code) VS Code extensions. An experimental built-in chat panel for [tact](https://github.com/clabby/tact) is off by default.
 
 ![Agent edits to a LaTeX paper, shown inline with Keep/Undo](docs/img/review-inline.png)
 
@@ -17,8 +17,8 @@ editor contains no AI and calls no models: you bring your own agent. Review work
 - **Inline diffs:** deleted lines show in red rows, and deleted words are struck through right in the line.
 - **Keep / Undo:** for one change, a whole file, or everything at once. **Ctrl/Cmd+Y** keeps the change at the cursor and **Ctrl/Cmd+N** undoes it.
 - **Agent Changes list:** every changed, created and deleted file in the Explorer, with Keep All, Undo All and a multi-file diff.
-- **Chat panel:** chat with tact in the secondary side bar or an editor tab. Several chats can run at once, and old chats are searchable.
-- **Point at text:** select lines and press **Ctrl/Cmd+L**, or use **Add Selection to Chat**, to put a reference like `@main.tex:L20-21` into the chat.
+- **Any agent:** the Codex or Claude Code extension, a CLI agent in a terminal, or your own harness. If it writes files, its edits show up for review.
+- **Chat panel (experimental, off by default):** chat with tact in the secondary side bar or an editor tab, and press **Ctrl/Cmd+L** to put a reference like `@main.tex:L20-21` into the chat.
 - **Your edits stay yours:** saving never accepts an agent's change, and your own edits are never shown as agent changes.
 
 ## Install
@@ -78,10 +78,10 @@ Over about 6 seconds it rewords a sentence, deletes a line, adds a paragraph, ch
 ## Using it
 
 1. **Open your project folder.** What's on disk at that point is the accepted state, so nothing is pending yet.
-2. **Run your agent**, in one of three ways:
-   - Run any CLI agent anywhere: the integrated terminal, another terminal, or tmux. editor only watches the files.
-   - Run **Agent Review: Open Agent Terminal** from the command palette. It starts the command in `agentReview.agent.command` (default `tact`).
-   - Chat with tact: run **Agent Chat: New tact Chat**, or use the **+** menu in the chat's title.
+2. **Run your agent**, any way you like:
+   - **The Codex or Claude Code extension:** install OpenAI's or Anthropic's VS Code extension in editor and use it as usual. Its edits are reviewed inline with Keep/Undo like any other.
+   - **Your own harness or CLI agent,** anywhere: the integrated terminal, another terminal, or tmux. editor only watches the files. **Agent Review: Open Agent Terminal** starts the command in `agentReview.agent.command` in a terminal beside the editor.
+   - **The built-in tact chat** (experimental), once you've turned it on: see [The chat panel](#the-chat-panel-experimental).
 3. **Review the changes as they appear:**
    - **Each change:** **Keep** / **Undo** at its end, or **Ctrl/Cmd+Y** / **Ctrl/Cmd+N** with the cursor in it. **Ctrl/Cmd+Z** takes a Keep or an Undo back.
    - **A whole file:** the bar at the bottom center of the editor has Keep / Undo for the file, and ↑/↓ to move between changes.
@@ -89,9 +89,17 @@ Over about 6 seconds it rewords a sentence, deletes a line, adds a paragraph, ch
 
 **Undo** writes the file right away, so the agent never reads undone text back. The exception is a file with unsaved edits, where the undo stays in the editor until you save.
 
-### The chat panel
+### The chat panel (experimental)
 
-The chat runs your own `tact`, found on your PATH, over [ACP](https://agentclientprotocol.com). The adapter ships with editor. If tact isn't installed or signed in, the chat tells you and offers to fix it.
+The chat panel is off by default. To turn it on, set this in your settings (**Cmd/Ctrl+,**, search for `tact`) and reload the window:
+
+```json
+"agentChat.tact.enabled": true
+```
+
+While it's off there's no chat panel, no chat commands, Ctrl/Cmd+L keeps its usual meaning, and nothing is started. Review works the same either way.
+
+Start a chat with **Agent Chat: New tact Chat**, or the **+** menu in the chat's title. The chat runs your own `tact`, found on your PATH, over [ACP](https://agentclientprotocol.com). The adapter ships with editor. If tact isn't installed or signed in, the chat tells you and offers to fix it.
 
 - tact edits files itself, so its edits are reviewed like any other agent's.
 - tact runs commands and edits without asking for permission. **Stop** cancels the turn.
@@ -124,12 +132,13 @@ Pending changes survive a restart.
 | `agentReview.agent.location` | Where the Agent Terminal opens: `right` or `panel` |
 | `agentReview.agent.referenceFormat`, `agentReview.agent.fileReferenceFormat` | The text Ctrl/Cmd+L inserts for a selection, or for a whole file |
 | `agentReview.trace` | Logs every change to the accepted state in the **Agent Review** output channel |
+| `agentChat.tact.enabled` | Turns on the experimental tact chat panel and Ctrl/Cmd+L (default off) |
 | `agentChat.turns.waitForOtherChats` | Whether a chat waits while another chat's turn runs |
 | `chat.fontSize` | The chat transcript's text size (default 14) |
 
 ## Status
 
-Developer ID signing and notarization aren't done yet, there's no Windows build, and the chat panel runs only tact.
+Developer ID signing and notarization aren't done yet, there's no Windows build, and the experimental chat panel runs only tact.
 
 ## Repository
 

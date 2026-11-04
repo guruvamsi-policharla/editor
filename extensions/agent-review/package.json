@@ -187,7 +187,7 @@
         {
           "id": "agentReview.chatNeedsTrust",
           "name": "Agent Chat",
-          "when": "!isWorkspaceTrusted"
+          "when": "!isWorkspaceTrusted && config.agentChat.tact.enabled"
         }
       ]
     },
@@ -284,17 +284,25 @@
         },
         {
           "command": "agentReview.chatNeedsTrust.newChat",
-          "when": "!isWorkspaceTrusted"
+          "when": "!isWorkspaceTrusted && config.agentChat.tact.enabled"
         },
         {
           "command": "agentReview.chatNeedsTrust.newTact",
-          "when": "!isWorkspaceTrusted"
+          "when": "!isWorkspaceTrusted && config.agentChat.tact.enabled"
+        },
+        {
+          "command": "agentReview.sendSelectionToAgent",
+          "when": "config.agentChat.tact.enabled && editorFocus"
+        },
+        {
+          "command": "agentReview.addToChat",
+          "when": "config.agentChat.tact.enabled && editorFocus"
         }
       ],
       "editor/context": [
         {
           "command": "agentReview.addToChat",
-          "when": "editorHasSelection",
+          "when": "config.agentChat.tact.enabled && editorHasSelection",
           "group": "1_chat@1"
         }
       ],
