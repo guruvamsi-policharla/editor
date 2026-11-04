@@ -69,7 +69,15 @@ if [[ "${OS}" == "darwin" ]]; then
 fi
 
 echo "== smoke test"
-if [[ "${OS}" == "linux" ]]; then
+HOST_ARCH="$(uname -m)"; [[ "${HOST_ARCH}" == "x86_64" ]] && HOST_ARCH=x64; [[ "${HOST_ARCH}" == "aarch64" ]] && HOST_ARCH=arm64
+if [[ "${HOST_ARCH}" != "${VSCODE_ARCH}" ]]; then
+  # Cross-compiled (arm64 on an Intel runner): can't execute it here, so check the main binary's architecture instead.
+  if [[ "${OS}" == "darwin" ]]; then
+    archs="$(lipo -archs "${OUT}/${APP_NAME}.app/Contents/MacOS/"* 2>/dev/null | head -1)"
+    echo "main executable architectures: ${archs}"
+    [[ " ${archs} " == *" ${VSCODE_ARCH} "* ]] || { echo "expected ${VSCODE_ARCH} in the main executable, got: ${archs}" >&2; exit 1; }
+  fi
+elif [[ "${OS}" == "linux" ]]; then
   "${OUT}/bin/${BINARY_NAME}" --version
 else
   "${OUT}/${APP_NAME}.app/Contents/Resources/app/bin/${BINARY_NAME}" --version
