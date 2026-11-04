@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, mkdtempSync, readSync, writeSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdtempSync, readSync, writeSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,6 +19,30 @@ import { parseEvent, TactApiError, type ModelCatalog } from '../src/web.js';
 
 const FAKE_TACT = fileURLToPath(new URL('./fixtures/fake-tact.mjs', import.meta.url));
 chmodSync(FAKE_TACT, 0o755);
+
+const tick = (ms = 20) => new Promise(r => setTimeout(r, ms));
+/**
+ * Waits for a condition, up to `ms` of polls: not a race against the clock, which a paused machine (a VM snapshot,
+ * a sleeping laptop) would lose however long the wait, its timer firing before anything else gets to run.
+ */
+async function until(cond: () => boolean, ms = 10_000): Promise<boolean> {
+	for (let polls = ms / 20; polls > 0 && !cond(); polls--) {
+		await tick();
+	}
+	return cond();
+}
+function settled(p: Promise<unknown>): () => boolean {
+	let done = false;
+	void p.finally(() => { done = true; });
+	return () => done;
+}
+const instances = (home: string) => (existsSync(join(home, 'web', 'instances')) ? readdirSync(join(home, 'web', 'instances')) : []);
+/** Removes a test's directories once every tact that used them has gone (they write there until they do). */
+async function cleanUp(home: string, ws: string): Promise<void> {
+	await until(() => !instances(home).length);
+	rmSync(home, { recursive: true, force: true, maxRetries: 5 });
+	rmSync(ws, { recursive: true, force: true, maxRetries: 5 });
+}
 
 describe('entries → updates', () => {
 	it('diffs re-sent text, maps tools by name, and skips the user\'s own message unless replaying', () => {
@@ -215,6 +239,15 @@ describe('process helpers', () => {
 		expect(hasWebApi(FAKE_TACT)).toBe(true);
 		expect(hasWebApi('/bin/true')).toBe(false);
 	});
+
+	it('a tact that doesn\'t answer --help in time isn\'t called one without a web API', () => {
+		const dir = mkdtempSync(join(tmpdir(), 'tact-slow-'));
+		const slow = join(dir, 'tact');
+		writeFileSync(slow, '#!/bin/sh\nexec sleep 5\n');
+		chmodSync(slow, 0o755);
+		expect(hasWebApi(slow, 100)).toBe(true);
+		rmSync(dir, { recursive: true, force: true });
+	});
 });
 
 describe('starting tact in the hidden pty', () => {
@@ -224,16 +257,11 @@ describe('starting tact in the hidden pty', () => {
 		home = mkdtempSync(join(tmpdir(), 'tact-home-'));
 		ws = mkdtempSync(join(tmpdir(), 'tact-ws-'));
 	});
-	afterEach(() => {
-		rmSync(home, { recursive: true, force: true });
-		rmSync(ws, { recursive: true, force: true });
-	});
+	afterEach(() => cleanUp(home, ws));
 
-	it('answers tact\'s start-up queries, so a tact that waits for them comes up at once (the macOS 30 s timeout)', async () => {
-		const started = Date.now();
+	it('answers tact\'s start-up queries, so a tact that waits for them comes up (the macOS 30 s timeout)', async () => {
 		const tact = await launchTact({ tact: FAKE_TACT, cwd: ws, env: { TACT_HOME: home, SHELL: '/bin/bash' }, timeoutMs: 10_000 });
 		try {
-			expect(Date.now() - started).toBeLessThan(5_000);
 			const registration = JSON.parse(readFileSync(join(home, 'web', 'instances', `${tact.pid}.json`), 'utf8')) as { fake: { rows: number; cols: number; shell: string } };
 			// A real terminal size, and the user's SHELL for tact (not the /bin/sh script(1) got).
 			expect(registration.fake).toEqual({ rows: 48, cols: 160, shell: '/bin/bash' });
@@ -255,21 +283,21 @@ describe('starting tact in the hidden pty', () => {
 			expect(registration.fake).toMatchObject({ rows: 48, cols: 160 });
 		} finally {
 			tact.kill();
-			expect(await Promise.race([tact.exited.then(() => 'exited'), new Promise(r => setTimeout(() => r('hung'), 8_000))])).toBe('exited');
+			expect(await until(settled(tact.exited))).toBe(true);
 		}
-	}, 15_000);
+	});
 
 	it('a tact whose adapter died (kill -9) doesn\'t stay behind', async () => {
 		const adapter = spawn('sleep', ['60']);
 		const tact = await launchTact({ tact: FAKE_TACT, cwd: ws, env: { TACT_HOME: home }, timeoutMs: 10_000, watch: adapter.pid });
 		adapter.kill('SIGKILL');
-		const exited = await Promise.race([tact.exited.then(() => true), new Promise(r => setTimeout(() => r(false), 8_000))]);
+		const exited = await until(settled(tact.exited));
 		if (!exited) {
 			tact.kill();
 		}
 		expect(exited).toBe(true);
 		expect(() => process.kill(tact.pid, 0)).toThrow();
-	}, 15_000);
+	});
 });
 
 describe('TactAgent on a fake tact (hidden pty, web API)', () => {
@@ -286,9 +314,7 @@ describe('TactAgent on a fake tact (hidden pty, web API)', () => {
 	afterEach(async () => {
 		agents.forEach(a => a.dispose());
 		agents = [];
-		await new Promise(r => setTimeout(r, 200));
-		rmSync(home, { recursive: true, force: true });
-		rmSync(ws, { recursive: true, force: true });
+		await cleanUp(home, ws);
 	});
 
 	function agent(env: Record<string, string> = {}): TactAgent {
@@ -345,7 +371,7 @@ describe('TactAgent on a fake tact (hidden pty, web API)', () => {
 		expect(tactId).toMatch(/^claude-/);
 
 		a.dispose();
-		await new Promise(r => setTimeout(r, 200));
+		await until(() => !instances(home).length);
 		updates = [];
 		const b = agent();
 		const loaded = await b.loadSession({ sessionId, cwd: ws, mcpServers: [] });
@@ -425,9 +451,7 @@ describe('TactAgent on a fake tact (hidden pty, web API)', () => {
 		expect(models(configOptions)).toEqual(['gpt-6.1-sol', 'gpt-6-luna']);
 		writeFileSync(join(home, 'config.toml'), '[claude]\nenabled = true\n');
 		const update = () => updates.find(u => u.sessionId === sessionId && u.update.sessionUpdate === 'config_option_update' && models(u.update.configOptions).includes('claude-opus-5-5'));
-		for (let i = 0; i < 50 && !update(); i++) {
-			await new Promise(r => setTimeout(r, 50));
-		}
+		await until(() => update() !== undefined);
 		expect(update()).toBeDefined();
 	});
 
@@ -469,6 +493,16 @@ describe('TactAgent on a fake tact (hidden pty, web API)', () => {
 		// "slow start": tact takes a moment before the turn runs (interrupt answers nothing_running until then).
 		const turn = a.prompt({ sessionId, prompt: [{ type: 'text', text: 'slow start' }] });
 		await new Promise(r => setTimeout(r, 30));
+		await a.cancel({ sessionId });
+		expect((await turn).stopReason).toBe('cancelled');
+	});
+
+	it('Stop answered nothing_running only after the turn started: it\'s interrupted all the same, not left to the grace period', async () => {
+		const a = new TactAgent({ tact: FAKE_TACT, env: { TACT_HOME: home, FAKE_TACT_SLOW_REFUSAL: '500' }, stopGraceMs: 290_000 }, async (sessionId, update) => { updates.push({ sessionId, update }); });
+		agents.push(a);
+		const { sessionId } = await a.newSession({ cwd: ws, mcpServers: [] });
+		const turn = a.prompt({ sessionId, prompt: [{ type: 'text', text: 'slow start' }] });
+		await tick(100);
 		await a.cancel({ sessionId });
 		expect((await turn).stopReason).toBe('cancelled');
 	});
@@ -566,10 +600,8 @@ describe('TactAgent on a fake tact (hidden pty, web API)', () => {
 		await a.prompt({ sessionId, prompt: [{ type: 'text', text: 'one' }] });
 		const pid = Number(readdirSync(join(home, 'web', 'instances'))[0]!.replace('.json', ''));
 		process.kill(pid, 'SIGTERM');
-		while (readdirSync(join(home, 'web', 'instances')).length) {
-			await new Promise(r => setTimeout(r, 20));
-		}
-		await new Promise(r => setTimeout(r, 100));
+		await until(() => !instances(home).length);
+		// At once: the adapter may not have heard yet that tact is gone.
 		updates = [];
 		expect((await a.prompt({ sessionId, prompt: [{ type: 'text', text: 'two' }] })).stopReason).toBe('end_turn');
 		expect(text('agent_message_chunk')).toBe('echo: two');
