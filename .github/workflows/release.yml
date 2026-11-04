@@ -65,7 +65,8 @@ jobs:
     permissions:
       contents: read
     env:
-      MAX_OLD_SPACE_SIZE: "8192"
+      # VSCodium publish-stable-macos.yml uses 12288 on 7 GB arm64 runners (macOS swaps); 8192 OOMed after compile-src.
+      MAX_OLD_SPACE_SIZE: "12288"
       CI_BUILD: "yes"
       OS_NAME: osx
       VSCODE_ARCH: ${{ matrix.arch }}
