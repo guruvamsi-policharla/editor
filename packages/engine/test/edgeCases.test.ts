@@ -1,5 +1,5 @@
 /**
- * One fixture per PLAN.md §7 edge case that applies to the engine.
+ * One fixture per edge case that applies to the engine.
  * Git operations are covered in git.test.ts (they need a real repository).
  * "Dirty buffer -> merge view" is the extension's job; the engine part is that it never writes in
  * response to an external change and attributes a save against the content the buffer started from.

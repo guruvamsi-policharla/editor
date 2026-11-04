@@ -1,6 +1,6 @@
 # @editor/acp-client
 
-The editor-independent ACP client ([PLAN.md](../../PLAN.md) Phase 4, design in [docs/acp-design.md](../../docs/acp-design.md)), on the official [`@agentclientprotocol/sdk`](https://github.com/agentclientprotocol/typescript-sdk), protocol v1. No `vscode` import: `extensions/agent-chat` is the only UI on top of it.
+The editor-independent ACP client ([architecture](../../docs/architecture.md#the-chat)), on the official [`@agentclientprotocol/sdk`](https://github.com/agentclientprotocol/typescript-sdk), protocol v1. No `vscode` import: `extensions/agent-chat` is the only UI on top of it.
 
 | Module | What |
 |---|---|

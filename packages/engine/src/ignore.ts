@@ -13,7 +13,7 @@ import ignore, { type Ignore } from 'ignore';
 import * as path from 'node:path';
 import type { FileSystem } from './fs.js';
 
-/** LaTeX auxiliary file patterns from PLAN.md §5.1. */
+/** LaTeX auxiliary file patterns. */
 export const LATEX_ARTIFACT_PATTERNS = [
   '*.aux',
   '*.log',

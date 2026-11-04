@@ -1,5 +1,5 @@
 /**
- * PLAN.md §8 engine properties on random edit sequences:
+ * Engine properties on random edit sequences:
  *   - after accept-all: baseline == disk, and disk unchanged
  *   - after reject-all: disk == baseline, and baseline unchanged
  * plus a consistency invariant checked after every step: the engine's pending list is exactly the set

@@ -1,7 +1,7 @@
 /**
  * Permission requests from the agent (`session/request_permission`).
  *
- * Rules (docs/acp-design.md §8, "Security of permission handling"):
+ * Rules:
  * - only an explicit answer from the user selects an option; the broker never picks one itself;
  * - with nobody to ask (no UI attached for the session), or on cancel, the answer is `cancelled`, as the spec requires;
  * - an answer must be one of the offered option ids;
