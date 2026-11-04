@@ -23,6 +23,7 @@ import { URI, UriComponents } from '../../../../base/common/uri.js';
 import { IRange, Range } from '../../../../editor/common/core/range.js';
 import { EditorContextKeys } from '../../../../editor/common/editorContextKeys.js';
 import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
+import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { IKeybindingRule, KeybindingsRegistry, KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
 import { ChatDynamicVariableModel } from '../../chat/browser/attachments/chatDynamicVariables.js';
 import { ChatViewPaneTarget, IChatWidget, IChatWidgetService } from '../../chat/browser/chat.js';
@@ -37,12 +38,13 @@ import { referenceInsertionOffset, referencePrefix } from './insertPlan.js';
  * extension's keybindings rank below every installed extension's, and LaTeX Workshop binds `cmd+l cmd+b` (`ctrl+l
  * ctrl+b` on Linux) and a dozen more chords in LaTeX files by default, so Cmd+L in a .tex file only started a
  * chord. This weight is above any extension default (`ExternalExtension` + the binding's index in its
- * extension); the user's keybindings.json still overrides it.
+ * extension); the user's keybindings.json still overrides it. Only while the built-in chat is on
+ * (`agentChat.tact.enabled`): otherwise Cmd/Ctrl+L keeps its default meaning.
  */
 export const AGENT_CHAT_CMD_L: IKeybindingRule = {
 	id: 'agentReview.sendSelectionToAgent',
 	weight: KeybindingWeight.ExternalExtension + 100_000,
-	when: EditorContextKeys.editorTextFocus,
+	when: ContextKeyExpr.and(EditorContextKeys.editorTextFocus, ContextKeyExpr.equals('config.agentChat.tact.enabled', true)),
 	primary: KeyMod.CtrlCmd | KeyCode.KeyL,
 };
 KeybindingsRegistry.registerKeybindingRule(AGENT_CHAT_CMD_L);

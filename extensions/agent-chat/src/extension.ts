@@ -1,4 +1,5 @@
-// Agent Chat: VS Code's native chat, driven by tact over ACP through @editor/acp-client.
+// Agent Chat: VS Code's native chat, driven by tact over ACP through @editor/acp-client. Off unless
+// `agentChat.tact.enabled` is set (experimental); inline review (agent-review) doesn't depend on it.
 //
 // - A default participant (`isDefault`, defaultChatParticipant proposal) is what makes core show the chat view
 //   and accept requests while Copilot is absent; it only points at the session types.
@@ -21,7 +22,28 @@ import { TurnScheduler } from './scheduler.js';
 
 let lastUsed: number | undefined;
 
+/** `agentChat.tact.enabled` (default off): the built-in tact chat. Off, this extension registers nothing and starts nothing. */
+export const ENABLED_SETTING = 'agentChat.tact.enabled';
+
+export function tactEnabled(): boolean {
+	return vscode.workspace.getConfiguration().get<boolean>(ENABLED_SETTING, false) === true;
+}
+
 export function activate(context: vscode.ExtensionContext): void {
+	// The chat's participant, session type, commands and menus are hidden by `config.agentChat.tact.enabled` when
+	// clauses (package.json); what this registers at runtime only takes effect on a reload, so changing it asks for one.
+	const enabled = tactEnabled();
+	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(async e => {
+		if (e.affectsConfiguration(ENABLED_SETTING) && tactEnabled() !== enabled) {
+			const reload = 'Reload Window';
+			if (await vscode.window.showInformationMessage(`Reload the window to turn the tact chat ${enabled ? 'off' : 'on'}.`, reload) === reload) {
+				await vscode.commands.executeCommand('workbench.action.reloadWindow');
+			}
+		}
+	}));
+	if (!enabled) {
+		return;
+	}
 	const activatedAt = Date.now();
 	const log = vscode.window.createOutputChannel('Agent Chat', { log: true });
 	context.subscriptions.push(log);

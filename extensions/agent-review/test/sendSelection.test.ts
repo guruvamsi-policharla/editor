@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const executeCommand = vi.fn(async (..._args: unknown[]) => undefined as unknown);
 const createTerminal = vi.fn();
 const showWarningMessage = vi.fn(async () => undefined);
+const showInformationMessage = vi.fn(async () => undefined);
+const settings: Record<string, unknown> = { 'agentChat.tact.enabled': true };
 const LINES = { start: { line: 41, character: 0 }, end: { line: 58, character: 0 }, isEmpty: false };
 const editor = {
   selection: LINES as { start: { line: number; character: number }; end: { line: number; character: number }; isEmpty: boolean },
@@ -10,9 +12,9 @@ const editor = {
 };
 
 vi.mock('vscode', () => ({
-  window: { activeTextEditor: editor, createTerminal, showWarningMessage },
+  window: { activeTextEditor: editor, createTerminal, showWarningMessage, showInformationMessage },
   workspace: {
-    getConfiguration: () => ({ get: <T>(_k: string, d: T) => d }),
+    getConfiguration: () => ({ get: <T>(k: string, d: T) => (k in settings ? settings[k] : d) as T }),
     asRelativePath: () => 'paper/main.tex',
   },
   commands: { executeCommand },
@@ -21,7 +23,7 @@ vi.mock('vscode', () => ({
 const { sendSelectionToChat } = await import('../src/sendSelection');
 
 describe('Ctrl/Cmd+L', () => {
-  beforeEach(() => { executeCommand.mockClear(); createTerminal.mockClear(); showWarningMessage.mockClear(); editor.selection = LINES; });
+  beforeEach(() => { executeCommand.mockClear(); createTerminal.mockClear(); showWarningMessage.mockClear(); showInformationMessage.mockClear(); settings['agentChat.tact.enabled'] = true; editor.selection = LINES; });
 
   it('inserts the reference into the agent chat', async () => {
     await sendSelectionToChat();
@@ -40,5 +42,12 @@ describe('Ctrl/Cmd+L', () => {
     await sendSelectionToChat();
     expect(createTerminal).not.toHaveBeenCalled();
     expect(showWarningMessage).toHaveBeenCalledOnce();
+  });
+
+  it('with the built-in chat off (agentChat.tact.enabled), says how to turn it on and sends nothing', async () => {
+    settings['agentChat.tact.enabled'] = false;
+    await sendSelectionToChat();
+    expect(executeCommand).not.toHaveBeenCalled();
+    expect(showInformationMessage).toHaveBeenCalledOnce();
   });
 });

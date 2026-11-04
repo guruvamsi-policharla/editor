@@ -72,7 +72,7 @@ function resolve(os: OperatingSystem, ours: Binding[], context: Record<string, C
 	return resolver.resolve(ctx, [], cmdL);
 }
 
-const inTexEditor = { editorFocus: true, editorTextFocus: true, textInputFocus: true, editorLangId: 'latex', editorReadonly: false };
+const inTexEditor = { editorFocus: true, editorTextFocus: true, textInputFocus: true, editorLangId: 'latex', editorReadonly: false, 'config.agentChat.tact.enabled': true };
 
 suite('AgentChat: Cmd/Ctrl+L keybinding', () => {
 
@@ -82,7 +82,7 @@ suite('AgentChat: Cmd/Ctrl+L keybinding', () => {
 		const registered = KeybindingsRegistry.getDefaultKeybindings().filter(k => k.command === SEND);
 		assert.strictEqual(registered.length, 1);
 		assert.ok(registered[0].weight1 > KeybindingWeight.ExternalExtension + 10_000);
-		assert.strictEqual(AGENT_CHAT_CMD_L.when?.serialize(), 'editorTextFocus');
+		assert.strictEqual(AGENT_CHAT_CMD_L.when?.serialize(), 'config.agentChat.tact.enabled && editorTextFocus');
 		assert.deepStrictEqual(fromRule(AGENT_CHAT_CMD_L, OperatingSystem.Macintosh).map(b => USLayoutResolvedKeybinding.resolveKeybinding(b.keybinding, OperatingSystem.Macintosh)[0].getUserSettingsLabel()), ['cmd+l']);
 		assert.deepStrictEqual(fromRule(AGENT_CHAT_CMD_L, OperatingSystem.Linux).map(b => USLayoutResolvedKeybinding.resolveKeybinding(b.keybinding, OperatingSystem.Linux)[0].getUserSettingsLabel()), ['ctrl+l']);
 	});
@@ -97,6 +97,12 @@ suite('AgentChat: Cmd/Ctrl+L keybinding', () => {
 			}
 			const r = resolve(os, ours, { ...inTexEditor, editorLangId: 'markdown', editorHasSelection: true });
 			assert.strictEqual(r.kind === ResultKind.KbFound && r.commandId, SEND);
+		});
+
+		test(`${name}: with the built-in chat off (agentChat.tact.enabled false), Cmd/Ctrl+L isn't Send Selection to Agent`, () => {
+			const ours = fromRule(AGENT_CHAT_CMD_L, os);
+			const r = resolve(os, ours, { ...inTexEditor, 'config.agentChat.tact.enabled': false, editorHasSelection: true });
+			assert.notStrictEqual(r.kind === ResultKind.KbFound && r.commandId, SEND);
 		});
 
 		test(`${name}: the same binding from a built-in extension's package.json only started a chord (the bug)`, () => {

@@ -8,6 +8,11 @@ import { formatReference, selectionLines } from './reference';
 export async function sendSelectionToChat(): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) { return; }
+  // Only the built-in chat takes references; with it off the command is hidden and Cmd/Ctrl+L isn't bound to it.
+  if (vscode.workspace.getConfiguration().get<boolean>('agentChat.tact.enabled', false) !== true) {
+    void vscode.window.showInformationMessage('Send Selection to Agent needs the built-in chat: turn on the "agentChat.tact.enabled" setting.');
+    return;
+  }
   const config = vscode.workspace.getConfiguration('agentReview.agent');
   const sel = editor.selection;
   const [startLine, endLine] = sel.isEmpty ? [undefined, undefined] : selectionLines(sel.start, sel.end);

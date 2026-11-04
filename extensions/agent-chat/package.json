@@ -44,7 +44,8 @@
         ],
         "locations": [
           "panel"
-        ]
+        ],
+        "when": "config.agentChat.tact.enabled"
       }
     ],
     "chatSessions": [
@@ -67,7 +68,8 @@
             "name": "compact",
             "description": "Summarize the conversation to free up context"
           }
-        ]
+        ],
+        "when": "config.agentChat.tact.enabled"
       }
     ],
     "configurationDefaults": {
@@ -145,6 +147,12 @@
     "configuration": {
       "title": "Agent Chat",
       "properties": {
+        "agentChat.tact.enabled": {
+          "type": "boolean",
+          "default": false,
+          "order": 0,
+          "markdownDescription": "Experimental: the built-in chat panel, which runs your own [tact](https://github.com/clabby/tact) over ACP, and Cmd/Ctrl+L to reference a selection in it. Off: no chat panel, chat commands or Cmd/Ctrl+L binding, and nothing is started. Inline review (Keep/Undo) works either way, e.g. with the Codex or Claude Code extensions. Changing it asks to reload the window."
+        },
         "agentChat.harnesses": {
           "type": "object",
           "default": {},
@@ -190,7 +198,7 @@
       "commandPalette": [
         {
           "command": "agentChat.insertReference",
-          "when": "editorTextFocus"
+          "when": "config.agentChat.tact.enabled && editorTextFocus"
         },
         {
           "command": "agentChat.runNow",
@@ -199,26 +207,62 @@
         {
           "command": "agentChat.removeChat",
           "when": "false"
+        },
+        {
+          "command": "agentChat.newChat",
+          "when": "config.agentChat.tact.enabled"
+        },
+        {
+          "command": "agentChat.newChatInEditor",
+          "when": "config.agentChat.tact.enabled"
+        },
+        {
+          "command": "agentChat.newTact",
+          "when": "config.agentChat.tact.enabled"
+        },
+        {
+          "command": "agentChat.login",
+          "when": "config.agentChat.tact.enabled"
+        },
+        {
+          "command": "agentChat.restart",
+          "when": "config.agentChat.tact.enabled"
+        },
+        {
+          "command": "agentChat.showLog",
+          "when": "config.agentChat.tact.enabled"
+        },
+        {
+          "command": "agentChat.searchChats",
+          "when": "config.agentChat.tact.enabled"
+        },
+        {
+          "command": "agentChat.login.tact",
+          "when": "config.agentChat.tact.enabled"
+        },
+        {
+          "command": "agentChat.restart.tact",
+          "when": "config.agentChat.tact.enabled"
         }
       ],
       "view/title": [
         {
           "command": "agentChat.searchChats",
-          "when": "view == workbench.panel.chat.view.copilot",
+          "when": "config.agentChat.tact.enabled && view == workbench.panel.chat.view.copilot",
           "group": "navigation@-1"
         }
       ],
       "editor/title": [
         {
           "command": "agentChat.searchChats",
-          "when": "activeEditor == workbench.editor.chatSession",
+          "when": "config.agentChat.tact.enabled && activeEditor == workbench.editor.chatSession",
           "group": "navigation@1"
         }
       ],
       "chat/chatSessions": [
         {
           "command": "agentChat.removeChat",
-          "when": "chatSessionType =~ /^agent-/",
+          "when": "config.agentChat.tact.enabled && chatSessionType =~ /^agent-/",
           "group": "z_remove"
         }
       ]

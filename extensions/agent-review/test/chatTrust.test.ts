@@ -27,7 +27,7 @@ describe('Restricted Mode: the agent chat says it needs a trusted folder (#36)',
     expect(review.capabilities.untrustedWorkspaces.supported).toBe(true);
   });
 
-  it('the palette has the chat\'s "New … Chat" commands, by the same titles, only while the folder is untrusted', () => {
+  it('the palette has the chat\'s "New … Chat" commands, by the same titles, only while the folder is untrusted and the chat is on', () => {
     const palette = review.contributes.menus.commandPalette;
     const real: Record<string, string> = {
       'agentReview.chatNeedsTrust.newChat': 'agentChat.newChat',
@@ -36,13 +36,13 @@ describe('Restricted Mode: the agent chat says it needs a trusted folder (#36)',
     expect(Object.keys(TRUST_COMMANDS).sort()).toEqual(Object.keys(real).sort());
     for (const [id, chatId] of Object.entries(real)) {
       expect(titleOf(review, id)).toBe(titleOf(chat, chatId));
-      expect(palette.find((m: { command: string }) => m.command === id)?.when).toBe('!isWorkspaceTrusted');
+      expect(palette.find((m: { command: string }) => m.command === id)?.when).toBe('!isWorkspaceTrusted && config.agentChat.tact.enabled');
     }
   });
 
-  it('the secondary side bar has a Chat view with a Manage Workspace Trust link, only while the folder is untrusted', () => {
+  it('the secondary side bar has a Chat view with a Manage Workspace Trust link, only while the folder is untrusted and the chat is on', () => {
     expect(review.contributes.viewsContainers.secondarySidebar.map((c: { id: string }) => c.id)).toContain('agentChatTrust');
-    expect(review.contributes.views.agentChatTrust).toEqual([expect.objectContaining({ id: 'agentReview.chatNeedsTrust', when: '!isWorkspaceTrusted' })]);
+    expect(review.contributes.views.agentChatTrust).toEqual([expect.objectContaining({ id: 'agentReview.chatNeedsTrust', when: '!isWorkspaceTrusted && config.agentChat.tact.enabled' })]);
     const welcome = review.contributes.viewsWelcome.find((w: { view: string }) => w.view === 'agentReview.chatNeedsTrust');
     expect(welcome.contents).toContain('Restricted Mode');
     expect(welcome.contents).toContain('(command:workbench.trust.manage)');
