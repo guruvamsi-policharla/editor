@@ -25,7 +25,7 @@ on:
       max_old_space_size:
         description: Node heap cap for gulp, in MB
         type: string
-        default: "8192"
+        default: "12288"
 
 permissions: {}
 
@@ -40,7 +40,7 @@ jobs:
     permissions:
       contents: read
     env:
-      MAX_OLD_SPACE_SIZE: ${{ inputs.max_old_space_size || vars.BUILD_MAX_OLD_SPACE_SIZE_MACOS || '8192' }}
+      MAX_OLD_SPACE_SIZE: ${{ inputs.max_old_space_size || vars.BUILD_MAX_OLD_SPACE_SIZE_MACOS || '12288' }}
       CI_BUILD: "yes"
       OS_NAME: osx
       VSCODE_ARCH: arm64
