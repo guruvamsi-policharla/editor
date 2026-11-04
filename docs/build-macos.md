@@ -2,7 +2,7 @@
 
 One script builds a runnable, ad-hoc signed `editor.app` from a fresh clone, on Apple Silicon or Intel.
 
-> **Status:** the script has been checked under bash 3.2 and with stubbed macOS tools on Linux. It has **not** been run on a real Mac yet. If it fails, the log path is printed at the end; see [Troubleshooting](#troubleshooting).
+> **First launch:** the app is ad-hoc signed, without a Developer ID signature or notarization. If macOS blocks it, go to **System Settings > Privacy & Security** and click **Open Anyway**. This stays necessary until the app gets Developer ID signing.
 
 ## 1. Prerequisites (once)
 
@@ -26,7 +26,7 @@ fork/scripts/build-macos.sh --check
 ## 2. Build
 
 ```bash
-git clone <this repo> editor && cd editor
+git clone https://github.com/guruvamsi-policharla/editor.git && cd editor
 fork/scripts/build-macos.sh --install
 ```
 
@@ -46,7 +46,7 @@ Leave out `--install` to keep the app in the build directory only.
 
 | | |
 |---|---|
-| **Time** | Expect about **20–40 min** the first time on an M-series Mac (estimate, not measured on a Mac; an 8-core Linux box takes 4 min to prepare and 8 min to build). Most of it is `npm ci` and the TypeScript compile. Rebuilds take about 10–20 min |
+| **Time** | Expect about **20–40 min** the first time on an M-series Mac (an estimate; an 8-core Linux box takes 4 min to prepare and 8 min to build). Most of it is `npm ci` and the TypeScript compile. Rebuilds take about 10–20 min |
 | **Disk** | **~15 GB free** in the build directory (the tree is about 10 GB), plus ~2 GB of npm and Electron caches in `~/.npm` and `~/Library/Caches/electron`. The app itself is about 0.5–1 GB |
 | **Memory** | 16 GB is comfortable. With 8 GB it works but swaps, so close other apps |
 | **Build directory** | `~/.cache/editor-fork-build`. To use another one, pass it as the last argument; the path must not contain spaces |
@@ -109,9 +109,9 @@ sudo rm -rf /Library/Developer/CommandLineTools && xcode-select --install
 
 **`npm ci` fails while downloading.** VSCodium's prepare retries 5 times. For a network blip, run the script again.
 
-**`error: patch failed` during prepare.** Our patches no longer match the pinned VSCodium. This shouldn't happen on `main`. Run `fork/scripts/build-macos.sh --clean`, and if it still fails, report the log.
+**`error: patch failed` during prepare.** Our patches no longer match the pinned VSCodium. This shouldn't happen on `main`. Run `fork/scripts/build-macos.sh --clean`, and if it still fails, open an issue with the log.
 
-**Anything else.** Send `~/.cache/editor-fork-build/build-macos.log`.
+**Anything else.** The full log is at `~/.cache/editor-fork-build/build-macos.log`.
 
 ## What the script assumes
 

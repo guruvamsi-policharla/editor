@@ -1,5 +1,5 @@
 /**
- * Git-operation detection against real repositories (PLAN.md §5.1, §7):
+ * Git-operation detection against real repositories:
  *  - index-only change (git add): accept pending hunks only in the staged files
  *  - a HEAD move (commit, checkout, reset, merge, rebase): accept, whole, only the files that differ between the old and
  *    the new HEAD tree (both sides of a rename, deletions); every other pending change stays pending (#12, Guru's

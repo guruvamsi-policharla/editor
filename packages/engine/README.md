@@ -1,6 +1,6 @@
 # @editor/engine
 
-The review engine from [PLAN.md](../../PLAN.md) §5.1: a standalone TypeScript library (no VS Code dependency) that tracks an **accepted baseline** for a workspace and reports everything else on disk as pending, as line-sized hunks with word-level highlights.
+The review engine: a standalone TypeScript library (no VS Code dependency) that tracks an **accepted baseline** for a workspace and reports everything else on disk as pending, as line-sized hunks with word-level highlights.
 
 ```
 pending = disk − baseline
@@ -56,7 +56,7 @@ Multi-root workspaces: `MultiRootReview.open({ roots, storageBase })` makes one 
 | Delete + create, identical content | one rename unit; reject moves it back |
 | Binary (NUL byte or invalid UTF-8) or larger than 1 MiB | file-level accept/reject only |
 | `git add` (index-only change) | accepts pending changes in the staged files only (with `git add -p`, only the hunks the index agrees with) |
-| HEAD moves (commit, checkout, pull, merge, rebase, reset, cherry-pick) | accepts, whole and as on disk, only the files that differ between the old and the new HEAD tree (`git diff-tree -M`; both sides of a rename, deletions too). Whole includes a committed file's hunks that were not staged or committed (#31). Other pending changes stay pending (#12, #31, Guru's decision of Oct 8 2026). If git can't diff the two commits, everything pending is accepted |
+| HEAD moves (commit, checkout, pull, merge, rebase, reset, cherry-pick) | accepts, whole and as on disk, only the files that differ between the old and the new HEAD tree (`git diff-tree -M`; both sides of a rename, deletions too). Whole includes a committed file's hunks that were not staged or committed. Other pending changes stay pending. If git can't diff the two commits, everything pending is accepted |
 | `git stash` / `git stash pop` (only `refs/stash` moves) | accepts nothing: plain disk changes, so pending changes come back with pop |
 | Editor closed while the agent edits | changes are pending on the next open |
 | Ignored | `.gitignore` (nested), `.git/info/exclude`, defaults (`node_modules/`, `dist/`, `build/`, `out/`, `target/`, `.next/`, `__pycache__/`, `coverage/`, LaTeX aux files, and `X.pdf` only when `X.tex` sits next to it), plus user patterns (highest precedence, `!` re-includes) |
