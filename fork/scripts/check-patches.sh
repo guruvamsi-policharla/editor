@@ -2,7 +2,8 @@
 # Apply the whole patch series the way a build does, for every OS: VSCodium's own patches, then its
 # OS-specific ones, then ours, with the !!APP_NAME!!-style placeholders filled in, on the pinned VS Code
 # commit. VSCodium's patch lists differ per OS, so a patch can apply on Linux and fail on macOS.
-# Also checks that fork/src matches the files the patches create.
+# Also checks that fork/src matches the files the patches create, and that every user data path follows
+# userDataFolderName (patch 97): VSCodium's or VS Code's new call sites would otherwise read a second folder.
 # No macOS runner needed: this only runs `git apply`. A series can't be tested with `git apply --check`
 # alone (each patch needs the ones before it), so the patches are applied for real in a scratch tree.
 #
@@ -33,6 +34,10 @@ for os in ${OSES}; do
     for d in agentReview agentChat; do
       diff -ru "${REPO_ROOT}/fork/src/vs/workbench/contrib/${d}" "${WORKDIR}/vscodium/vscode/src/vs/workbench/contrib/${d}"
     done
+    if grep -rnE 'getUser(Data|State)Path\(.*nameShort' "${WORKDIR}/vscodium/vscode/src" --include='*.ts' | grep -v -e userDataFolderName -e /test/ >&2; then
+      echo "These user data paths ignore userDataFolderName: extend patches/97-stable-user-data-folder.patch." >&2
+      exit 1
+    fi
   else
     grep -E '^(error:|failed to apply)' "${LOG}" >&2 || tail -n 20 "${LOG}" >&2
     echo "Patch series does not apply for OS_NAME=${os}." >&2
