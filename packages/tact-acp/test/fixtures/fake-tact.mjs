@@ -10,7 +10,8 @@
 //   "stuck"        a running turn that ignores interrupt (never ends)
 //   anything else  reasoning, a streamed answer ("echo: <text>") in two revisions, an exec_command tool
 // Env: FAKE_TACT_NOCREDS=1 → exits like tact without credentials. FAKE_TACT_STALL=<n> → the first n set_draft
-// commands answer like tact whose terminal loop is busy (HTTP 503 "the terminal did not answer in time"). Sessions persist in $TACT_HOME/fake-sessions.
+// commands answer like tact whose terminal loop is busy (HTTP 503 "the terminal did not answer in time").
+// FAKE_TACT_SLOW_REFUSAL=<ms> → `nothing_running` reaches the client that much later. Sessions persist in $TACT_HOME/fake-sessions.
 // Like tact, a model (or reasoning mode) change before the first turn replaces the session: 150 ms later the old one
 // is `closed` and a new one (`claude-<uuid>` for Claude) is active; commands meanwhile are refused ("still
 // starting"). The model `claude-broken` fails to start: tact keeps the old session and draws the reason in a box.
@@ -237,6 +238,7 @@ const server = createServer(async (req, res) => {
 				return;
 			case 'interrupt':
 				if (!session.running) {
+					await sleep(Number(process.env.FAKE_TACT_SLOW_REFUSAL ?? 0));
 					return reply(res, 409, { code: 'nothing_running', message: 'nothing running' });
 				}
 				if (session.entries.at(-1)?.text !== 'stuck') {

@@ -38,6 +38,9 @@ export interface TactAgentOptions {
 
 type Notify = (update: acp.SessionUpdate) => Promise<void>;
 
+/** tact was gone before it took the message: nothing was sent, so it can go to a new tact. */
+class NotSent extends Error { }
+
 /** One message's turn. */
 interface Turn {
 	resolve: (end: TurnEnd) => void;
@@ -45,6 +48,8 @@ interface Turn {
 	stopped: boolean;
 	/** Stopped before tact started it (`nothing_running`): interrupt it as soon as it starts. */
 	stopping: boolean;
+	/** tact has started it (an entry of the turn came in). */
+	started: boolean;
 	/** Ends it as interrupted if tact doesn't, a while after a Stop (`stopGraceMs`). */
 	timer?: ReturnType<typeof setTimeout>;
 }
@@ -149,10 +154,13 @@ class TactSession {
 	}
 
 	private onEntry(entry: WireEntry): void {
-		if (this.turn?.stopping && entry.id > this.mapper.baseline && entry.kind !== 'user') {
-			// Stop came before tact started the turn (`nothing_running`): now there's something to interrupt.
-			this.turn.stopping = false;
-			void this.web.command('interrupt', { session: this.sessionId }).catch(() => undefined);
+		if (this.turn && entry.id > this.mapper.baseline && entry.kind !== 'user') {
+			this.turn.started = true;
+			if (this.turn.stopping) {
+				// Stop came before tact started the turn (`nothing_running`): now there's something to interrupt.
+				this.turn.stopping = false;
+				void this.web.command('interrupt', { session: this.sessionId }).catch(() => undefined);
+			}
 		}
 		if (entry.kind === 'user' && !this.settings.started) {
 			this.settings = { ...this.settings, started: true };
@@ -286,12 +294,12 @@ class TactSession {
 		const within = (ms: number) => Promise.race([replaced, new Promise<boolean>(resolve => setTimeout(() => resolve(false), ms))]);
 		try {
 			await this.command(cmd, args);
-			const deadline = Date.now() + 60_000;
-			while (!await within(400)) {
+			// 150 rounds of at least 400 ms: counted, so a machine that sleeps meanwhile doesn't use them up (withTimeout).
+			for (let rounds = 150; !await within(400); rounds--) {
 				if (!this.alive) {
 					throw failure(`exited while starting ${what}.`);
 				}
-				if (Date.now() > deadline) {
+				if (rounds <= 0) {
 					throw failure(`didn't start ${what} within 60 s.`);
 				}
 				// While tact starts the new session the old one refuses commands ("the session is still starting"); if it
@@ -341,7 +349,7 @@ class TactSession {
 
 	private async run(text: string): Promise<TurnEnd> {
 		if (!this.alive) {
-			throw failure('tact is no longer running for this chat');
+			throw new NotSent();
 		}
 		// A model change still starting tact's new session: the message goes to that one.
 		await this.switching;
@@ -350,9 +358,12 @@ class TactSession {
 		const rev = new Promise<number>(resolve => this.drafts.push({ text, resolve }));
 		let resolve!: (end: TurnEnd) => void;
 		const end = new Promise<TurnEnd>(r => { resolve = r; });
-		const turn: Turn = this.turn = { resolve, stopping: false, stopped: false };
+		const turn: Turn = this.turn = { resolve, stopping: false, started: false, stopped: false };
 		try {
-			await this.retrying('set_draft', { session: this.sessionId, text });
+			await this.retrying('set_draft', { session: this.sessionId, text }).catch((e: unknown) => {
+				// tact died just before: the adapter only hears of that a moment later.
+				throw this.alive ? e : new NotSent();
+			});
 			const draft = await Promise.race([withTimeout(rev, 10_000, 'tact did not acknowledge the message'), end.then(() => -1)]);
 			if (turn.stopped) {
 				// Stopped before it was sent: don't send it, and leave tact's composer empty.
@@ -411,7 +422,12 @@ class TactSession {
 			await this.web.command('interrupt', { session: this.sessionId });
 		} catch (e) {
 			if (e instanceof TactApiError && e.code === 'nothing_running' && this.turn === turn) {
-				turn.stopping = true;
+				if (turn.started) {
+					// The turn started while tact's answer was on its way.
+					await this.web.command('interrupt', { session: this.sessionId }).catch(() => undefined);
+				} else {
+					turn.stopping = true;
+				}
 			}
 		}
 	}
@@ -580,7 +596,16 @@ export class TactAgent {
 			// tact exited (crashed, or was closed): start it again on the same session.
 			s = await this.start(cwd, p.sessionId, false);
 		}
-		const end = await s.prompt(promptText(p.prompt));
+		const text = promptText(p.prompt);
+		const end = await s.prompt(text).catch(async (e: unknown) => {
+			if (!(e instanceof NotSent)) {
+				throw e;
+			}
+			if (!cwd || this.sessions.get(p.sessionId) !== s) {
+				throw failure('tact is no longer running for this chat');
+			}
+			return (await this.start(cwd, p.sessionId, false)).prompt(text);
+		});
 		if (end.kind === 'error') {
 			if (isAuthError(end.message)) {
 				// The chat then offers "Sign in to tact" (runs `tact auth login` in a terminal) and restarts tact after.
@@ -617,11 +642,20 @@ export class TactAgent {
 	}
 }
 
+/** Counted in ticks, not by the clock: a machine that sleeps or is paused meanwhile uses up one tick, not the wait. */
 function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
+	let timer: ReturnType<typeof setInterval> | undefined;
 	return Promise.race([
-		p.finally(() => clearTimeout(timer)),
-		new Promise<never>((_, reject) => { timer = setTimeout(() => reject(failure(message)), ms); }),
+		p.finally(() => clearInterval(timer)),
+		new Promise<never>((_, reject) => {
+			let ticks = Math.ceil(ms / 100);
+			timer = setInterval(() => {
+				if (--ticks <= 0) {
+					clearInterval(timer);
+					reject(failure(message));
+				}
+			}, 100);
+		}),
 	]);
 }
 

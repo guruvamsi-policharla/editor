@@ -50,9 +50,15 @@ export function tactHome(env: Record<string, string | undefined> = process.env):
 	return env.TACT_HOME?.trim() || join(homedir(), '.tact');
 }
 
-/** Whether this tact serves the web API (`--web`; tact's main branch after v0.8.3). */
-export function hasWebApi(tact: string): boolean {
-	const help = spawnSync(tact, ['--help'], { encoding: 'utf8', timeout: 10_000 });
+/**
+ * Whether this tact serves the web API (`--web`; tact's main branch after v0.8.3). A `--help` that didn't answer in
+ * time (a busy machine, a first run being scanned) says nothing about tact's version: starting it will tell.
+ */
+export function hasWebApi(tact: string, timeoutMs = 10_000): boolean {
+	const help = spawnSync(tact, ['--help'], { encoding: 'utf8', timeout: timeoutMs });
+	if ((help.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') {
+		return true;
+	}
 	return /--web\b/.test(`${help.stdout ?? ''}`);
 }
 
@@ -243,8 +249,8 @@ async function start(o: TactLaunch): Promise<TactInstance> {
 		return () => { listeners.delete(listener); };
 	};
 
-	const deadline = Date.now() + (o.timeoutMs ?? 30_000);
-	while (Date.now() < deadline) {
+	// Counted in polls, not by the clock: a machine that sleeps or is paused meanwhile uses up one poll, not the wait.
+	for (let polls = Math.ceil((o.timeoutMs ?? 30_000) / 100); polls > 0; polls--) {
 		if (exitCode !== undefined) {
 			throw startFailure(text(), exitCode);
 		}

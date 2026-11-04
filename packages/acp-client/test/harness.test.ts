@@ -30,9 +30,9 @@ function harness(env: Record<string, string> = {}, opts: { sleeps?: number[]; ma
 }
 
 async function waitFor(cond: () => boolean, ms = 5000): Promise<void> {
-	const end = Date.now() + ms;
-	while (!cond()) {
-		if (Date.now() > end) {
+	// Counted in polls: a paused machine uses up one, not the wait.
+	for (let polls = ms / 10; !cond(); polls--) {
+		if (polls <= 0) {
 			throw new Error('timed out');
 		}
 		await new Promise(resolve => setTimeout(resolve, 10));
