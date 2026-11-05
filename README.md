@@ -27,9 +27,6 @@ editor contains no AI and calls no models: you bring your own agent. Review work
 
 Apple Silicon `.dmg`: [Releases](https://github.com/guruvamsi-policharla/editor/releases). Intel: [build from source](#build-from-source-on-macos).
 
-### How releases are cut
-
-Push a `v*` tag or run **Actions > Release** with a version. [release.yml](.github/workflows/release.yml) builds the arm64 `.dmg` into a **draft** release; test it, then publish the draft.
 
 ### Build from source on macOS
 
