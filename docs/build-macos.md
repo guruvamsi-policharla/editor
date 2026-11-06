@@ -2,7 +2,7 @@
 
 One script builds a runnable, ad-hoc signed `editor.app` from a fresh clone, on Apple Silicon or Intel.
 
-> **First launch:** the app is ad-hoc signed, without a Developer ID signature or notarization. If macOS blocks it, go to **System Settings > Privacy & Security** and click **Open Anyway**. This stays necessary until the app gets Developer ID signing.
+> **First launch (local builds):** `build-macos.sh` ad-hoc signs the app (no Developer ID / notarization). If macOS blocks it, go to **System Settings > Privacy & Security** and click **Open Anyway**. GitHub Release `.dmg`s are Developer ID signed and notarized instead.
 
 ## 1. Prerequisites (once)
 

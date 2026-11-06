@@ -5,8 +5,8 @@ name: Release
 #
 # Builds editor.app for Apple Silicon only (Intel users build from source), cross-compiled on the free standard
 # macos-15-intel runner (~14 GB RAM; the 7 GB arm64 macos-latest runner ran out of memory), with fork/scripts/build-macos.sh,
-# ad-hoc signs it (no Apple Developer ID, not notarized), packages a .dmg per arch with sha256 files,
-# and publishes a GitHub Release (creating the tag for a manual run).
+# Developer ID signs + notarizes it when the Apple secrets are set (falls back to ad-hoc otherwise), packages a .dmg
+# with sha256 files, and publishes a DRAFT GitHub Release (creating the tag for a manual run).
 # Standard GitHub-hosted runners are free on public repos.
 
 on:
@@ -106,13 +106,27 @@ jobs:
       - name: Build (fork/scripts/build-macos.sh, prepare + compile + package + ad-hoc sign)
         run: fork/scripts/build-macos.sh "$WORKDIR"
 
-      - name: Ad-hoc sign and verify
+      - name: Sign (Developer ID when secrets present, else ad-hoc) and verify
+        id: sign
         env:
           APP_NAME: ${{ steps.pins.outputs.app }}
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           app="$WORKDIR/vscodium/VSCode-darwin-$VSCODE_ARCH/$APP_NAME.app"
           fork/scripts/prune-macos-arch.sh "$app" "$VSCODE_ARCH" # also done by build.sh; idempotent
-          fork/scripts/sign-macos-adhoc.sh "$app"
+          if [[ -n "${MACOS_CERTIFICATE_P12}" && -n "${MACOS_CERTIFICATE_PASSWORD}" ]]; then
+            echo "Developer ID signing"
+            fork/scripts/sign-macos-developer-id.sh "$app"
+            echo "SIGNING=developer-id" >> "$GITHUB_ENV"
+            echo "mode=developer-id" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Apple cert secrets missing; falling back to ad-hoc sign (not notarized)"
+            fork/scripts/sign-macos-adhoc.sh "$app"
+            echo "SIGNING=adhoc" >> "$GITHUB_ENV"
+            echo "mode=adhoc" >> "$GITHUB_OUTPUT"
+          fi
           codesign --verify --deep --strict "$app"
           # Cross-compiled: don't run it here; check every Mach-O in the bundle is arm64 instead.
           lipo -archs "$app/Contents/MacOS/"*
@@ -135,8 +149,34 @@ jobs:
             [[ $i == 5 ]] && exit 1; echo "hdiutil failed, retrying ($i)"; sleep 10
           done
           hdiutil verify "$out/$base.dmg"
-          cd "$out"
-          shasum -a 256 "$base.dmg" > "$base.dmg.sha256"
+          echo "DMG=$out/$base.dmg" >> "$GITHUB_ENV"
+          echo "DMG_BASE=$base" >> "$GITHUB_ENV"
+          echo "DIST_OUT=$out" >> "$GITHUB_ENV"
+
+      - name: Notarize and staple .dmg (Developer ID builds only)
+        if: steps.sign.outputs.mode == 'developer-id'
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          missing=
+          for v in APPLE_API_KEY_ID APPLE_API_ISSUER_ID APPLE_API_KEY_P8 MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD; do
+            if [[ -z "${!v}" ]]; then echo "::error::secret $v is empty"; missing=1; fi
+          done
+          [[ -z "$missing" ]] || exit 1
+          # Sign the .dmg with Developer ID (Gatekeeper expects a signed disk image), then notarize + staple it.
+          fork/scripts/sign-macos-dmg.sh "$DMG"
+          fork/scripts/notarize-macos.sh "$DMG"
+
+      - name: Checksums
+        run: |
+          cd "$DIST_OUT"
+          shasum -a 256 "$DMG_BASE.dmg" > "$DMG_BASE.dmg.sha256"
+          echo "${SIGNING:-adhoc}" > SIGNING.txt
           cat ./*.sha256
           ls -lh
 
@@ -159,14 +199,24 @@ jobs:
           path: dist
 
       - name: Combine checksums
-        run: cat dist/*.sha256 > dist/SHA256SUMS
+        run: |
+          cat dist/*.sha256 > dist/SHA256SUMS
+          # Don't attach the internal marker to the release assets.
+          signing="$(cat dist/SIGNING.txt 2>/dev/null || echo adhoc)"
+          rm -f dist/SIGNING.txt
+          echo "SIGNING=$signing" >> "$GITHUB_ENV"
 
       - name: Create DRAFT GitHub Release (test the .dmg, then publish it by hand; publishing creates the tag on a manual run)
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.version.outputs.tag }}
         run: |
-          notes="Apple Silicon only (ad-hoc signed, not notarized). Intel: build from source."
+          if [[ "${SIGNING}" == "developer-id" ]]; then
+            notes="Apple Silicon only (Developer ID signed and notarized). Intel: build from source."
+          else
+            notes="Apple Silicon only (ad-hoc signed, not notarized — Apple secrets were missing). Intel: build from source."
+          fi
+          # Exclude nothing else; SHA256SUMS + .dmg + .sha256 only.
           if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber dist/*
           else

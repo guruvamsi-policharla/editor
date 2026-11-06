@@ -141,7 +141,7 @@ Pending changes survive a restart.
 
 ## Status
 
-Developer ID signing and notarization aren't done yet, there's no Windows build, and the experimental chat panel runs only tact.
+Apple Silicon releases are Developer ID signed and notarized; there's no Windows build, and the experimental chat panel runs only tact.
 
 ## Repository
 
