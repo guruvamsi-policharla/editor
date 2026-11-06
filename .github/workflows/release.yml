@@ -7,7 +7,7 @@ name: Release
 # macos-15-intel runner (~14 GB RAM; the 7 GB arm64 macos-latest runner ran out of memory), with fork/scripts/build-macos.sh,
 # Developer ID signs + notarizes it when the Apple secrets are set (falls back to ad-hoc otherwise), packages a .dmg
 # with sha256 files, and publishes a DRAFT GitHub Release (creating the tag for a manual run).
-# Test secrets first with the "Verify Apple signing" workflow. Standard GitHub-hosted runners are free on public repos.
+# Standard GitHub-hosted runners are free on public repos.
 
 on:
   push:

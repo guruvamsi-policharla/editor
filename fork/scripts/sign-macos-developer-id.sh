@@ -28,18 +28,21 @@ TMPDIR_SIGN="$(mktemp -d "${TMPDIR:-/tmp}/editor-codesign.XXXXXX")"
 KEYCHAIN="${TMPDIR_SIGN}/buildagent.keychain"
 P12_FILE="${TMPDIR_SIGN}/certificate.p12"
 KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
-ORIGINAL_KEYCHAINS=""
+ORIGINAL_KEYCHAINS=()
 CLEANED=0
 
 cleanup() {
   if [[ "${CLEANED}" -eq 1 ]]; then return; fi
   CLEANED=1
-  if [[ -f "${KEYCHAIN}" ]]; then
-    security delete-keychain "${KEYCHAIN}" >/dev/null 2>&1 || true
-  fi
-  if [[ -n "${ORIGINAL_KEYCHAINS}" ]]; then
-    # shellcheck disable=SC2086
-    security list-keychains -s ${ORIGINAL_KEYCHAINS} >/dev/null 2>&1 || true
+  # create-keychain may store "foo.keychain" as "foo.keychain-db"; delete whichever exists.
+  local kc
+  for kc in "${KEYCHAIN}" "${KEYCHAIN}-db"; do
+    if [[ -e "${kc}" ]]; then
+      security delete-keychain "${kc}" >/dev/null 2>&1 || true
+    fi
+  done
+  if [[ ${#ORIGINAL_KEYCHAINS[@]} -gt 0 ]]; then
+    security list-keychains -d user -s "${ORIGINAL_KEYCHAINS[@]}" >/dev/null 2>&1 || true
   fi
   rm -rf "${TMPDIR_SIGN}"
 }
@@ -66,12 +69,15 @@ sign_one() {
 }
 
 echo "+ create temporary keychain"
-ORIGINAL_KEYCHAINS="$(security list-keychains -d user | sed -E 's/^[[:space:]]*"?(.*?)"?$/\1/' | tr '\n' ' ')"
+ORIGINAL_KEYCHAINS=()
+while IFS= read -r kc_line; do
+  kc_line="$(printf '%s' "${kc_line}" | sed -E 's/^[[:space:]]*"?//; s/"?[[:space:]]*$//')"
+  [[ -n "${kc_line}" ]] && ORIGINAL_KEYCHAINS+=("${kc_line}")
+done < <(security list-keychains -d user)
 security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}"
 security set-keychain-settings -lut 21600 "${KEYCHAIN}"
 security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}"
-# shellcheck disable=SC2086
-security list-keychains -d user -s "${KEYCHAIN}" ${ORIGINAL_KEYCHAINS}
+security list-keychains -d user -s "${KEYCHAIN}" ${ORIGINAL_KEYCHAINS[@]+"${ORIGINAL_KEYCHAINS[@]}"}
 
 echo "+ import Developer ID certificate"
 printf '%s' "${MACOS_CERTIFICATE_P12}" | base64 --decode > "${P12_FILE}"
@@ -100,25 +106,17 @@ echo "+ signing with identity ${CODESIGN_IDENTITY:0:8}…"
 # Extended attributes make codesign fail with "resource fork… not allowed".
 xattr -cr "${APP}"
 
-# Inside-out: nested .app bundles deepest first, then frameworks, then loose Mach-Os, then outer .app.
+# Inside-out per Apple TN2206: sign every leaf Mach-O first, then containing bundles
+# (frameworks / nested .app) deepest-first, then the outer .app. Nothing inside an
+# already-sealed bundle is touched after that bundle is signed.
 # Avoid codesign --deep so each helper gets the right entitlements (VS Code / Electron practice).
-while IFS= read -r nested; do
-  [[ "${nested}" == "${APP}" ]] && continue
-  ents="$(entitlements_for "${nested}")"
-  echo "  sign nested app: ${nested#"${APP}/"}"
-  sign_one "${nested}" "${ents}"
-done < <(find "${APP}" -name '*.app' -print | awk '{ print gsub(/\//,"/"), $0 }' | sort -nr | awk '{ $1=""; sub(/^ /,""); print }')
+by_depth() { awk '{ print gsub(/\//,"/"), $0 }' | sort -nr | awk '{ $1=""; sub(/^ /,""); print }'; }
 
-while IFS= read -r fw; do
-  echo "  sign framework: ${fw#"${APP}/"}"
-  sign_one "${fw}" "${ENT_DIR}/entitlements.helper.plist"
-done < <(find "${APP}/Contents/Frameworks" -name '*.framework' -maxdepth 1 -print 2>/dev/null | awk '{ print gsub(/\//,"/"), $0 }' | sort -nr | awk '{ $1=""; sub(/^ /,""); print }')
-
-# Loose Mach-O binaries (extension helpers, .node, dylibs) that are not already covered as
-# the main executable of a nested .app / framework. Skip things already signed with our identity.
+# 1) Leaf Mach-O files (dylibs, .node, .so, extension helpers, bundle main executables), deepest first.
 while IFS= read -r bin; do
   [[ -z "${bin}" ]] && continue
-  # Skip if this path is inside a nested .app's Contents/MacOS main binary we already signed as the app
+  [[ -L "${bin}" ]] && continue
+  # Bundle main executables are sealed by signing their bundle in step 2.
   case "${bin}" in
     */Contents/MacOS/*) continue ;;
   esac
@@ -126,7 +124,18 @@ while IFS= read -r bin; do
     echo "  sign binary: ${bin#"${APP}/"}"
     sign_one "${bin}" "${ENT_DIR}/entitlements.helper.plist"
   fi
-done < <(find "${APP}" \( -type f -perm -u+x -o -name '*.node' -o -name '*.dylib' -o -name '*.so' \) ! -path '*/Contents/MacOS/*' -print 2>/dev/null)
+done < <(find "${APP}/Contents" -type f \( -perm -u+x -o -name '*.node' -o -name '*.dylib' -o -name '*.so' \) -print 2>/dev/null | by_depth)
+
+# 2) Bundles (.framework, nested .app), deepest first so inner bundles are sealed before outer ones.
+while IFS= read -r bundle; do
+  [[ -z "${bundle}" || "${bundle}" == "${APP}" ]] && continue
+  [[ -L "${bundle}" ]] && continue
+  case "${bundle}" in
+    *.app) ents="$(entitlements_for "${bundle}")"; echo "  sign nested app: ${bundle#"${APP}/"}" ;;
+    *) ents="${ENT_DIR}/entitlements.helper.plist"; echo "  sign framework: ${bundle#"${APP}/"}" ;;
+  esac
+  sign_one "${bundle}" "${ents}"
+done < <(find "${APP}/Contents" -type d \( -name '*.app' -o -name '*.framework' \) -print 2>/dev/null | by_depth)
 
 echo "  sign app: $(basename "${APP}")"
 sign_one "${APP}" "${ENT_DIR}/entitlements.app.plist"

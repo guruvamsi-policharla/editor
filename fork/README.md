@@ -18,7 +18,6 @@ Fork-side sources and scripts. Core changes ship as patches in [`../patches/`](.
 | `scripts/sign-macos-developer-id.sh APP` | Import the Developer ID `.p12`, sign nested helpers inside-out with hardened runtime (CI releases) |
 | `scripts/sign-macos-dmg.sh DMG` | Developer ID sign a `.dmg` |
 | `scripts/notarize-macos.sh APP\|DMG` | `notarytool` submit + staple (App Store Connect API key) |
-| `scripts/verify-apple-signing.sh` | Dry-run: import cert, list identity, auth `notarytool` (used by the Verify Apple signing workflow) |
 | `scripts/lint-core.sh [WORKDIR]` | VS Code's own ESLint config on every core file our patches add or change (0 warnings). The repo's own TypeScript is linted with `npm run lint` (VS Code's generic rules, `eslint.config.mjs`) |
 | `scripts/test-core.sh [WORKDIR]` | Core tests: `contrib/agentReview` and `contrib/agentChat`, the upstream chat-editing and chat model tests (Electron), plus the diff tests and fixtures (node) |
 | `scripts/simulate-agent.mjs setup\|edit\|all DIR [wave]` | Sample project + an "agent" that writes, renames over, creates and deletes files while the editor runs |

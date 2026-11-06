@@ -17,29 +17,35 @@ TMPDIR_SIGN="$(mktemp -d "${TMPDIR:-/tmp}/editor-dmg-sign.XXXXXX")"
 KEYCHAIN="${TMPDIR_SIGN}/buildagent.keychain"
 P12_FILE="${TMPDIR_SIGN}/certificate.p12"
 KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
-ORIGINAL_KEYCHAINS=""
+ORIGINAL_KEYCHAINS=()
 CLEANED=0
 
 cleanup() {
   if [[ "${CLEANED}" -eq 1 ]]; then return; fi
   CLEANED=1
-  if [[ -f "${KEYCHAIN}" ]]; then
-    security delete-keychain "${KEYCHAIN}" >/dev/null 2>&1 || true
-  fi
-  if [[ -n "${ORIGINAL_KEYCHAINS}" ]]; then
-    # shellcheck disable=SC2086
-    security list-keychains -d user -s ${ORIGINAL_KEYCHAINS} >/dev/null 2>&1 || true
+  # create-keychain may store "foo.keychain" as "foo.keychain-db"; delete whichever exists.
+  local kc
+  for kc in "${KEYCHAIN}" "${KEYCHAIN}-db"; do
+    if [[ -e "${kc}" ]]; then
+      security delete-keychain "${kc}" >/dev/null 2>&1 || true
+    fi
+  done
+  if [[ ${#ORIGINAL_KEYCHAINS[@]} -gt 0 ]]; then
+    security list-keychains -d user -s "${ORIGINAL_KEYCHAINS[@]}" >/dev/null 2>&1 || true
   fi
   rm -rf "${TMPDIR_SIGN}"
 }
 trap cleanup EXIT
 
-ORIGINAL_KEYCHAINS="$(security list-keychains -d user | sed -E 's/^[[:space:]]*"?(.*?)"?$/\1/' | tr '\n' ' ')"
+ORIGINAL_KEYCHAINS=()
+while IFS= read -r kc_line; do
+  kc_line="$(printf '%s' "${kc_line}" | sed -E 's/^[[:space:]]*"?//; s/"?[[:space:]]*$//')"
+  [[ -n "${kc_line}" ]] && ORIGINAL_KEYCHAINS+=("${kc_line}")
+done < <(security list-keychains -d user)
 security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}"
 security set-keychain-settings -lut 21600 "${KEYCHAIN}"
 security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}"
-# shellcheck disable=SC2086
-security list-keychains -d user -s "${KEYCHAIN}" ${ORIGINAL_KEYCHAINS}
+security list-keychains -d user -s "${KEYCHAIN}" ${ORIGINAL_KEYCHAINS[@]+"${ORIGINAL_KEYCHAINS[@]}"}
 
 printf '%s' "${MACOS_CERTIFICATE_P12}" | base64 --decode > "${P12_FILE}"
 security import "${P12_FILE}" -k "${KEYCHAIN}" -P "${MACOS_CERTIFICATE_PASSWORD}" \
