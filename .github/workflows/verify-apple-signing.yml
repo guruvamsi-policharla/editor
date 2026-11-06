@@ -1,0 +1,45 @@
+name: Verify Apple signing
+
+# Cheap (~1–2 min) check that the Developer ID + notarization secrets work.
+# workflow_dispatch ONLY — never on push/PR, never builds the app, never cuts a release.
+# Actions → Verify Apple signing → Run workflow.
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: verify-apple-signing
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Import cert, list Developer ID identity, auth notarytool
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          missing=
+          for v in MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD APPLE_TEAM_ID \
+                   APPLE_API_KEY_ID APPLE_API_ISSUER_ID APPLE_API_KEY_P8; do
+            if [[ -z "${!v}" ]]; then
+              echo "::error::secret $v is empty / not set"
+              missing=1
+            fi
+          done
+          [[ -z "$missing" ]] || exit 1
+          fork/scripts/verify-apple-signing.sh
