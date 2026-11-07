@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>editor</title>
-  <meta name="description" content="An agent-agnostic editor for reviewing what a coding agent changed, inline.">
+  <meta name="description" content="a harness-agnostic editor">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <meta property="og:title" content="editor">
-  <meta property="og:description" content="An agent-agnostic editor for reviewing what a coding agent changed, inline.">
+  <meta property="og:description" content="a harness-agnostic editor">
   <meta property="og:image" content="https://guruvamsi-policharla.github.io/editor/social-preview.png">
   <meta property="og:url" content="https://guruvamsi-policharla.github.io/editor/">
   <meta property="og:type" content="website">
@@ -51,23 +51,8 @@
       color: var(--muted);
       font-size: 18px;
       line-height: 1.5;
-      margin: 0 auto 14px;
-      max-width: 34em;
-    }
-    .more {
-      color: var(--muted);
-      font-size: 15px;
-      line-height: 1.65;
       margin: 0 auto 40px;
-      max-width: 38em;
-    }
-    .shot {
-      width: 100%;
-      height: auto;
-      border-radius: 12px;
-      border: 1px solid var(--line);
-      margin: 0 0 48px;
-      display: block;
+      max-width: 34em;
     }
     .term {
       display: flex;
@@ -122,13 +107,6 @@
       margin-top: 10px;
       min-height: 1.2em;
     }
-    .note {
-      color: var(--muted);
-      font-size: 14px;
-      line-height: 1.5;
-      margin: 22px 0 0;
-    }
-    .note a { color: var(--fg); }
     footer {
       margin-top: 80px;
       color: var(--muted);
@@ -150,9 +128,7 @@
   <main>
     <img class="logo" src="icon.svg" width="112" height="112" alt="editor logo">
     <h1>editor</h1>
-    <p class="lede">An agent-agnostic editor for reviewing what a coding agent changed, inline.</p>
-    <p class="more">Built on VSCodium. Agent edits show up in the file with Keep and Undo on every change. editor contains no AI and calls no models: you bring your own agent, including the Codex or Claude Code extensions or any harness that writes files.</p>
-    <img class="shot" src="img/review-inline.png" alt="Agent edits to a LaTeX paper, shown inline with Keep/Undo">
+    <p class="lede">a harness-agnostic editor</p>
 
     <div class="term">
       <code id="install-cmd">curl -fsSL https://guruvamsi-policharla.github.io/editor/install.sh | sh</code>
@@ -160,7 +136,6 @@
     </div>
     <a class="btn" id="download" href="https://github.com/guruvamsi-policharla/editor/releases/latest">Download for Apple Silicon</a>
     <span class="version" id="version"></span>
-    <p class="note">Apple Silicon Macs. Intel Macs can <a href="https://github.com/guruvamsi-policharla/editor#build-from-source-on-macos">build from source</a>.</p>
 
     <footer>
       <a href="https://github.com/guruvamsi-policharla/editor">Source</a>
@@ -197,11 +172,14 @@
               break;
             }
           }
+          var download = document.getElementById("download");
+          var version = document.getElementById("version");
           if (dmg && dmg.browser_download_url) {
-            document.getElementById("download").href = dmg.browser_download_url;
+            download.href = dmg.browser_download_url;
           }
           if (rel.tag_name) {
-            document.getElementById("version").textContent = rel.tag_name;
+            version.textContent = rel.tag_name;
+            download.textContent = "Download " + rel.tag_name;
           }
         })
         .catch(function () {});
