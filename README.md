@@ -25,7 +25,11 @@ editor contains no AI and calls no models: you bring your own agent. Review work
 
 ### macOS (Apple Silicon)
 
-Apple Silicon `.dmg`: [Releases](https://github.com/guruvamsi-policharla/editor/releases). Intel: [build from source](#build-from-source-on-macos).
+```bash
+curl -fsSL https://guruvamsi-policharla.github.io/editor/install.sh | sh
+```
+
+Or download the Apple Silicon `.dmg` from the [website](https://guruvamsi-policharla.github.io/editor/) or [Releases](https://github.com/guruvamsi-policharla/editor/releases). Intel: [build from source](#build-from-source-on-macos).
 
 
 ### Build from source on macOS
