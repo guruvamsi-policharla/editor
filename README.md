@@ -120,7 +120,7 @@ Start a chat with **Agent Chat: New tact Chat**, or the **+** menu in the chat's
 ### What counts as a change
 
 - **Your own edits:** when you save, edits outside the agent's changes fold into the accepted state. This also holds with format on save.
-- **Typing inside an agent's change:** your typing becomes part of that change. Saving doesn't accept it; only Keep or Undo resolves it.
+- **Typing inside an agent's change:** typing that touches the agent's text (inside it or right next to it) becomes part of that change. Saving doesn't accept it; only Keep or Undo resolves it. Typing anywhere else stays yours, even on the same line or paragraph.
 - **Unsaved edits:** if anything else changes a file you have unsaved edits in, nothing is overwritten. A notice offers **Merge…**, a 3-way merge of the disk version with yours.
 - **`git add`:** accepts what it stages, including only the staged hunks with `git add -p`.
 - **Commits and other HEAD moves** (checkout, pull, merge, rebase, reset): accept the files that differ between the old and new commit, whole and as they are on disk. That includes hunks you didn't stage. Pending changes in other files stay pending.

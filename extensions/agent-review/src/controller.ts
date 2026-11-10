@@ -83,6 +83,10 @@ export class ReviewController {
   private readonly deferred = new Set<string>();
   /** Files with unsaved edits that changed on disk underneath them, until the buffer is clean again. */
   private readonly conflicted = new Set<string>();
+  /** The text of each file's last reported save, until the editor says it was written (`onDidWrite`). */
+  private readonly reported = new Map<string, string>();
+  /** Each file's save report while it runs. */
+  private readonly reporting = new Map<string, Promise<void>>();
   private readonly listeners = new Set<() => void>();
   private readonly subscriptions: { dispose(): void }[] = [];
   private files: PendingFile[] = [];
@@ -184,8 +188,10 @@ export class ReviewController {
       this.deferred.delete(f.absPath);
       return;
     }
-    if (this.docs.isDirty(f.absPath) && pushed !== undefined) {
-      // The UI shows baseline vs. buffer; moving the baseline under unsaved typing would mislabel it.
+    if (this.docs.isDirty(f.absPath) && (pushed !== undefined || reason === 'external' || reason === 'rescan')) {
+      // The UI shows baseline vs. buffer; moving the baseline under unsaved typing would mislabel it. A disk change
+      // under unsaved edits isn't in the buffer either (a conflict, merged by the user): it shows once the buffer is
+      // clean. (A first push at startup still shows a buffer restored with unsaved edits: core folds them in.)
       this.log.trace?.(`${f.absPath}: baseline push deferred (unsaved edits)`);
       this.deferred.add(f.absPath);
       return;
@@ -265,20 +271,55 @@ export class ReviewController {
    * Before the editor writes a user save to disk. `userContent`: the buffer before save participants (format on
    * save) changed it, if known; the engine then tells the formatter's changes apart by diffing, not by the log.
    * `reviewBaseline`: the editor's review baseline (its original side) for a file under review. It followed the
-   * typing live: edits on no line of a pending change folded in, the rest stayed pending with the change. When it
+   * typing live: edits that don't touch a pending change folded in, the rest stayed pending with the change. When it
    * started from the engine's current baseline (the last one pushed), the engine takes it as is, so the engine and
    * the editor agree on what is pending after the save. Saving never accepts any part of a change.
+   * `again`: a repeat of the same save's report, because the user typed while it was delivered (the editor writes
+   * the buffer as it is when the save runs, not as it was first reported): what changed since the previous report
+   * is the user's typing.
    */
-  async onWillSave(absPath: string, content: string, edits: readonly TrackedEdit[] | undefined, userContent?: string, reviewBaseline?: string): Promise<void> {
+  async onWillSave(absPath: string, content: string, edits: readonly TrackedEdit[] | undefined, userContent?: string, reviewBaseline?: string, again = false): Promise<void> {
     const abs = normalizePath(absPath);
+    const run = this.reportSave(abs, content, edits, userContent, reviewBaseline, again);
+    this.reporting.set(abs, run);
+    try {
+      await run;
+    } finally {
+      if (this.reporting.get(abs) === run) { this.reporting.delete(abs); }
+    }
+  }
+
+  /**
+   * After the editor wrote a save reported with `onWillSave`. `written`: what was written, when the editor can't tell
+   * that it is the last report (the report timed out, or the user typed through every repeat of it). Anything the
+   * report didn't have is the user's typing: it is reported now, before the watcher sees the write, so that it isn't
+   * taken for an outside write (shown as an agent's change, and a conflict with the unsaved edits typed since).
+   */
+  async onDidWrite(absPath: string, written?: string, reviewBaseline?: string): Promise<void> {
+    const abs = normalizePath(absPath);
+    await this.reporting.get(abs)?.catch(() => undefined);
+    const reported = this.reported.get(abs);
+    try {
+      if (written === undefined || reported === undefined || written === reported) { return; }
+      this.log.trace?.(`${abs}: the save wrote text it hadn't reported (typing during the save); reporting it`);
+      await this.reportSave(abs, written, undefined, undefined, reviewBaseline, true);
+    } finally {
+      this.reported.delete(abs);
+    }
+  }
+
+  private async reportSave(abs: string, content: string, edits: readonly TrackedEdit[] | undefined, userContent: string | undefined, reviewBaseline: string | undefined, again: boolean): Promise<void> {
     const engine = await this.review.engineFor(abs);
     if (!engine) { return; }
     if (this.conflicted.has(abs)) {
       // The buffer is based on an older disk version. The editor refuses this save ("file is newer") unless the
       // user overwrites; then the write is an external change, reviewed against the baseline like any other.
       this.log.warn(`${abs} changed on disk since it was loaded; not attributing this save (merge it instead)`);
+      this.reported.delete(abs);
       return;
     }
+    // A repeat: attribute against the previous report, which the engine has already taken.
+    const previous = again ? this.reported.get(abs) : undefined;
     let useReview = false;
     if (reviewBaseline !== undefined) {
       const pushed = this.pushed.get(abs);
@@ -290,12 +331,16 @@ export class ReviewController {
     // The editor shows this baseline already: record it first so the engine's event doesn't push it back.
     if (useReview) { this.pushed.set(abs, reviewBaseline!); }
     try {
-      await engine.reportUserSave(abs, content, {
-        ...(edits ? { edits } : {}),
-        ...(userContent !== undefined ? { userContent } : {}),
-        ...(useReview ? { reviewBaseline } : {}),
-      });
+      await engine.reportUserSave(abs, content, previous !== undefined
+        ? { base: previous, userContent: content, ...(useReview ? { reviewBaseline } : {}) }
+        : {
+          ...(edits ? { edits } : {}),
+          ...(userContent !== undefined ? { userContent } : {}),
+          ...(useReview ? { reviewBaseline } : {}),
+        });
+      this.reported.set(abs, content);
     } catch (err) {
+      this.reported.delete(abs);
       this.log.error(`reportUserSave failed for ${abs}`, err);
     }
   }
