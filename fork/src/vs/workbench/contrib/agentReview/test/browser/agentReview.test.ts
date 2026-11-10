@@ -543,16 +543,16 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 	});
 
 	test('Ctrl+Z after Keep of a change the user typed in: pending exactly as before, and its Undo asks again', async () => {
-		model.setValue('One.\nTwo agent.\nThree.\n');
-		const { entry, integration } = await showPending('One.\nTwo.\nThree.\n');
+		model.setValue('One.\nTwo agent\nThree.\n');
+		const { entry, integration } = await showPending('One.\nTwo\nThree.\n');
 		typeAtEndOf(2, ' MINE');
 		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(2).endsWith('MINE') ? d : undefined));
 		await timeout(0);
 		await integration.acceptNearestChange(hunkWidgets()[0]);
-		assert.strictEqual(entry.originalModel.getValue(), 'One.\nTwo agent. MINE\nThree.\n');
+		assert.strictEqual(entry.originalModel.getValue(), 'One.\nTwo agent MINE\nThree.\n');
 		await model.undo(); // the extension then pushes the previous baseline back
-		assert.deepStrictEqual(hunkEvents.at(-1)?.baseline, 'One.\nTwo.\nThree.\n');
-		await service.setBaseline(uri, 'One.\nTwo.\nThree.\n');
+		assert.deepStrictEqual(hunkEvents.at(-1)?.baseline, 'One.\nTwo\nThree.\n');
+		await service.setBaseline(uri, 'One.\nTwo\nThree.\n');
 		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 ? d : undefined));
 		await timeout(0);
 		confirmAnswer = false;
@@ -850,6 +850,14 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 && entry.originalModel.getValue().startsWith('Opening') ? d : undefined));
 		assert.ok(entry.originalModel.getValue().startsWith('Opening sentence.'));
 	});
+	/** Type `text` right after the first `needle` in the buffer, one keystroke (one model edit) at a time. */
+	function typeAfter(needle: string, text: string): void {
+		let offset = model.getValue().indexOf(needle) + needle.length;
+		for (const ch of text) {
+			model.applyEdits([EditOperation.insert(model.getPositionAt(offset++), ch)]);
+		}
+	}
+
 	/** Type `text` at the end of `line`, one keystroke (one model edit) at a time, without waiting for the diff. */
 	function typeAtEndOf(line: number, text: string): void {
 		for (const ch of text) {
@@ -875,13 +883,27 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.strictEqual(model.getValue(), 'The router is a softmax. The gate is learned. ABC\nThis paper asks how the routing works.\n', 'Ctrl+Z brings both back');
 	});
 
-	test('#15: typing at the end of a line the agent rewrote is part of the change: Undo asks, and restores the accepted line', async () => {
+	test('typing at the end of a line the agent rewrote, away from the agent\'s words, is the user\'s: Undo restores the accepted line and keeps it', async () => {
 		// The tester's case (session 5): the agent shortened a long line, the user typed at its end, then Undo.
 		model.setValue('\\section{Method}\nA batch closes when full or at its deadline.\nRequests are padded.\n');
 		const BASE = '\\section{Method}\nA batch closes when it is full or when the oldest request reaches its deadline.\nRequests are padded.\n';
 		const { entry, integration } = await showPending(BASE);
 		typeAtEndOf(2, 'ZZZ');
-		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(2).endsWith('ZZZ') ? d : undefined));
+		const WITH_TYPING = '\\section{Method}\nA batch closes when it is full or when the oldest request reaches its deadline.ZZZ\nRequests are padded.\n';
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && entry.originalModel.getValue() === WITH_TYPING ? d : undefined));
+		await timeout(0);
+
+		await integration.rejectNearestChange(hunkWidgets()[0]);
+		assert.strictEqual(confirms.length, 0, 'nothing typed inside the change: no question');
+		assert.strictEqual(model.getValue(), WITH_TYPING);
+	});
+
+	test('typing right at the agent\'s words is part of the change, also in a long line: Undo asks, and restores the accepted line', async () => {
+		model.setValue('\\section{Method}\nA batch closes when full or at its deadline.\nRequests are padded.\n');
+		const BASE = '\\section{Method}\nA batch closes when it is full or when the oldest request reaches its deadline.\nRequests are padded.\n';
+		const { entry, integration } = await showPending(BASE);
+		typeAfter('or at', ' ZZZ'); // right after the agent's "at"
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(2).includes('ZZZ') ? d : undefined));
 		assert.strictEqual(entry.originalModel.getValue(), BASE);
 		await timeout(0);
 
@@ -891,41 +913,61 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 		assert.strictEqual(model.getValue(), BASE);
 	});
 
-	test('saving never accepts: typing a word away from the agent\'s on its line, or a new line after it, keeps the whole change pending; Keep takes both', async () => {
+	test('typing a word away from the agent\'s on its line, or a new line after it, is the user\'s (folds in); typing at the agent\'s word stays with the change; Keep takes it', async () => {
 		const BASE = 'Intro.\nThe model is small and fast.\nMiddle.\nEnd.\n';
 		model.setValue('Intro.\nThe model is large and fast.\nMiddle.\nEnd.\n');
 		const { entry, integration } = await showPending(BASE);
-		// A word apart from the agent's ("large"): not overlapping its characters, but on its line.
+		// A word apart from the agent's ("large"), on its line: the user's own, as on any other line.
 		model.applyEdits([EditOperation.insert(new Position(2, model.getLineMaxColumn(2) - 1), ' indeed')]);
-		// Enter at the end of the agent's line and a new line.
+		// Enter at the end of the agent's line and a new line: the user's too.
 		model.applyEdits([EditOperation.insert(new Position(2, model.getLineMaxColumn(2)), '\nMy new line.')]);
 		// And a word on a line no change is on: folds in, as before.
 		model.applyEdits([EditOperation.insert(new Position(1, 1), 'My ')]);
-		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && d.changes[0].modified.endLineNumberExclusive === 4 && entry.originalModel.getValue().startsWith('My ') ? d : undefined));
-		assert.strictEqual(entry.originalModel.getValue(), 'My Intro.\nThe model is small and fast.\nMiddle.\nEnd.\n');
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && entry.originalModel.getValue().startsWith('My ') ? d : undefined));
+		assert.strictEqual(entry.originalModel.getValue(), 'My Intro.\nThe model is small and fast indeed.\nMy new line.\nMiddle.\nEnd.\n');
+		// Typing right after the agent's word: part of the change.
+		typeAfter('large', 'ish');
+		await waitForState(entry.diffInfo.map(d => model.getValue().includes('largeish') && d.changes.length === 1 ? d : undefined));
+		assert.strictEqual(entry.originalModel.getValue(), 'My Intro.\nThe model is small and fast indeed.\nMy new line.\nMiddle.\nEnd.\n');
 		const [change] = entry.diffInfo.get().changes;
-		assert.deepStrictEqual([change.original.startLineNumber, change.original.endLineNumberExclusive, change.modified.startLineNumber, change.modified.endLineNumberExclusive], [2, 3, 2, 4], 'the old line against the agent\'s line with the typing, and the new line');
+		assert.deepStrictEqual([change.original.startLineNumber, change.original.endLineNumberExclusive, change.modified.startLineNumber, change.modified.endLineNumberExclusive], [2, 3, 2, 3], 'only the agent\'s line');
 
 		// A new baseline pushed after a save (the engine took the review's own) changes nothing pending; typing is still tracked.
-		await service.setBaseline(uri, 'My Intro.\nThe model is small and fast.\nMiddle.\nEnd.\n');
+		await service.setBaseline(uri, 'My Intro.\nThe model is small and fast indeed.\nMy new line.\nMiddle.\nEnd.\n');
 		assert.strictEqual(entry.changesCount.get(), 1);
 		// A new baseline that differs elsewhere (another change kept from the list) keeps the typing tracked too.
-		await service.setBaseline(uri, 'My Intro.\nThe model is small and fast.\nMiddle.\nEnd!\n');
+		await service.setBaseline(uri, 'My Intro.\nThe model is small and fast indeed.\nMy new line.\nMiddle.\nEnd!\n');
 		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 ? d : undefined));
 		await timeout(0);
 		assert.ok(entry.diffInfo.get().changes.some(c => c.modified.startLineNumber === 2));
+		assert.ok(entry.userTextSpans().some(sp => sp.text.includes('ish')));
 
 		await integration.acceptNearestChange(hunkWidgets().find(w => (w as unknown as { getStartLineNumber(): number | undefined }).getStartLineNumber() === 2)!);
-		assert.strictEqual(entry.originalModel.getValue(), 'My Intro.\nThe model is large and fast indeed.\nMy new line.\nMiddle.\nEnd!\n');
+		assert.strictEqual(entry.originalModel.getValue(), 'My Intro.\nThe model is largeish and fast indeed.\nMy new line.\nMiddle.\nEnd!\n');
+	});
+
+	test('a long, soft-wrapped paragraph is one line: typing far from the agent\'s word in it folds in; an agent deletion doesn\'t take the next line', async () => {
+		const sentence = 'This sentence is long enough to wrap several times in a narrow editor and keeps going.';
+		const BASE = `Intro.\n${sentence} The agent changes one word here.\nMiddle.\nDeleted by the agent.\nNext line.\n`;
+		model.setValue(`Intro.\n${sentence} The agent changed one word here.\nMiddle.\nNext line.\n`);
+		const { entry } = await showPending(BASE);
+		assert.strictEqual(entry.changesCount.get(), 2);
+		// Typing at the start of the paragraph, far from the agent's word, one keystroke at a time.
+		typeAfter('This sentence is', ' really');
+		// And on the line after the deleted one, away from where it was.
+		typeAtEndOf(4, ' Mine.');
+		const EXPECTED = `Intro.\n${sentence.replace('This sentence is', 'This sentence is really')} The agent changes one word here.\nMiddle.\nDeleted by the agent.\nNext line. Mine.\n`;
+		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 && entry.originalModel.getValue() === EXPECTED ? d : undefined));
+		assert.strictEqual(entry.userTextSpans().length, 0, 'nothing typed inside a change');
 	});
 
 	test('Undo of a change the user typed in still asks after a new baseline is pushed', async () => {
-		model.setValue('One.\nTwo agent.\nThree.\nFour agent.\n');
-		const { entry, integration } = await showPending('One.\nTwo.\nThree.\nFour.\n');
+		model.setValue('One.\nTwo agent\nThree.\nFour agent.\n');
+		const { entry, integration } = await showPending('One.\nTwo\nThree.\nFour.\n');
 		typeAtEndOf(2, ' MINE');
 		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 && model.getLineContent(2).endsWith('MINE') ? d : undefined));
 		// The other change is kept from the list: the extension pushes the new baseline.
-		await service.setBaseline(uri, 'One.\nTwo.\nThree.\nFour agent.\n');
+		await service.setBaseline(uri, 'One.\nTwo\nThree.\nFour agent.\n');
 		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 ? d : undefined));
 		await timeout(0);
 		confirmAnswer = false;
@@ -1078,12 +1120,12 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 	});
 
 	test('#43: Undo of a change the user typed in still asks after a window reload or restart, and takes back exactly the change', async () => {
-		// The tester's intro.tex: the agent rewrote two lines (one hunk), the user typed " ZZ" at the end of the second and saved.
+		// The tester's intro.tex: the agent rewrote two lines (one hunk), the user typed " ZZ" right after the agent's words and saved.
 		const BASE = 'Intro.\nKeeps the most important pairs.\nThe proxy is cheap to compute, and it lets the user pick a budget.\n';
 		model.setValue('Intro.\nKeeps the top-scoring pairs.\nThe proxy lets the user pick a budget.\n');
 		const first = await showPending(BASE);
-		typeAtEndOf(3, ' ZZ');
-		await waitForState(first.entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(3).endsWith('ZZ') ? d : undefined));
+		typeAfter('top-scoring', ' ZZ');
+		await waitForState(first.entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(2).includes('ZZ') ? d : undefined));
 		// The save: the extension pushes the engine's baseline, which is the review's own.
 		await service.setBaseline(uri, first.entry.originalModel.getValue());
 		await first.entry.getDiffInfo();
@@ -1113,14 +1155,14 @@ suite('AgentReview: engine baseline rendered by the chat-editing UI', () => {
 	});
 
 	test('#43: typed text is remembered for a file whose entry goes and comes back (extension restart), not for text that was kept', async () => {
-		model.setValue('One.\nTwo agent.\nThree.\n');
-		const { entry, integration } = await showPending('One.\nTwo.\nThree.\n');
+		model.setValue('One.\nTwo agent\nThree.\n');
+		const { entry, integration } = await showPending('One.\nTwo\nThree.\n');
 		typeAtEndOf(2, ' MINE');
 		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(2).endsWith('MINE') ? d : undefined));
 		await entry.getDiffInfo();
 		integration.dispose();
 		service.clear();
-		const again = await showPending('One.\nTwo.\nThree.\n');
+		const again = await showPending('One.\nTwo\nThree.\n');
 		confirmAnswer = false;
 		await again.integration.rejectNearestChange(hunkWidgets()[0]);
 		assert.strictEqual(confirms.length, 1);

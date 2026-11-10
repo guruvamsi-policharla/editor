@@ -221,15 +221,15 @@ export class AgentReviewEntry extends Disposable implements IModifiedFileEntry {
 			this.modifiedModel,
 			this._stateObs,
 			// Disk reloads are agent edits: keep them pending instead of folding them into the baseline.
-			// Typing in the editor is a user edit: folded into the baseline where it is on no line of a pending change.
-			// Typing in a change is part of it until Keep/Undo (saving never accepts it): see foldOnlyOutsideChangedLines.
+			// Typing in the editor is a user edit: folded into the baseline where it doesn't touch a pending change.
+			// Typing that touches a change is part of it until Keep/Undo (saving never accepts it): see foldOnlyOutsideChanges.
 			// Ctrl+Z / Ctrl+Shift+Z of an Undo puts the agent's text back (or removes it again): not typing either.
 			e => isDiskReload(e) || this._isEditorUndoOfUndo(e),
 		));
 		this._changeService.extendToSubwords = true;
 		this._changeService.preserveShortMatchingLines = true;
 		this._changeService.alignSimilarLines = true;
-		this._changeService.foldOnlyOutsideChangedLines = true;
+		this._changeService.foldOnlyOutsideChanges = true;
 
 		this.state = derived(r => this._changeService.diffInfo.read(r).changes.length > 0 ? ModifiedFileEntryState.Modified : this._resolution.read(r));
 		this._register(this._changeService.onDidAcceptOrRejectAllHunks(state => {
