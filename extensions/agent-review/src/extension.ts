@@ -25,6 +25,8 @@ const CORE_REMOVE = '_agentReview.remove';
 const CORE_CLEAR = '_agentReview.clear';
 const CORE_REJECT = '_agentReview.reject';
 const CORE_PUSH_UNDO = '_agentReview.pushUndo';
+/** Longest a save holds back the file's watcher events: core's report budget (1.75 s) plus the write. */
+const WRITE_HOLD_MS = 4000;
 
 /**
  * A review action done here rather than in the editor, as core keeps it on the file's undo stack: Ctrl+Z puts the
@@ -181,26 +183,68 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
   );
+  // File watching: forward every change; the engine decides what is external, ignored or pending. A file being
+  // saved is held back until core says the write happened (`onDidWrite`): the watcher must not see the write
+  // before the save is reported as it was written.
+  const queued = new Set<string>();
+  const writing = new Map<string, NodeJS.Timeout>();
+  let timer: NodeJS.Timeout | undefined;
+  const flush = () => {
+    timer = undefined;
+    const paths = [...queued].filter((p) => !writing.has(p));
+    for (const p of paths) { queued.delete(p); }
+    if (paths.length === 0) { return; }
+    ctl.handleFsEvents(paths).catch((err) => log.error('handling file events failed', err instanceof Error ? err : String(err)));
+  };
+  const onFsEvent = (uri: vscode.Uri) => {
+    if (uri.scheme !== 'file') { return; }
+    queued.add(uri.fsPath);
+    timer ??= setTimeout(flush, 75);
+  };
+  /** Hold back watcher events for a file being saved (bounded, in case its write never comes). */
+  const holdWrite = (p: string) => {
+    clearTimeout(writing.get(p));
+    writing.set(p, setTimeout(() => releaseWrite(p), WRITE_HOLD_MS));
+  };
+  const releaseWrite = (p: string) => {
+    clearTimeout(writing.get(p));
+    if (!writing.delete(p)) { return; }
+    if (queued.has(p)) { timer ??= setTimeout(flush, 0); }
+  };
+  context.subscriptions.push({ dispose: () => { if (timer) { clearTimeout(timer); } for (const t of writing.values()) { clearTimeout(t); } } });
+
   // Saves. In the fork, core reports each save right before the write, after every save participant, with
   // the buffer version the user's own edits ended at: later edits (format on save, code actions on save)
   // are attributed to the formatter. Without core, onWillSaveTextDocument is the best we get, and it may
   // run after formatters, so their edits count as the user's.
   if (hasCore) {
     context.subscriptions.push(
-      vscode.commands.registerCommand('agentReview.ext.onWillWrite', async (e: { uri: CoreUri; userVersion: number; version: number; userText?: string; baseline?: string }) => {
+      vscode.commands.registerCommand('agentReview.ext.onWillWrite', async (e: { uri: CoreUri; userVersion: number; version: number; userText?: string; baseline?: string; again?: boolean }) => {
         const uri = toUri(e.uri);
         if (uri.scheme !== 'file') { return; }
         const doc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
         if (!doc) { return; }
+        holdWrite(uri.fsPath);
         // The document has seen every edit core made (events arrive in order); if not, don't trust the versions.
         const inSync = doc.version === e.version;
         if (!inSync) { log.warn(`save of ${uri.fsPath}: document version ${doc.version}, core ${e.version}; attributing all edits to the user`); }
         const edits = logs.get(uri.toString(), inSync ? e.userVersion : undefined);
-        trace(`${uri.fsPath}: will write version ${e.version} (user edits up to ${e.userVersion}, document at ${doc.version}); edit log: ${edits ? `${edits.length} edits, ${edits.filter((x) => x.origin === 'formatter').length} by the formatter` : 'none'}; user text ${e.userText !== undefined ? 'given' : 'not given'}; review baseline ${e.baseline !== undefined ? 'given' : 'not given'}`);
+        trace(`${uri.fsPath}: will write version ${e.version}${e.again ? ' (reported again: typed during the save)' : ''} (user edits up to ${e.userVersion}, document at ${doc.version}); edit log: ${edits ? `${edits.length} edits, ${edits.filter((x) => x.origin === 'formatter').length} by the formatter` : 'none'}; user text ${e.userText !== undefined ? 'given' : 'not given'}; review baseline ${e.baseline !== undefined ? 'given' : 'not given'}`);
         // The text before save participants ran: given by core when they changed it; else it is what is written.
         const content = doc.getText();
         const userContent = e.userText ?? (e.version === e.userVersion ? content : undefined);
-        await ctl.onWillSave(uri.fsPath, content, edits, userContent, e.baseline);
+        await ctl.onWillSave(uri.fsPath, content, edits, userContent, e.baseline, e.again === true);
+      }),
+      // After the write of a reported save: `text` when it may not be what was reported (see the fork's save participant).
+      vscode.commands.registerCommand('agentReview.ext.onDidWrite', async (e: { uri: CoreUri; text?: string; baseline?: string }) => {
+        const uri = toUri(e.uri);
+        if (uri.scheme !== 'file') { return; }
+        trace(`${uri.fsPath}: written${e.text !== undefined ? ' (text given: it may differ from the report)' : ''}`);
+        try {
+          await ctl.onDidWrite(uri.fsPath, e.text, e.baseline);
+        } finally {
+          releaseWrite(uri.fsPath);
+        }
       }),
     );
   } else {
@@ -215,25 +259,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return review?.engineFor(abs);
   }
 
-  // File watching: forward every change; the engine decides what is external, ignored or pending.
-  const queued = new Set<string>();
-  let timer: NodeJS.Timeout | undefined;
-  const flush = () => {
-    timer = undefined;
-    const paths = [...queued];
-    queued.clear();
-    ctl.handleFsEvents(paths).catch((err) => log.error('handling file events failed', err instanceof Error ? err : String(err)));
-  };
-  const onFsEvent = (uri: vscode.Uri) => {
-    if (uri.scheme !== 'file') { return; }
-    queued.add(uri.fsPath);
-    timer ??= setTimeout(flush, 75);
-  };
   for (const folder of folders) {
     const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, '**/*'));
     context.subscriptions.push(watcher, watcher.onDidCreate(onFsEvent), watcher.onDidChange(onFsEvent), watcher.onDidDelete(onFsEvent));
   }
-  context.subscriptions.push({ dispose: () => timer && clearTimeout(timer) });
 
   // Review list, baseline documents, multi-file diff.
   const baselines = new BaselineContentProvider(ctl);

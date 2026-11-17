@@ -850,10 +850,18 @@ index c0b57e5f..ccf58dbe 100644
  			};
  		}
 diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
-index 309562ec..f1dafaae 100644
+index 309562ec..5d8e84d8 100644
 --- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
 +++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingTextModelChangeService.ts
-@@ -20,7 +20,7 @@ import { LineRange } from '../../../../../editor/common/core/ranges/lineRange.js
+@@ -14,13 +14,14 @@ import { themeColorFromId } from '../../../../../base/common/themables.js';
+ import { assertType } from '../../../../../base/common/types.js';
+ import { URI } from '../../../../../base/common/uri.js';
+ import { EditOperation, ISingleEditOperation } from '../../../../../editor/common/core/editOperation.js';
+-import { StringEdit } from '../../../../../editor/common/core/edits/stringEdit.js';
++import { StringEdit, StringReplacement } from '../../../../../editor/common/core/edits/stringEdit.js';
+ import { IRange, Range } from '../../../../../editor/common/core/range.js';
+ import { LineRange } from '../../../../../editor/common/core/ranges/lineRange.js';
++import { OffsetRange } from '../../../../../editor/common/core/ranges/offsetRange.js';
  import { IDocumentDiff, nullDocumentDiff } from '../../../../../editor/common/diff/documentDiffProvider.js';
  import { DetailedLineRangeMapping } from '../../../../../editor/common/diff/rangeMapping.js';
  import { TextEdit, VersionedExtensionId } from '../../../../../editor/common/languages.js';
@@ -862,7 +870,7 @@ index 309562ec..f1dafaae 100644
  import { ModelDecorationOptions } from '../../../../../editor/common/model/textModel.js';
  import { offsetEditFromContentChanges, offsetEditFromLineRangeMapping, offsetEditToEditOperations } from '../../../../../editor/common/model/textModelStringEdit.js';
  import { IEditorWorkerService } from '../../../../../editor/common/services/editorWorker.js';
-@@ -80,7 +80,22 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -80,7 +81,22 @@ export class ChatEditingTextModelChangeService extends Disposable {
  	public get allEditsAreFromUs() {
  		return this._allEditsAreFromUs;
  	}
@@ -878,15 +886,15 @@ index 309562ec..f1dafaae 100644
 +	public preserveShortMatchingLines = false;
 +	public alignSimilarLines = false;
 +	/**
-+	 * Agent review: an edit on a line of a pending change (or one that inserts or removes lines at its edge) is part of
-+	 * that change, even where it doesn't overlap the AI's own characters. It is never folded into the original, so the
-+	 * whole change stays pending, the edit included, until it is kept or undone.
++	 * Agent review: an edit that overlaps or touches a pending change's text (see `_rebaseOutsideAiEdit`) is part of
++	 * that change. It is never folded into the original, so the whole change stays pending, the edit included, until
++	 * it is kept or undone. Edits elsewhere fold in, also on the change's line.
 +	 */
-+	public foldOnlyOutsideChangedLines = false;
++	public foldOnlyOutsideChanges = false;
  	private _diffOperation: Promise<IDocumentDiff | undefined> | undefined;
  	private _diffOperationIds: number = 0;
  
-@@ -118,6 +133,19 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -118,6 +134,19 @@ export class ChatEditingTextModelChangeService extends Disposable {
  
  	private _originalToModifiedEdit: StringEdit = StringEdit.empty;
  
@@ -906,7 +914,7 @@ index 309562ec..f1dafaae 100644
  	private lineChangeCount: number = 0;
  	private linesAdded: number = 0;
  	private linesRemoved: number = 0;
-@@ -126,7 +154,8 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -126,7 +155,8 @@ export class ChatEditingTextModelChangeService extends Disposable {
  		private readonly originalModel: ITextModel,
  		private readonly modifiedModel: ITextModel,
  		private readonly state: IObservable<ModifiedFileEntryState>,
@@ -916,7 +924,7 @@ index 309562ec..f1dafaae 100644
  		@IEditorWorkerService private readonly _editorWorkerService: IEditorWorkerService,
  		@IAccessibilitySignalService private readonly _accessibilitySignalService: IAccessibilitySignalService,
  	) {
-@@ -334,13 +363,93 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -334,13 +364,93 @@ export class ChatEditingTextModelChangeService extends Disposable {
  	private _reset() {
  		this._originalToModifiedEdit = StringEdit.empty;
  		this._diffInfo.set(nullDocumentDiff, undefined);
@@ -1010,7 +1018,7 @@ index 309562ec..f1dafaae 100644
  			didChange = true;
  		}
  		if (newModified !== undefined && this.modifiedModel.getValue() !== newModified) {
-@@ -357,7 +466,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -357,7 +467,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
  
  	private _mirrorEdits(event: IModelContentChangedEvent) {
  		const edit = offsetEditFromContentChanges(event.changes);
@@ -1019,12 +1027,12 @@ index 309562ec..f1dafaae 100644
  
  		if (this._isEditFromUs || isExternalEdit) {
  			const e_sum = this._originalToModifiedEdit;
-@@ -386,15 +495,21 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -386,15 +496,30 @@ export class ChatEditingTextModelChangeService extends Disposable {
  			const e_ai = this._originalToModifiedEdit;
  			const e_user = edit;
  
 -			const e_user_r = e_user.tryRebase(e_ai.inverse(this.originalModel.getValue()));
-+			const e_user_r = this.foldOnlyOutsideChangedLines && this._touchesChangedLines(e_ai, event) ? undefined : e_user.tryRebase(e_ai.inverse(this.originalModel.getValue()));
++			const e_user_r = this.foldOnlyOutsideChanges ? this._rebaseOutsideAiEdit(e_ai, e_user) : e_user.tryRebase(e_ai.inverse(this.originalModel.getValue()));
  
  			if (e_user_r === undefined) {
  				// user edits overlaps/conflicts with AI edits
@@ -1040,53 +1048,56 @@ index 309562ec..f1dafaae 100644
 +				// right after text the AI inserted. Until the next diff, the following keystrokes were then mapped
 +				// into the original as if the AI had changed nothing, at the wrong place: #15.)
 +				this._originalToModifiedEdit = e_user_r.inverse(originalBefore).compose(e_ai).compose(e_user);
++				if (this.foldOnlyOutsideChanges) {
++					// The user's edit touches none of the AI's: the AI's edit is the same, only moved. (The composition above is
++					// exact but can join the AI's text with the user's into one replacement, so that the next keystroke would
++					// look like it touches the change.)
++					const moved = e_ai.rebaseSkipConflicting(e_user_r);
++					if (moved.apply(this.originalModel.getValue()) === this.modifiedModel.getValue()) {
++						this._originalToModifiedEdit = moved;
++					}
++				}
  			}
  
  			this._allEditsAreFromUs = false;
-@@ -406,11 +521,91 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -406,11 +531,85 @@ export class ChatEditingTextModelChangeService extends Disposable {
  		}
  	}
  
 -	private async _keepHunk(change: DetailedLineRangeMapping): Promise<boolean> {
 +	/**
-+	 * Whether a user edit is on a line the AI changed: the lines each one spans (in the text before the edit) overlap.
-+	 * A range that ends right after a line break doesn't reach the next line; an empty one is on its line.
++	 * Agent review: the user's edit in the original's coordinates, or undefined if it touches a pending change: it
++	 * overlaps the AI's text or is right next to it (typing on at its edge), or is at the point where the AI deleted
++	 * text. Anything else is the user's own and folds into the original, also on the line of a change: a long paragraph
++	 * is one line, however it wraps, and the line after deleted lines is not part of the deletion.
 +	 */
-+	private _touchesChangedLines(e_ai: StringEdit, event: IModelContentChangedEvent): boolean {
-+		if (e_ai.isEmpty()) {
-+			return false;
-+		}
-+		const before = e_ai.apply(this.originalModel.getValue());
-+		const lineStarts = [0];
-+		for (let i = before.indexOf('\n'); i !== -1; i = before.indexOf('\n', i + 1)) {
-+			lineStarts.push(i + 1);
-+		}
-+		const lineOf = (offset: number) => {
-+			let lo = 0;
-+			let hi = lineStarts.length - 1;
-+			while (lo < hi) {
-+				const mid = (lo + hi + 1) >> 1;
-+				if (lineStarts[mid] <= offset) {
-+					lo = mid;
-+				} else {
-+					hi = mid - 1;
-+				}
-+			}
-+			return lo + 1;
-+		};
-+		const spans: [number, number][] = [];
++	private _rebaseOutsideAiEdit(e_ai: StringEdit, e_user: StringEdit): StringEdit | undefined {
++		// The AI's replacements in the coordinates of the text the user edited (the modified model before the edit).
++		const ai: { start: number; end: number; original: OffsetRange }[] = [];
 +		let delta = 0;
 +		for (const r of e_ai.replacements) {
 +			const start = r.replaceRange.start + delta;
-+			const end = start + r.newText.length;
 +			delta += r.newText.length - r.replaceRange.length;
-+			spans.push([lineOf(start), end > start && before[end - 1] === '\n' ? lineOf(end - 1) : lineOf(end)]);
++			ai.push({ start, end: start + r.newText.length, original: r.replaceRange });
 +		}
-+		return event.changes.some(c => {
-+			const first = c.range.startLineNumber;
-+			const last = !Range.isEmpty(c.range) && c.range.endColumn === 1 ? c.range.endLineNumber - 1 : c.range.endLineNumber;
-+			return spans.some(([a, b]) => first <= b && a <= last);
-+		});
++		const result: StringReplacement[] = [];
++		for (const u of e_user.replacements) {
++			const uStart = u.replaceRange.start;
++			const uEnd = u.replaceRange.endExclusive;
++			// original offset - modified offset after the AI replacements before the user's edit
++			let shift = 0;
++			for (const a of ai) {
++				if (uStart <= a.end && a.start <= uEnd) {
++					return undefined; // overlaps or touches the AI's text (or its deletion point)
++				}
++				if (a.end >= uStart) {
++					break; // this one and the rest come after the user's edit
++				}
++				shift = a.original.endExclusive - a.end;
++			}
++			result.push(new StringReplacement(new OffsetRange(uStart + shift, uEnd + shift), u.newText));
++		}
++		return new StringEdit(result);
 +	}
 +
 +	/** Remember the text an edit (that touches a pending change) inserted, in the modified model's coordinates. */
@@ -1137,7 +1148,7 @@ index 309562ec..f1dafaae 100644
  		const edits: ISingleEditOperation[] = [];
  		for (const edit of change.innerChanges ?? []) {
  			const newText = this.modifiedModel.getValueInRange(edit.modifiedRange);
-@@ -426,9 +621,11 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -426,9 +625,11 @@ export class ChatEditingTextModelChangeService extends Disposable {
  	}
  
  	private async _undoHunk(change: DetailedLineRangeMapping): Promise<boolean> {
@@ -1150,7 +1161,7 @@ index 309562ec..f1dafaae 100644
  		const edits: ISingleEditOperation[] = [];
  		for (const edit of change.innerChanges ?? []) {
  			const newText = this.originalModel.getValueInRange(edit.originalRange);
-@@ -487,6 +684,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -487,6 +688,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
  		}
  
  		if (this.state.get() !== ModifiedFileEntryState.Modified) {
@@ -1158,7 +1169,7 @@ index 309562ec..f1dafaae 100644
  			this._diffInfo.set(nullDocumentDiff, undefined);
  			this._originalToModifiedEdit = StringEdit.empty;
  			return nullDocumentDiff;
-@@ -501,7 +699,10 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -501,7 +703,10 @@ export class ChatEditingTextModelChangeService extends Disposable {
  			{
  				ignoreTrimWhitespace: false, // NEVER ignore whitespace so that undo/accept edits are correct and so that all changes (1 of 2) are spelled out
  				computeMoves: false,
@@ -1170,7 +1181,7 @@ index 309562ec..f1dafaae 100644
  			},
  			'advanced'
  		);
-@@ -513,6 +714,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
+@@ -513,6 +718,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
  		// only update the diff if the documents didn't change in the meantime
  		if (this.modifiedModel.getVersionId() === docVersionNow && this.originalModel.getVersionId() === snapshotVersionNow) {
  			const diff2 = diff ?? nullDocumentDiff;

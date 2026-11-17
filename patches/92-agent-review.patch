@@ -157,7 +157,7 @@ index 00000000..dac9d8f2
 +registerWorkbenchContribution2(AgentReviewOrphanedMerges.ID, AgentReviewOrphanedMerges, WorkbenchPhase.AfterRestored);
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
 new file mode 100644
-index 00000000..c3c85d3a
+index 00000000..4fb4ccf4
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewEntry.ts
 @@ -0,0 +1,527 @@
@@ -384,15 +384,15 @@ index 00000000..c3c85d3a
 +			this.modifiedModel,
 +			this._stateObs,
 +			// Disk reloads are agent edits: keep them pending instead of folding them into the baseline.
-+			// Typing in the editor is a user edit: folded into the baseline where it is on no line of a pending change.
-+			// Typing in a change is part of it until Keep/Undo (saving never accepts it): see foldOnlyOutsideChangedLines.
++			// Typing in the editor is a user edit: folded into the baseline where it doesn't touch a pending change.
++			// Typing that touches a change is part of it until Keep/Undo (saving never accepts it): see foldOnlyOutsideChanges.
 +			// Ctrl+Z / Ctrl+Shift+Z of an Undo puts the agent's text back (or removes it again): not typing either.
 +			e => isDiskReload(e) || this._isEditorUndoOfUndo(e),
 +		));
 +		this._changeService.extendToSubwords = true;
 +		this._changeService.preserveShortMatchingLines = true;
 +		this._changeService.alignSimilarLines = true;
-+		this._changeService.foldOnlyOutsideChangedLines = true;
++		this._changeService.foldOnlyOutsideChanges = true;
 +
 +		this.state = derived(r => this._changeService.diffInfo.read(r).changes.length > 0 ? ModifiedFileEntryState.Modified : this._resolution.read(r));
 +		this._register(this._changeService.onDidAcceptOrRejectAllHunks(state => {
@@ -840,10 +840,10 @@ index 00000000..77cb4f5b
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/browser/agentReviewSaveParticipant.ts b/src/vs/workbench/contrib/agentReview/browser/agentReviewSaveParticipant.ts
 new file mode 100644
-index 00000000..0389d525
+index 00000000..c6e8df0e
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/browser/agentReviewSaveParticipant.ts
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,183 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -862,13 +862,24 @@ index 00000000..0389d525
 +// them in elsewhere. `userText` lets the engine find them by diffing (user text -> written text) even
 +// when the extension's edit log or document version can't be trusted. `baseline` is the review's own
 +// baseline (the original side) when the file is under review: it followed the typing and formatting live
-+// (edits on no line of a pending change folded in, the rest pending with their change), so the engine
++// (edits that don't touch a pending change folded in, the rest pending with their change), so the engine
 +// takes it as is and both agree on what is pending. Saving never accepts any part of a change.
++//
++// The user can keep typing while the extension is told: VS Code writes the buffer as it is once the
++// participants are done (it reads the version again after them), not as it was reported. Keystrokes
++// that landed in between reached the disk unreported, and the engine took them for an agent's write
++// (pending agent text in the middle of the user's sentence, and a false "changed on disk" conflict).
++// So the report is repeated (`again`) until the buffer stays as reported, and after the write
++// `agentReview.ext.onDidWrite({ uri, text?, baseline? })` says that the write happened; `text` is what
++// was written when it may differ from the last report (it timed out, or the user kept typing through
++// every repeat), so the extension can report it before the file watcher sees the write.
 +
 +import { raceTimeout } from '../../../../base/common/async.js';
-+import { Disposable } from '../../../../base/common/lifecycle.js';
++import { Event } from '../../../../base/common/event.js';
++import { Disposable, DisposableMap } from '../../../../base/common/lifecycle.js';
 +import { ResourceMap } from '../../../../base/common/map.js';
 +import { URI } from '../../../../base/common/uri.js';
++import { ITextModel } from '../../../../editor/common/model.js';
 +import { ICommandService } from '../../../../platform/commands/common/commands.js';
 +import { ILogService } from '../../../../platform/log/common/log.js';
 +import { IWorkbenchContribution } from '../../../common/contributions.js';
@@ -886,10 +897,26 @@ index 00000000..0389d525
 +	readonly userText?: string;
 +	/** The review's baseline (original side) as of this write, when the file has pending changes; else omitted. */
 +	readonly baseline?: string;
++	/**
++	 * A repeat of this save's report: the user typed while the previous one was delivered, so the buffer that is
++	 * written has more than the previous report. The text since that report is the user's typing.
++	 */
++	readonly again?: boolean;
 +}
 +
-+/** Same budget the extension host gets for onWillSaveTextDocument. */
++/** Payload of `agentReview.ext.onDidWrite`: a save reported with `onWillWrite` was written. */
++export interface IAgentReviewDidWriteEvent {
++	readonly uri: URI;
++	/** What was written, when it may differ from the last `onWillWrite` report; else omitted (it was exactly that). */
++	readonly text?: string;
++	/** With `text`, the review's baseline when it is exactly for `text` (the buffer is still as written). */
++	readonly baseline?: string;
++}
++
++/** Same budget the extension host gets for onWillSaveTextDocument (all the reports of one save together). */
 +const WILL_WRITE_TIMEOUT_MS = 1750;
++/** Reports of one save at most, while the user keeps typing during them. */
++const MAX_WILL_WRITE_REPORTS = 4;
 +
 +export class AgentReviewSaveParticipants extends Disposable implements IWorkbenchContribution {
 +
@@ -898,19 +925,23 @@ index 00000000..0389d525
 +	static readonly LAST = 1_000_000;
 +
 +	private readonly _userVersions = new ResourceMap<{ readonly version: number; readonly text: string }>();
++	/** Saves reported to the extension and not written yet. `exact`: the buffer stayed as last reported. */
++	private readonly _reported = new ResourceMap<{ readonly exact: boolean }>();
++	/** Per file: waits for the write of the save reported last. */
++	private readonly _writeListeners = this._register(new DisposableMap<string>());
 +
 +	constructor(
-+		@ITextFileService textFileService: ITextFileService,
++		@ITextFileService private readonly _textFileService: ITextFileService,
 +		@ICommandService private readonly _commandService: ICommandService,
 +		@ILogService private readonly _logService: ILogService,
 +		@IAgentReviewService private readonly _agentReviewService: IAgentReviewService,
 +	) {
 +		super();
-+		this._register(textFileService.files.addSaveParticipant({
++		this._register(_textFileService.files.addSaveParticipant({
 +			ordinal: AgentReviewSaveParticipants.FIRST,
 +			participate: async model => this._willParticipate(model),
 +		}));
-+		this._register(textFileService.files.addSaveParticipant({
++		this._register(_textFileService.files.addSaveParticipant({
 +			ordinal: AgentReviewSaveParticipants.LAST,
 +			participate: model => this._willWrite(model),
 +		}));
@@ -925,23 +956,74 @@ index 00000000..0389d525
 +	private async _willWrite(model: ITextFileEditorModel): Promise<void> {
 +		const user = this._userVersions.get(model.resource);
 +		this._userVersions.delete(model.resource);
++		this._reported.delete(model.resource);
 +		if (user === undefined || !model.textEditorModel) {
 +			return;
 +		}
-+		const version = model.textEditorModel.getVersionId();
-+		const baseline = this._agentReviewService.getEntry(model.resource)?.originalModel.getValue();
-+		const event: IAgentReviewWillWriteEvent = {
-+			uri: model.resource,
-+			userVersion: user.version,
-+			version,
-+			...(version === user.version ? {} : { userText: user.text }),
-+			...(baseline === undefined ? {} : { baseline }),
-+		};
++		// Bounded: a slow or missing extension must never block saving.
++		const deadline = Date.now() + WILL_WRITE_TIMEOUT_MS;
++		for (let report = 0; ; report++) {
++			const textModel: ITextModel | null = model.textEditorModel;
++			if (!textModel) {
++				return;
++			}
++			const version: number = textModel.getVersionId();
++			const baseline = this._agentReviewService.getEntry(model.resource)?.originalModel.getValue();
++			const event: IAgentReviewWillWriteEvent = {
++				uri: model.resource,
++				userVersion: user.version,
++				version,
++				...(version === user.version ? {} : { userText: user.text }),
++				...(baseline === undefined ? {} : { baseline }),
++				...(report === 0 ? {} : { again: true }),
++			};
++			let delivered: boolean;
++			try {
++				delivered = await raceTimeout(this._commandService.executeCommand('agentReview.ext.onWillWrite', event).then(() => true), Math.max(0, deadline - Date.now())) === true;
++			} catch (err) {
++				this._logService.trace('[agentReview] onWillWrite not delivered', err);
++				return; // no extension to tell
++			}
++			// Exact when nothing was typed meanwhile: from here to the write there is no room for a keystroke.
++			const exact = delivered && model.textEditorModel?.getVersionId() === version;
++			if (exact || !delivered || report + 1 >= MAX_WILL_WRITE_REPORTS) {
++				this._reported.set(model.resource, { exact });
++				this._writeListeners.set(model.resource.toString(), Event.once(model.onDidSave)(() => {
++					this._writeListeners.deleteAndDispose(model.resource.toString());
++					this._didWrite(model);
++				}));
++				return;
++			}
++			// The user typed while the extension was told. VS Code writes the buffer as it is now: report it again.
++		}
++	}
++
++	/** A save we reported was written: tell the extension, with what was written if the report may not match it. */
++	private async _didWrite(model: ITextFileEditorModel): Promise<void> {
++		const reported = this._reported.get(model.resource);
++		if (!reported) {
++			return; // not reported (a save that skipped participants: an Undo in the review UI)
++		}
++		this._reported.delete(model.resource);
++		let event: IAgentReviewDidWriteEvent = { uri: model.resource };
++		if (!reported.exact) {
++			// A clean buffer is what was written; one typed in since then isn't, so read the file.
++			const buffer = !model.isDirty() ? model.textEditorModel?.getValue() : undefined;
++			let text = buffer;
++			if (text === undefined) {
++				try {
++					text = (await this._textFileService.read(model.resource)).value;
++				} catch (err) {
++					this._logService.trace('[agentReview] could not read what was written', err);
++				}
++			}
++			const baseline = buffer === undefined ? undefined : this._agentReviewService.getEntry(model.resource)?.originalModel.getValue();
++			event = { uri: model.resource, ...(text === undefined ? {} : { text }), ...(baseline === undefined ? {} : { baseline }) };
++		}
 +		try {
-+			// Bounded: a slow or missing extension must never block saving.
-+			await raceTimeout(this._commandService.executeCommand('agentReview.ext.onWillWrite', event), WILL_WRITE_TIMEOUT_MS);
++			await this._commandService.executeCommand('agentReview.ext.onDidWrite', event);
 +		} catch (err) {
-+			this._logService.trace('[agentReview] onWillWrite not delivered', err);
++			this._logService.trace('[agentReview] onDidWrite not delivered', err);
 +		}
 +	}
 +}
@@ -1565,10 +1647,10 @@ index 00000000..315b3f9c
 +}
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
 new file mode 100644
-index 00000000..230616db
+index 00000000..0df2e2fd
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReview.test.ts
-@@ -0,0 +1,1189 @@
+@@ -0,0 +1,1231 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -2114,16 +2196,16 @@ index 00000000..230616db
 +	});
 +
 +	test('Ctrl+Z after Keep of a change the user typed in: pending exactly as before, and its Undo asks again', async () => {
-+		model.setValue('One.\nTwo agent.\nThree.\n');
-+		const { entry, integration } = await showPending('One.\nTwo.\nThree.\n');
++		model.setValue('One.\nTwo agent\nThree.\n');
++		const { entry, integration } = await showPending('One.\nTwo\nThree.\n');
 +		typeAtEndOf(2, ' MINE');
 +		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(2).endsWith('MINE') ? d : undefined));
 +		await timeout(0);
 +		await integration.acceptNearestChange(hunkWidgets()[0]);
-+		assert.strictEqual(entry.originalModel.getValue(), 'One.\nTwo agent. MINE\nThree.\n');
++		assert.strictEqual(entry.originalModel.getValue(), 'One.\nTwo agent MINE\nThree.\n');
 +		await model.undo(); // the extension then pushes the previous baseline back
-+		assert.deepStrictEqual(hunkEvents.at(-1)?.baseline, 'One.\nTwo.\nThree.\n');
-+		await service.setBaseline(uri, 'One.\nTwo.\nThree.\n');
++		assert.deepStrictEqual(hunkEvents.at(-1)?.baseline, 'One.\nTwo\nThree.\n');
++		await service.setBaseline(uri, 'One.\nTwo\nThree.\n');
 +		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 ? d : undefined));
 +		await timeout(0);
 +		confirmAnswer = false;
@@ -2421,6 +2503,14 @@ index 00000000..230616db
 +		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 && entry.originalModel.getValue().startsWith('Opening') ? d : undefined));
 +		assert.ok(entry.originalModel.getValue().startsWith('Opening sentence.'));
 +	});
++	/** Type `text` right after the first `needle` in the buffer, one keystroke (one model edit) at a time. */
++	function typeAfter(needle: string, text: string): void {
++		let offset = model.getValue().indexOf(needle) + needle.length;
++		for (const ch of text) {
++			model.applyEdits([EditOperation.insert(model.getPositionAt(offset++), ch)]);
++		}
++	}
++
 +	/** Type `text` at the end of `line`, one keystroke (one model edit) at a time, without waiting for the diff. */
 +	function typeAtEndOf(line: number, text: string): void {
 +		for (const ch of text) {
@@ -2446,13 +2536,27 @@ index 00000000..230616db
 +		assert.strictEqual(model.getValue(), 'The router is a softmax. The gate is learned. ABC\nThis paper asks how the routing works.\n', 'Ctrl+Z brings both back');
 +	});
 +
-+	test('#15: typing at the end of a line the agent rewrote is part of the change: Undo asks, and restores the accepted line', async () => {
++	test('typing at the end of a line the agent rewrote, away from the agent\'s words, is the user\'s: Undo restores the accepted line and keeps it', async () => {
 +		// The tester's case (session 5): the agent shortened a long line, the user typed at its end, then Undo.
 +		model.setValue('\\section{Method}\nA batch closes when full or at its deadline.\nRequests are padded.\n');
 +		const BASE = '\\section{Method}\nA batch closes when it is full or when the oldest request reaches its deadline.\nRequests are padded.\n';
 +		const { entry, integration } = await showPending(BASE);
 +		typeAtEndOf(2, 'ZZZ');
-+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(2).endsWith('ZZZ') ? d : undefined));
++		const WITH_TYPING = '\\section{Method}\nA batch closes when it is full or when the oldest request reaches its deadline.ZZZ\nRequests are padded.\n';
++		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && entry.originalModel.getValue() === WITH_TYPING ? d : undefined));
++		await timeout(0);
++
++		await integration.rejectNearestChange(hunkWidgets()[0]);
++		assert.strictEqual(confirms.length, 0, 'nothing typed inside the change: no question');
++		assert.strictEqual(model.getValue(), WITH_TYPING);
++	});
++
++	test('typing right at the agent\'s words is part of the change, also in a long line: Undo asks, and restores the accepted line', async () => {
++		model.setValue('\\section{Method}\nA batch closes when full or at its deadline.\nRequests are padded.\n');
++		const BASE = '\\section{Method}\nA batch closes when it is full or when the oldest request reaches its deadline.\nRequests are padded.\n';
++		const { entry, integration } = await showPending(BASE);
++		typeAfter('or at', ' ZZZ'); // right after the agent's "at"
++		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(2).includes('ZZZ') ? d : undefined));
 +		assert.strictEqual(entry.originalModel.getValue(), BASE);
 +		await timeout(0);
 +
@@ -2462,41 +2566,61 @@ index 00000000..230616db
 +		assert.strictEqual(model.getValue(), BASE);
 +	});
 +
-+	test('saving never accepts: typing a word away from the agent\'s on its line, or a new line after it, keeps the whole change pending; Keep takes both', async () => {
++	test('typing a word away from the agent\'s on its line, or a new line after it, is the user\'s (folds in); typing at the agent\'s word stays with the change; Keep takes it', async () => {
 +		const BASE = 'Intro.\nThe model is small and fast.\nMiddle.\nEnd.\n';
 +		model.setValue('Intro.\nThe model is large and fast.\nMiddle.\nEnd.\n');
 +		const { entry, integration } = await showPending(BASE);
-+		// A word apart from the agent's ("large"): not overlapping its characters, but on its line.
++		// A word apart from the agent's ("large"), on its line: the user's own, as on any other line.
 +		model.applyEdits([EditOperation.insert(new Position(2, model.getLineMaxColumn(2) - 1), ' indeed')]);
-+		// Enter at the end of the agent's line and a new line.
++		// Enter at the end of the agent's line and a new line: the user's too.
 +		model.applyEdits([EditOperation.insert(new Position(2, model.getLineMaxColumn(2)), '\nMy new line.')]);
 +		// And a word on a line no change is on: folds in, as before.
 +		model.applyEdits([EditOperation.insert(new Position(1, 1), 'My ')]);
-+		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && d.changes[0].modified.endLineNumberExclusive === 4 && entry.originalModel.getValue().startsWith('My ') ? d : undefined));
-+		assert.strictEqual(entry.originalModel.getValue(), 'My Intro.\nThe model is small and fast.\nMiddle.\nEnd.\n');
++		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && entry.originalModel.getValue().startsWith('My ') ? d : undefined));
++		assert.strictEqual(entry.originalModel.getValue(), 'My Intro.\nThe model is small and fast indeed.\nMy new line.\nMiddle.\nEnd.\n');
++		// Typing right after the agent's word: part of the change.
++		typeAfter('large', 'ish');
++		await waitForState(entry.diffInfo.map(d => model.getValue().includes('largeish') && d.changes.length === 1 ? d : undefined));
++		assert.strictEqual(entry.originalModel.getValue(), 'My Intro.\nThe model is small and fast indeed.\nMy new line.\nMiddle.\nEnd.\n');
 +		const [change] = entry.diffInfo.get().changes;
-+		assert.deepStrictEqual([change.original.startLineNumber, change.original.endLineNumberExclusive, change.modified.startLineNumber, change.modified.endLineNumberExclusive], [2, 3, 2, 4], 'the old line against the agent\'s line with the typing, and the new line');
++		assert.deepStrictEqual([change.original.startLineNumber, change.original.endLineNumberExclusive, change.modified.startLineNumber, change.modified.endLineNumberExclusive], [2, 3, 2, 3], 'only the agent\'s line');
 +
 +		// A new baseline pushed after a save (the engine took the review's own) changes nothing pending; typing is still tracked.
-+		await service.setBaseline(uri, 'My Intro.\nThe model is small and fast.\nMiddle.\nEnd.\n');
++		await service.setBaseline(uri, 'My Intro.\nThe model is small and fast indeed.\nMy new line.\nMiddle.\nEnd.\n');
 +		assert.strictEqual(entry.changesCount.get(), 1);
 +		// A new baseline that differs elsewhere (another change kept from the list) keeps the typing tracked too.
-+		await service.setBaseline(uri, 'My Intro.\nThe model is small and fast.\nMiddle.\nEnd!\n');
++		await service.setBaseline(uri, 'My Intro.\nThe model is small and fast indeed.\nMy new line.\nMiddle.\nEnd!\n');
 +		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 ? d : undefined));
 +		await timeout(0);
 +		assert.ok(entry.diffInfo.get().changes.some(c => c.modified.startLineNumber === 2));
++		assert.ok(entry.userTextSpans().some(sp => sp.text.includes('ish')));
 +
 +		await integration.acceptNearestChange(hunkWidgets().find(w => (w as unknown as { getStartLineNumber(): number | undefined }).getStartLineNumber() === 2)!);
-+		assert.strictEqual(entry.originalModel.getValue(), 'My Intro.\nThe model is large and fast indeed.\nMy new line.\nMiddle.\nEnd!\n');
++		assert.strictEqual(entry.originalModel.getValue(), 'My Intro.\nThe model is largeish and fast indeed.\nMy new line.\nMiddle.\nEnd!\n');
++	});
++
++	test('a long, soft-wrapped paragraph is one line: typing far from the agent\'s word in it folds in; an agent deletion doesn\'t take the next line', async () => {
++		const sentence = 'This sentence is long enough to wrap several times in a narrow editor and keeps going.';
++		const BASE = `Intro.\n${sentence} The agent changes one word here.\nMiddle.\nDeleted by the agent.\nNext line.\n`;
++		model.setValue(`Intro.\n${sentence} The agent changed one word here.\nMiddle.\nNext line.\n`);
++		const { entry } = await showPending(BASE);
++		assert.strictEqual(entry.changesCount.get(), 2);
++		// Typing at the start of the paragraph, far from the agent's word, one keystroke at a time.
++		typeAfter('This sentence is', ' really');
++		// And on the line after the deleted one, away from where it was.
++		typeAtEndOf(4, ' Mine.');
++		const EXPECTED = `Intro.\n${sentence.replace('This sentence is', 'This sentence is really')} The agent changes one word here.\nMiddle.\nDeleted by the agent.\nNext line. Mine.\n`;
++		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 && entry.originalModel.getValue() === EXPECTED ? d : undefined));
++		assert.strictEqual(entry.userTextSpans().length, 0, 'nothing typed inside a change');
 +	});
 +
 +	test('Undo of a change the user typed in still asks after a new baseline is pushed', async () => {
-+		model.setValue('One.\nTwo agent.\nThree.\nFour agent.\n');
-+		const { entry, integration } = await showPending('One.\nTwo.\nThree.\nFour.\n');
++		model.setValue('One.\nTwo agent\nThree.\nFour agent.\n');
++		const { entry, integration } = await showPending('One.\nTwo\nThree.\nFour.\n');
 +		typeAtEndOf(2, ' MINE');
 +		await waitForState(entry.diffInfo.map(d => d.changes.length === 2 && model.getLineContent(2).endsWith('MINE') ? d : undefined));
 +		// The other change is kept from the list: the extension pushes the new baseline.
-+		await service.setBaseline(uri, 'One.\nTwo.\nThree.\nFour agent.\n');
++		await service.setBaseline(uri, 'One.\nTwo\nThree.\nFour agent.\n');
 +		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 ? d : undefined));
 +		await timeout(0);
 +		confirmAnswer = false;
@@ -2649,12 +2773,12 @@ index 00000000..230616db
 +	});
 +
 +	test('#43: Undo of a change the user typed in still asks after a window reload or restart, and takes back exactly the change', async () => {
-+		// The tester's intro.tex: the agent rewrote two lines (one hunk), the user typed " ZZ" at the end of the second and saved.
++		// The tester's intro.tex: the agent rewrote two lines (one hunk), the user typed " ZZ" right after the agent's words and saved.
 +		const BASE = 'Intro.\nKeeps the most important pairs.\nThe proxy is cheap to compute, and it lets the user pick a budget.\n';
 +		model.setValue('Intro.\nKeeps the top-scoring pairs.\nThe proxy lets the user pick a budget.\n');
 +		const first = await showPending(BASE);
-+		typeAtEndOf(3, ' ZZ');
-+		await waitForState(first.entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(3).endsWith('ZZ') ? d : undefined));
++		typeAfter('top-scoring', ' ZZ');
++		await waitForState(first.entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(2).includes('ZZ') ? d : undefined));
 +		// The save: the extension pushes the engine's baseline, which is the review's own.
 +		await service.setBaseline(uri, first.entry.originalModel.getValue());
 +		await first.entry.getDiffInfo();
@@ -2684,14 +2808,14 @@ index 00000000..230616db
 +	});
 +
 +	test('#43: typed text is remembered for a file whose entry goes and comes back (extension restart), not for text that was kept', async () => {
-+		model.setValue('One.\nTwo agent.\nThree.\n');
-+		const { entry, integration } = await showPending('One.\nTwo.\nThree.\n');
++		model.setValue('One.\nTwo agent\nThree.\n');
++		const { entry, integration } = await showPending('One.\nTwo\nThree.\n');
 +		typeAtEndOf(2, ' MINE');
 +		await waitForState(entry.diffInfo.map(d => d.changes.length === 1 && model.getLineContent(2).endsWith('MINE') ? d : undefined));
 +		await entry.getDiffInfo();
 +		integration.dispose();
 +		service.clear();
-+		const again = await showPending('One.\nTwo.\nThree.\n');
++		const again = await showPending('One.\nTwo\nThree.\n');
 +		confirmAnswer = false;
 +		await again.integration.rejectNearestChange(hunkWidgets()[0]);
 +		assert.strictEqual(confirms.length, 1);
@@ -2899,10 +3023,10 @@ index 00000000..1ff7019e
 +});
 diff --git a/src/vs/workbench/contrib/agentReview/test/browser/agentReviewSaveParticipant.test.ts b/src/vs/workbench/contrib/agentReview/test/browser/agentReviewSaveParticipant.test.ts
 new file mode 100644
-index 00000000..b69bad53
+index 00000000..9872a263
 --- /dev/null
 +++ b/src/vs/workbench/contrib/agentReview/test/browser/agentReviewSaveParticipant.test.ts
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,213 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -2932,7 +3056,7 @@ index 00000000..b69bad53
 +import { IResolvedTextFileEditorModel, ITextFileSaveParticipant } from '../../../../services/textfile/common/textfiles.js';
 +import { TestServiceAccessor, workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
 +import { SaveParticipantsContribution } from '../../../codeEditor/browser/saveParticipants.js';
-+import { AgentReviewSaveParticipants, IAgentReviewWillWriteEvent } from '../../browser/agentReviewSaveParticipant.js';
++import { AgentReviewSaveParticipants, IAgentReviewDidWriteEvent, IAgentReviewWillWriteEvent } from '../../browser/agentReviewSaveParticipant.js';
 +import { IAgentReviewService } from '../../browser/agentReviewService.js';
 +import { AgentReviewEntry } from '../../browser/agentReviewEntry.js';
 +
@@ -2942,12 +3066,17 @@ index 00000000..b69bad53
 +	let instantiationService: TestInstantiationService;
 +	let accessor: TestServiceAccessor;
 +	let events: { event: IAgentReviewWillWriteEvent; text: string }[];
++	let didWrites: IAgentReviewDidWriteEvent[];
++	/** Runs inside the extension's onWillWrite handler (e.g. the user typing while it is delivered). */
++	let onWillWrite: (() => Promise<void> | void) | undefined;
 +	let model: IResolvedTextFileEditorModel;
 +	/** The review's baseline of the file, when it has pending changes. */
 +	let reviewBaseline: string | undefined;
 +
 +	setup(async function () {
 +		events = [];
++		didWrites = [];
++		onWillWrite = undefined;
 +		reviewBaseline = undefined;
 +		instantiationService = workbenchInstantiationService(undefined, disposables);
 +		instantiationService.stub(IAgentReviewService, {
@@ -2985,6 +3114,10 @@ index 00000000..b69bad53
 +
 +		disposables.add(CommandsRegistry.registerCommand('agentReview.ext.onWillWrite', (_accessor, event: IAgentReviewWillWriteEvent) => {
 +			events.push({ event, text: model.textEditorModel.getValue() });
++			return onWillWrite?.();
++		}));
++		disposables.add(CommandsRegistry.registerCommand('agentReview.ext.onDidWrite', (_accessor, event: IAgentReviewDidWriteEvent) => {
++			didWrites.push(event);
 +		}));
 +
 +		model = disposables.add(instantiationService.createInstance(TextFileEditorModel, toResource.call(this, '/path/settings.ini'), 'utf8', undefined) as IResolvedTextFileEditorModel);
@@ -2992,7 +3125,13 @@ index 00000000..b69bad53
 +		model.textEditorModel.setValue('alpha=1\nbeta = 2\n');
 +		await model.save({ reason: SaveReason.EXPLICIT });
 +		events.length = 0;
++		didWrites.length = 0;
 +	});
++
++	/** A keystroke at the end of the buffer, as the user typing on. */
++	function type(text: string): void {
++		model.textEditorModel.applyEdits([EditOperation.insert(model.textEditorModel.getFullModelRange().getEndPosition(), text)]);
++	}
 +
 +	teardown(() => disposables.clear());
 +
@@ -3051,7 +3190,54 @@ index 00000000..b69bad53
 +		model.textEditorModel.setValue('alpha=1\n');
 +		await model.save({ reason: SaveReason.EXPLICIT, skipSaveParticipants: true });
 +		assert.deepStrictEqual(events, []);
++		assert.deepStrictEqual(didWrites, []);
 +		assert.strictEqual(model.textEditorModel.getValue(), 'alpha=1\n');
++	});
++
++	test('after the write, the extension hears that it happened; nothing more when the write is what was reported', async () => {
++		type('gamma = 3\n');
++		await model.save({ reason: SaveReason.EXPLICIT });
++		assert.strictEqual(events.length, 1);
++		assert.deepStrictEqual(didWrites.map(e => [e.uri.toString(), e.text]), [[model.resource.toString(), undefined]]);
++	});
++
++	test('typing while the extension is told: the save is reported again, so the report is what is written', async () => {
++		type('gamma = 3\n');
++		let typed = false;
++		onWillWrite = () => {
++			if (!typed) {
++				typed = true;
++				type('delta'); // a keystroke while the report is delivered
++			}
++		};
++		await model.save({ reason: SaveReason.EXPLICIT });
++		assert.strictEqual(events.length, 2);
++		assert.strictEqual(events[0].event.again, undefined);
++		assert.strictEqual(events[1].event.again, true, 'a repeat of the same save');
++		assert.strictEqual(events[1].text, 'alpha = 1\nbeta = 2\ngamma = 3\ndelta', 'with the typing');
++		assert.strictEqual(events[1].event.version, model.textEditorModel.getVersionId());
++		assert.strictEqual(model.isDirty(), false, 'the written version is the one reported last');
++		assert.deepStrictEqual(didWrites.map(e => e.text), [undefined], 'the last report was exact');
++	});
++
++	test('typing through every repeat: the extension gets the written text after the write', async () => {
++		type('gamma = 3\n');
++		onWillWrite = () => type('x');
++		await model.save({ reason: SaveReason.EXPLICIT });
++		assert.strictEqual(events.length, 4, 'bounded');
++		assert.strictEqual(model.isDirty(), false);
++		assert.strictEqual(model.textEditorModel.getValue(), 'alpha = 1\nbeta = 2\ngamma = 3\nxxxx');
++		assert.deepStrictEqual(didWrites.map(e => e.text), ['alpha = 1\nbeta = 2\ngamma = 3\nxxxx'], 'what was written, not the last report');
++	});
++
++	test('a report that times out: the extension gets the written text after the write, with the review\'s baseline', async function () {
++		this.timeout(10_000);
++		reviewBaseline = 'alpha = 1\nbeta = 2\n';
++		type('gamma = 3\n');
++		onWillWrite = () => new Promise<void>(() => { }); // the extension host is busy
++		await model.save({ reason: SaveReason.EXPLICIT });
++		assert.strictEqual(events.length, 1);
++		assert.deepStrictEqual(didWrites.map(e => [e.text, e.baseline]), [['alpha = 1\nbeta = 2\ngamma = 3\n', 'alpha = 1\nbeta = 2\n']]);
 +	});
 +});
 diff --git a/src/vs/workbench/workbench.common.main.ts b/src/vs/workbench/workbench.common.main.ts

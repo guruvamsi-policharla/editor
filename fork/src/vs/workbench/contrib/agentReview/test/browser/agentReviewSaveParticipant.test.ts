@@ -27,7 +27,7 @@ import { TextFileEditorModelManager } from '../../../../services/textfile/common
 import { IResolvedTextFileEditorModel, ITextFileSaveParticipant } from '../../../../services/textfile/common/textfiles.js';
 import { TestServiceAccessor, workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
 import { SaveParticipantsContribution } from '../../../codeEditor/browser/saveParticipants.js';
-import { AgentReviewSaveParticipants, IAgentReviewWillWriteEvent } from '../../browser/agentReviewSaveParticipant.js';
+import { AgentReviewSaveParticipants, IAgentReviewDidWriteEvent, IAgentReviewWillWriteEvent } from '../../browser/agentReviewSaveParticipant.js';
 import { IAgentReviewService } from '../../browser/agentReviewService.js';
 import { AgentReviewEntry } from '../../browser/agentReviewEntry.js';
 
@@ -37,12 +37,17 @@ suite('AgentReview: save attribution with format on save', () => {
 	let instantiationService: TestInstantiationService;
 	let accessor: TestServiceAccessor;
 	let events: { event: IAgentReviewWillWriteEvent; text: string }[];
+	let didWrites: IAgentReviewDidWriteEvent[];
+	/** Runs inside the extension's onWillWrite handler (e.g. the user typing while it is delivered). */
+	let onWillWrite: (() => Promise<void> | void) | undefined;
 	let model: IResolvedTextFileEditorModel;
 	/** The review's baseline of the file, when it has pending changes. */
 	let reviewBaseline: string | undefined;
 
 	setup(async function () {
 		events = [];
+		didWrites = [];
+		onWillWrite = undefined;
 		reviewBaseline = undefined;
 		instantiationService = workbenchInstantiationService(undefined, disposables);
 		instantiationService.stub(IAgentReviewService, {
@@ -80,6 +85,10 @@ suite('AgentReview: save attribution with format on save', () => {
 
 		disposables.add(CommandsRegistry.registerCommand('agentReview.ext.onWillWrite', (_accessor, event: IAgentReviewWillWriteEvent) => {
 			events.push({ event, text: model.textEditorModel.getValue() });
+			return onWillWrite?.();
+		}));
+		disposables.add(CommandsRegistry.registerCommand('agentReview.ext.onDidWrite', (_accessor, event: IAgentReviewDidWriteEvent) => {
+			didWrites.push(event);
 		}));
 
 		model = disposables.add(instantiationService.createInstance(TextFileEditorModel, toResource.call(this, '/path/settings.ini'), 'utf8', undefined) as IResolvedTextFileEditorModel);
@@ -87,7 +96,13 @@ suite('AgentReview: save attribution with format on save', () => {
 		model.textEditorModel.setValue('alpha=1\nbeta = 2\n');
 		await model.save({ reason: SaveReason.EXPLICIT });
 		events.length = 0;
+		didWrites.length = 0;
 	});
+
+	/** A keystroke at the end of the buffer, as the user typing on. */
+	function type(text: string): void {
+		model.textEditorModel.applyEdits([EditOperation.insert(model.textEditorModel.getFullModelRange().getEndPosition(), text)]);
+	}
 
 	teardown(() => disposables.clear());
 
@@ -146,6 +161,53 @@ suite('AgentReview: save attribution with format on save', () => {
 		model.textEditorModel.setValue('alpha=1\n');
 		await model.save({ reason: SaveReason.EXPLICIT, skipSaveParticipants: true });
 		assert.deepStrictEqual(events, []);
+		assert.deepStrictEqual(didWrites, []);
 		assert.strictEqual(model.textEditorModel.getValue(), 'alpha=1\n');
+	});
+
+	test('after the write, the extension hears that it happened; nothing more when the write is what was reported', async () => {
+		type('gamma = 3\n');
+		await model.save({ reason: SaveReason.EXPLICIT });
+		assert.strictEqual(events.length, 1);
+		assert.deepStrictEqual(didWrites.map(e => [e.uri.toString(), e.text]), [[model.resource.toString(), undefined]]);
+	});
+
+	test('typing while the extension is told: the save is reported again, so the report is what is written', async () => {
+		type('gamma = 3\n');
+		let typed = false;
+		onWillWrite = () => {
+			if (!typed) {
+				typed = true;
+				type('delta'); // a keystroke while the report is delivered
+			}
+		};
+		await model.save({ reason: SaveReason.EXPLICIT });
+		assert.strictEqual(events.length, 2);
+		assert.strictEqual(events[0].event.again, undefined);
+		assert.strictEqual(events[1].event.again, true, 'a repeat of the same save');
+		assert.strictEqual(events[1].text, 'alpha = 1\nbeta = 2\ngamma = 3\ndelta', 'with the typing');
+		assert.strictEqual(events[1].event.version, model.textEditorModel.getVersionId());
+		assert.strictEqual(model.isDirty(), false, 'the written version is the one reported last');
+		assert.deepStrictEqual(didWrites.map(e => e.text), [undefined], 'the last report was exact');
+	});
+
+	test('typing through every repeat: the extension gets the written text after the write', async () => {
+		type('gamma = 3\n');
+		onWillWrite = () => type('x');
+		await model.save({ reason: SaveReason.EXPLICIT });
+		assert.strictEqual(events.length, 4, 'bounded');
+		assert.strictEqual(model.isDirty(), false);
+		assert.strictEqual(model.textEditorModel.getValue(), 'alpha = 1\nbeta = 2\ngamma = 3\nxxxx');
+		assert.deepStrictEqual(didWrites.map(e => e.text), ['alpha = 1\nbeta = 2\ngamma = 3\nxxxx'], 'what was written, not the last report');
+	});
+
+	test('a report that times out: the extension gets the written text after the write, with the review\'s baseline', async function () {
+		this.timeout(10_000);
+		reviewBaseline = 'alpha = 1\nbeta = 2\n';
+		type('gamma = 3\n');
+		onWillWrite = () => new Promise<void>(() => { }); // the extension host is busy
+		await model.save({ reason: SaveReason.EXPLICIT });
+		assert.strictEqual(events.length, 1);
+		assert.deepStrictEqual(didWrites.map(e => [e.text, e.baseline]), [['alpha = 1\nbeta = 2\ngamma = 3\n', 'alpha = 1\nbeta = 2\n']]);
 	});
 });
